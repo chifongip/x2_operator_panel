@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>X2 Operator Panel</title>
+  <link rel="stylesheet" href="/assets/style.css">
+  <script src="/assets/config.js"></script>
+</head>
+<body>
+  <div id="login-view" class="login-view">
+    <form id="login-form" class="login-form">
+      <h1>X2 Operator Panel</h1>
+      <label for="password">Operator password</label>
+      <input id="password" type="password" name="password" autocomplete="current-password" required>
+      <p id="login-error" class="error" role="alert"></p>
+      <button type="submit">Sign in</button>
+    </form>
+  </div>
+
+  <div id="panel-view" class="panel-view" hidden>
+    <header class="topbar">
+      <div>
+        <h1>X2 Operator Panel</h1>
+        <p id="connection-status" class="muted">Connecting</p>
+      </div>
+      <div class="top-actions">
+        <span id="execution-state" class="state-badge">Plan only</span>
+        <button id="unlock-execution" class="secondary" type="button">Unlock physical motion</button>
+        <button id="cancel-active" class="danger" type="button">Cancel active goals</button>
+      </div>
+    </header>
+
+    <p id="panel-error" class="panel-error" role="alert"></p>
+
+    <main class="layout">
+      <section class="map-section" aria-label="Navigation map">
+        <div class="section-heading">
+          <div>
+            <h2>Navigation map</h2>
+            <p id="map-pose-status" class="muted">Waiting for localization</p>
+          </div>
+          <div id="map-coordinates" class="coordinates">--</div>
+        </div>
+        <div class="map-viewport">
+          <canvas id="map-canvas" aria-label="Robot pose on navigation map"></canvas>
+        </div>
+        <div class="map-legend">
+          <span><i class="legend robot"></i>Robot</span>
+          <span><i class="legend box"></i>Box</span>
+          <span><i class="legend destination"></i>Destination</span>
+          <span><i class="legend target"></i>Active goal</span>
+        </div>
+      </section>
+
+      <aside class="status-section" aria-label="Robot status">
+        <section>
+          <h2>System status</h2>
+          <dl class="status-list">
+            <div><dt>Manipulation</dt><dd id="manipulation-state">UNKNOWN</dd></div>
+            <div><dt>Localization</dt><dd id="localization-state">Waiting</dd></div>
+            <div><dt>Box pose</dt><dd id="box-pose-state">Waiting</dd></div>
+            <div><dt>Pick server</dt><dd id="pick-server">Waiting</dd></div>
+            <div><dt>Place server</dt><dd id="place-server">Waiting</dd></div>
+            <div><dt>Nav2 server</dt><dd id="navigate-server">Waiting</dd></div>
+          </dl>
+        </section>
+        <section>
+          <h2>Planning diagnostics</h2>
+          <div id="diagnostics" class="diagnostics">No diagnostics received</div>
+        </section>
+      </aside>
+
+      <section class="commands-section" aria-label="Commands">
+        <section class="command-group">
+          <div class="section-heading compact">
+            <h2>Manipulation</h2>
+            <label class="plan-toggle"><input id="plan-only" type="checkbox" checked>Plan only</label>
+          </div>
+          <div class="command-row">
+            <button data-command="pick" type="button">Pick box</button>
+            <button data-command="pick_place" type="button">Pick and place</button>
+            <button id="reset-manipulation" class="secondary" type="button">Reset manipulation</button>
+          </div>
+          <form id="place-form" class="pose-form">
+            <h3>Place target</h3>
+            <label>Frame<select id="place-frame"><option value="base_link">base_link</option><option value="map">map</option></select></label>
+            <label>X (m)<input id="place-x" type="number" value="0.35" step="0.01" required></label>
+            <label>Y (m)<input id="place-y" type="number" value="0" step="0.01" required></label>
+            <label>Z (m)<input id="place-z" type="number" value="0.29" step="0.01" required></label>
+            <label>Yaw (rad)<input id="place-yaw" type="number" value="0" step="0.01" required></label>
+            <button id="place-button" type="submit">Place box</button>
+          </form>
+          <div class="command-row recovery-row">
+            <button id="recover-empty" class="secondary" type="button">Confirm empty</button>
+            <button id="recover-holding" class="secondary" type="button">Confirm holding</button>
+          </div>
+        </section>
+
+        <section class="command-group">
+          <h2>Navigation destinations</h2>
+          <div id="preset-list" class="preset-list">No configured destinations</div>
+        </section>
+      </section>
+
+      <section class="operations-section" aria-label="Operation history">
+        <h2>Operations</h2>
+        <div class="table-scroll">
+          <table>
+            <thead><tr><th>Action</th><th>State</th><th>Stage</th><th>Progress</th><th>Result</th></tr></thead>
+            <tbody id="operations"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="audit-section" aria-label="Audit history">
+        <h2>Audit</h2>
+        <ol id="audit-log" class="audit-log"></ol>
+      </section>
+    </main>
+  </div>
+  <script src="/assets/app.js" defer></script>
+</body>
+</html>

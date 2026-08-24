@@ -1,0 +1,3 @@
+# Add only surveyed, collision-reviewed map-frame destinations here.
+# The panel rejects arbitrary navigation poses and only sends configured presets.
+presets: []
