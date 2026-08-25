@@ -503,9 +503,10 @@ class OperatorPanelNode(Node):
             goal.plan_only = bool(plan_only)
             return goal
         if kind in {"place", "pick_place"}:
-            pose = self._parse_place_pose(payload.get("place_pose"))
             goal = Place.Goal() if kind == "place" else PickPlace.Goal()
-            goal.place_pose = pose
+            if "place_pose" in payload:
+                goal.place_pose = self._parse_place_pose(payload["place_pose"])
+            # A default-constructed pose tells pick_place_server to use tag9.
             goal.plan_only = bool(plan_only)
             return goal
         if kind == "reset":
@@ -516,16 +517,16 @@ class OperatorPanelNode(Node):
 
     def _parse_place_pose(self, value: object) -> PoseStamped:
         if not isinstance(value, dict):
-            raise PanelCommandError("Place pose is required")
+            raise PanelCommandError("Manual place pose must be an object")
         frame_id = value.get("frame_id")
         if frame_id not in {"base_link", "map"}:
-            raise PanelCommandError("Place frame must be base_link or map")
+            raise PanelCommandError("Manual place frame must be base_link or map")
         return self._pose_from_values(
             frame_id,
-            _finite_number(value.get("x"), "place x"),
-            _finite_number(value.get("y"), "place y"),
-            _finite_number(value.get("z"), "place z"),
-            _finite_number(value.get("yaw"), "place yaw"),
+            _finite_number(value.get("x"), "manual place x"),
+            _finite_number(value.get("y"), "manual place y"),
+            _finite_number(value.get("z"), "manual place z"),
+            _finite_number(value.get("yaw"), "manual place yaw"),
         )
 
     @staticmethod

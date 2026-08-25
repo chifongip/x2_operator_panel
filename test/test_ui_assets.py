@@ -25,14 +25,23 @@ class UiAssetsTest(unittest.TestCase):
         self.assertIn("websocketUrl || fallbackUrl", script)
         self.assertIn("event.code === 1008", script)
 
-    def test_place_pose_validation_runs_inside_error_boundary(self):
+    def test_place_pose_defaults_to_tag_placement_with_manual_override(self):
         package_root = Path(__file__).parents[1]
         script = (package_root / "x2_operator_panel" / "static" / "app.js").read_text(
             encoding="utf-8"
         )
+        page = (package_root / "x2_operator_panel" / "static" / "index.html").read_text(
+            encoding="utf-8"
+        )
 
-        self.assertIn('extra = { ...extra, place_pose: placePose() };', script)
-        self.assertNotIn('submitManipulation("place", { place_pose: placePose() })', script)
+        self.assertIn("function manualPlacePoseEnabled", script)
+        self.assertIn("function placePose", script)
+        self.assertIn("manualPlacePoseEnabled() && !extra.place_pose", script)
+        self.assertIn("syncManualPlacePoseFields", script)
+        self.assertIn('id="place-button"', page)
+        self.assertIn('id="place-form"', page)
+        self.assertIn('id="use-manual-place-pose"', page)
+        self.assertIn('id="manual-place-fields" class="place-pose-fields" disabled', page)
 
     def test_available_pose_always_draws_a_robot_marker(self):
         package_root = Path(__file__).parents[1]

@@ -130,6 +130,35 @@ class RosGatewayTest(unittest.TestCase):
         self.assertFalse(box_pose["fresh"])
         self.assertIn("/box_pose has not updated", box_pose["detail"])
 
+    def test_place_commands_leave_place_pose_empty(self):
+        node = object.__new__(OperatorPanelNode)
+
+        for kind in ("place", "pick_place"):
+            goal = node._build_manipulation_goal(kind, {}, True)
+
+            self.assertTrue(goal.plan_only)
+            self.assertEqual(goal.place_pose.header.frame_id, "")
+
+    def test_manual_place_pose_is_added_to_the_goal(self):
+        node = object.__new__(OperatorPanelNode)
+        manual_pose = {
+            "frame_id": "base_link",
+            "x": 0.35,
+            "y": 0.0,
+            "z": 0.29,
+            "yaw": 0.0,
+        }
+
+        for kind in ("place", "pick_place"):
+            goal = node._build_manipulation_goal(kind, {"place_pose": manual_pose}, True)
+
+            self.assertTrue(goal.plan_only)
+            self.assertEqual(goal.place_pose.header.frame_id, "base_link")
+            self.assertAlmostEqual(goal.place_pose.pose.position.x, 0.35)
+            self.assertAlmostEqual(goal.place_pose.pose.position.y, 0.0)
+            self.assertAlmostEqual(goal.place_pose.pose.position.z, 0.29)
+            self.assertAlmostEqual(goal.place_pose.pose.orientation.w, 1.0)
+
     def test_timed_out_queued_command_is_not_executed_later(self):
         node = object.__new__(OperatorPanelNode)
         node._commands = Queue()

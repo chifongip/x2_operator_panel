@@ -32,10 +32,23 @@
     byId("login-view").hidden = false;
     setLoginError(message);
   }
+  function manualPlacePoseEnabled() { return byId("use-manual-place-pose").checked; }
   function finiteField(id) {
     const value = Number(byId(id).value);
     if (!Number.isFinite(value)) throw new Error(`Enter a valid value for ${id.replace("place-", "")}`);
     return value;
+  }
+  function placePose() {
+    return {
+      frame_id: byId("place-frame").value,
+      x: finiteField("place-x"),
+      y: finiteField("place-y"),
+      z: finiteField("place-z"),
+      yaw: finiteField("place-yaw"),
+    };
+  }
+  function syncManualPlacePoseFields() {
+    byId("manual-place-fields").disabled = !manualPlacePoseEnabled();
   }
   function escapeHtml(value) {
     return String(value ?? "").replace(/[&<>'"]/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" }[character]));
@@ -243,10 +256,9 @@
     socket.onerror = () => { socket.close(); };
   }
 
-  function placePose() { return { frame_id: byId("place-frame").value, x: finiteField("place-x"), y: finiteField("place-y"), z: finiteField("place-z"), yaw: finiteField("place-yaw") }; }
   async function submitManipulation(kind, extra = {}) {
     try {
-      if (["place", "pick_place"].includes(kind) && !extra.place_pose) {
+      if (["place", "pick_place"].includes(kind) && manualPlacePoseEnabled() && !extra.place_pose) {
         extra = { ...extra, place_pose: placePose() };
       }
       const planOnly = kind === "reset" ? null : byId("plan-only").checked;
@@ -278,6 +290,8 @@
 
   byId("login-form").addEventListener("submit", login);
   document.querySelectorAll("[data-command]").forEach((button) => button.addEventListener("click", () => submitManipulation(button.dataset.command)));
+  byId("use-manual-place-pose").addEventListener("change", syncManualPlacePoseFields);
+  syncManualPlacePoseFields();
   byId("place-form").addEventListener("submit", (event) => { event.preventDefault(); submitManipulation("place"); });
   byId("reset-manipulation").addEventListener("click", () => submitManipulation("reset", { confirm_empty: true }));
   byId("recover-empty").addEventListener("click", () => recoverState("empty"));

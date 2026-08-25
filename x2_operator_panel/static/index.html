@@ -83,12 +83,17 @@
             <button id="reset-manipulation" class="secondary" type="button">Reset manipulation</button>
           </div>
           <form id="place-form" class="pose-form">
-            <h3>Place target</h3>
-            <label>Frame<select id="place-frame"><option value="base_link">base_link</option><option value="map">map</option></select></label>
-            <label>X (m)<input id="place-x" type="number" value="0.35" step="0.01" required></label>
-            <label>Y (m)<input id="place-y" type="number" value="0" step="0.01" required></label>
-            <label>Z (m)<input id="place-z" type="number" value="0.29" step="0.01" required></label>
-            <label>Yaw (rad)<input id="place-yaw" type="number" value="0" step="0.01" required></label>
+            <div class="place-target-heading">
+              <h3>Place target</h3>
+              <label class="plan-toggle"><input id="use-manual-place-pose" type="checkbox">Use manual target</label>
+            </div>
+            <fieldset id="manual-place-fields" class="place-pose-fields" disabled>
+              <label>Frame<select id="place-frame"><option value="base_link">base_link</option><option value="map">map</option></select></label>
+              <label>X (m)<input id="place-x" type="number" value="0.35" step="0.01" required></label>
+              <label>Y (m)<input id="place-y" type="number" value="0" step="0.01" required></label>
+              <label>Z (m)<input id="place-z" type="number" value="0.29" step="0.01" required></label>
+              <label>Yaw (rad)<input id="place-yaw" type="number" value="0" step="0.01" required></label>
+            </fieldset>
             <button id="place-button" type="submit">Place box</button>
           </form>
           <div class="command-row recovery-row">
