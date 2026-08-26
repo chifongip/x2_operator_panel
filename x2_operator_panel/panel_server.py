@@ -13,6 +13,7 @@ import json
 import os
 import signal
 import socket
+import ssl
 import threading
 import time
 from typing import Any
@@ -31,6 +32,11 @@ from .ros_gateway import OperatorPanelNode, PanelCommandError
 
 
 _MAX_REQUEST_BYTES = 64 * 1024
+_RFC1918_NETWORKS = (
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+)
 
 
 class RequestReadTimeout(TimeoutError):
@@ -46,6 +52,64 @@ def _is_loopback_host(value: str | None) -> bool:
         return ipaddress.ip_address(value).is_loopback
     except ValueError:
         return False
+
+
+def _is_rfc1918_ipv4_host(value: str | None) -> bool:
+    if not value:
+        return False
+    try:
+        address = ipaddress.ip_address(value)
+    except ValueError:
+        return False
+    return address.version == 4 and any(address in network for network in _RFC1918_NETWORKS)
+
+
+def _validate_bind_address(bind_address: str, allow_lan_access: bool) -> None:
+    if _is_loopback_host(bind_address):
+        return
+    if not allow_lan_access:
+        raise ValueError(
+            "bind_address must be loopback unless allow_lan_access is true"
+        )
+    if not _is_rfc1918_ipv4_host(bind_address):
+        raise ValueError(
+            "LAN bind_address must be the robot's RFC1918 IPv4 address; wildcard, "
+            "public, and hostname bindings are not allowed"
+        )
+
+
+def _parse_lan_allowed_subnet(
+    value: str, bind_address: str
+) -> ipaddress.IPv4Network:
+    if not value.strip():
+        raise ValueError("lan_allowed_subnet is required when allow_lan_access is true")
+    try:
+        network = ipaddress.ip_network(value, strict=False)
+    except ValueError as error:
+        raise ValueError("lan_allowed_subnet must be a valid IPv4 CIDR") from error
+    if not isinstance(network, ipaddress.IPv4Network) or not any(
+        network.subnet_of(private_network) for private_network in _RFC1918_NETWORKS
+    ):
+        raise ValueError("lan_allowed_subnet must be contained in an RFC1918 IPv4 range")
+    if ipaddress.IPv4Address(bind_address) not in network:
+        raise ValueError("lan_allowed_subnet must contain bind_address")
+    return network
+
+
+def _build_lan_tls_context(
+    cert_file: str, key_file: str, allow_lan_access: bool
+) -> ssl.SSLContext | None:
+    if not allow_lan_access:
+        return None
+    if not cert_file or not key_file:
+        raise ValueError("tls_cert_file and tls_key_file are required for LAN access")
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    try:
+        context.load_cert_chain(certfile=cert_file, keyfile=key_file)
+    except (OSError, ssl.SSLError) as error:
+        raise ValueError(f"Cannot load LAN TLS certificate or key: {error}") from error
+    return context
 
 
 class BoundedThreadingHTTPServer(ThreadingHTTPServer):
@@ -165,6 +229,7 @@ class WebsocketHub:
             self._handle_client,
             self._application.bind_address,
             self._application.websocket_port,
+            ssl=self._application.tls_context,
             compression="deflate",
             max_size=64 * 1024,
             max_queue=1,
@@ -174,6 +239,11 @@ class WebsocketHub:
 
     async def _handle_client(self, connection: Any) -> None:
         headers = connection.request.headers
+        remote_address = connection.remote_address
+        source_address = remote_address[0] if remote_address else None
+        if not self._application.source_address_is_allowed(source_address):
+            await connection.close(code=1008, reason="Panel source address is not allowed")
+            return
         token = self._application.authenticated_session_token(headers)
         if token is None or not self._application.websocket_origin_is_allowed(headers):
             await connection.close(code=1008, reason="Unauthorized panel session")
@@ -249,13 +319,18 @@ class PanelApplication:
     def __init__(self, node: OperatorPanelNode) -> None:
         self.node = node
         self.bind_address = node.bind_address
-        if not _is_loopback_host(self.bind_address):
-            raise ValueError(
-                "bind_address must be loopback; expose the panel through an "
-                "authenticated HTTPS reverse proxy or SSH tunnel"
-            )
+        self.allow_lan_access = node.allow_lan_access
+        _validate_bind_address(self.bind_address, self.allow_lan_access)
         self.http_port = node.http_port
         self.websocket_port = node.websocket_port
+        self.lan_allowed_subnet = (
+            _parse_lan_allowed_subnet(node.lan_allowed_subnet, self.bind_address)
+            if self.allow_lan_access
+            else None
+        )
+        self.tls_context = _build_lan_tls_context(
+            node.tls_cert_file, node.tls_key_file, self.allow_lan_access
+        )
         self.websocket_client_limit = node.websocket_client_limit
         self.websocket_send_timeout_sec = node.websocket_send_timeout_sec
         if (
@@ -286,6 +361,8 @@ class PanelApplication:
             node.allowed_origin
         )
         self.websocket_url = node.websocket_url.strip()
+        if self.allow_lan_access and self.websocket_url:
+            raise ValueError("websocket_url is not supported with direct LAN access")
         if self.websocket_url:
             parsed_websocket = urlsplit(self.websocket_url)
             expected_scheme = "wss" if self.secure_cookies else "ws"
@@ -303,6 +380,10 @@ class PanelApplication:
         self.http_server = BoundedThreadingHTTPServer(
             (self.bind_address, self.http_port), handler, self.node.http_worker_limit
         )
+        if self.tls_context is not None:
+            self.http_server.socket = self.tls_context.wrap_socket(
+                self.http_server.socket, server_side=True
+            )
         try:
             self.websocket_hub.start()
         except Exception:
@@ -316,7 +397,9 @@ class PanelApplication:
         )
         self.http_thread.start()
         self.node.get_logger().info(
-            f"Operator panel listening at http://{self.bind_address}:{self.http_port}"
+            "Operator panel listening at "
+            f"{'https' if self.tls_context is not None else 'http'}://"
+            f"{self.bind_address}:{self.http_port}"
         )
 
     def stop(self) -> None:
@@ -368,6 +451,14 @@ class PanelApplication:
             return False
         return origin in self._allowed_origins
 
+    def source_address_is_allowed(self, source_address: str | None) -> bool:
+        if self.lan_allowed_subnet is None:
+            return True
+        try:
+            return ipaddress.IPv4Address(source_address) in self.lan_allowed_subnet
+        except (ipaddress.AddressValueError, TypeError):
+            return False
+
     def unsafe_request_has_same_origin(self, headers: Any) -> bool:
         origin = headers.get("Origin")
         host = headers.get("Host")
@@ -380,13 +471,18 @@ class PanelApplication:
         return origin in self._allowed_origins and parsed.netloc == host
 
     def _build_allowed_origins(self, configured: str) -> tuple[set[str], bool]:
+        lan_origin = f"https://{self.bind_address}:{self.http_port}"
         origins = (
             {origin.strip() for origin in configured.split(",") if origin.strip()}
             if configured.strip()
-            else {
-                f"http://localhost:{self.http_port}",
-                f"http://127.0.0.1:{self.http_port}",
-            }
+            else (
+                {lan_origin}
+                if self.allow_lan_access
+                else {
+                    f"http://localhost:{self.http_port}",
+                    f"http://127.0.0.1:{self.http_port}",
+                }
+            )
         )
         schemes: set[str] = set()
         for origin in origins:
@@ -395,6 +491,10 @@ class PanelApplication:
                 raise ValueError(f"Invalid allowed_origin: {origin}")
             if parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
                 raise ValueError("allowed_origin entries must not contain paths or queries")
+            if self.allow_lan_access and origin != lan_origin:
+                raise ValueError(
+                    "LAN allowed_origin must exactly match the TLS robot bind_address"
+                )
             if parsed.scheme == "http" and not _is_loopback_host(parsed.hostname):
                 raise ValueError("Non-loopback allowed_origin entries must use HTTPS")
             schemes.add(parsed.scheme)
@@ -412,6 +512,9 @@ def _make_request_handler(application: PanelApplication) -> type[BaseHTTPRequest
             self.connection.settimeout(application.node.http_request_timeout_sec)
 
         def do_GET(self) -> None:  # noqa: N802
+            if not application.source_address_is_allowed(str(self.client_address[0])):
+                self._json_error(HTTPStatus.FORBIDDEN, "Panel source address is not allowed")
+                return
             path = urlsplit(self.path).path
             if path == "/":
                 self._serve_index()
@@ -437,6 +540,9 @@ def _make_request_handler(application: PanelApplication) -> type[BaseHTTPRequest
             self._json_error(HTTPStatus.NOT_FOUND, "Not found")
 
         def do_POST(self) -> None:  # noqa: N802
+            if not application.source_address_is_allowed(str(self.client_address[0])):
+                self._json_error(HTTPStatus.FORBIDDEN, "Panel source address is not allowed")
+                return
             path = urlsplit(self.path).path
             if path == "/api/login":
                 allowed, retry_after = application.login_limiter.consume(
@@ -499,6 +605,8 @@ def _make_request_handler(application: PanelApplication) -> type[BaseHTTPRequest
                     response = application.node.request("cancel_active", {})
                 elif path == "/api/recover-state":
                     response = application.node.request("recover_state", payload)
+                elif path == "/api/initial-pose":
+                    response = application.node.request("set_initial_pose", payload)
                 else:
                     self._json_error(HTTPStatus.NOT_FOUND, "Unknown API endpoint")
                     return

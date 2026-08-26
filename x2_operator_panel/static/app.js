@@ -1,5 +1,16 @@
 (() => {
-  const state = { map: null, mapImage: null, presets: [], status: null, poseTrail: [], socket: null, authenticated: false };
+  const state = {
+    map: null,
+    mapImage: null,
+    presets: [],
+    status: null,
+    poseTrail: [],
+    socket: null,
+    authenticated: false,
+    mapMode: "initial_pose",
+    mapSelection: null,
+    mapPointer: null,
+  };
   const byId = (id) => document.getElementById(id);
   const canvas = byId("map-canvas");
   const context = canvas.getContext("2d");
@@ -34,7 +45,9 @@
   }
   function manualPlacePoseEnabled() { return byId("use-manual-place-pose").checked; }
   function finiteField(id) {
-    const value = Number(byId(id).value);
+    const rawValue = byId(id).value.trim();
+    if (!rawValue) throw new Error(`Enter a valid value for ${id.replace("place-", "")}`);
+    const value = Number(rawValue);
     if (!Number.isFinite(value)) throw new Error(`Enter a valid value for ${id.replace("place-", "")}`);
     return value;
   }
@@ -98,6 +111,25 @@
     return { x: mapX / state.map.resolution, y: state.map.height - mapY / state.map.resolution };
   }
 
+  function mapCoordinates(point) {
+    const mapX = point.x * state.map.resolution;
+    const mapY = (state.map.height - point.y) * state.map.resolution;
+    const cosine = Math.cos(state.map.origin.yaw);
+    const sine = Math.sin(state.map.origin.yaw);
+    return {
+      x: state.map.origin.x + cosine * mapX - sine * mapY,
+      y: state.map.origin.y + sine * mapX + cosine * mapY,
+    };
+  }
+
+  function canvasPoint(event) {
+    const rectangle = canvas.getBoundingClientRect();
+    return {
+      x: (event.clientX - rectangle.left) * canvas.width / rectangle.width,
+      y: (event.clientY - rectangle.top) * canvas.height / rectangle.height,
+    };
+  }
+
   function clampPointToMap(point, margin = 13) {
     return {
       x: Math.min(Math.max(point.x, margin), canvas.width - margin),
@@ -155,11 +187,76 @@
     context.restore();
   }
 
+  function drawTargetMarker(target, color, fill = false) {
+    const point = mapPoint(target.x, target.y);
+    if (!pointIsOnMap(point)) return;
+    context.save();
+    context.translate(point.x, point.y);
+    context.rotate(-(target.yaw - state.map.origin.yaw));
+    context.strokeStyle = color;
+    context.fillStyle = color;
+    context.lineWidth = 2;
+    context.beginPath();
+    context.moveTo(14, 0);
+    context.lineTo(-8, -8);
+    context.lineTo(-4, 0);
+    context.lineTo(-8, 8);
+    context.closePath();
+    if (fill) context.fill(); else context.stroke();
+    context.beginPath();
+    context.arc(0, 0, 5, 0, Math.PI * 2);
+    if (fill) context.fill(); else context.stroke();
+    context.restore();
+  }
+
+  function drawLaserScan(scan) {
+    if (!byId("show-scan").checked || !scan?.available || !Array.isArray(scan.points)) return;
+    context.fillStyle = scan.fresh ? "rgba(57, 138, 184, .68)" : "rgba(182, 115, 22, .42)";
+    scan.points.forEach(([x, y]) => {
+      const point = mapPoint(x, y);
+      if (pointIsOnMap(point)) context.fillRect(point.x - 1, point.y - 1, 2, 2);
+    });
+  }
+
+  function drawGlobalPath(globalPath) {
+    if (!globalPath?.available || !Array.isArray(globalPath.points) || globalPath.points.length < 2) return;
+    context.save();
+    context.strokeStyle = globalPath.fresh ? "rgba(49, 95, 142, .88)" : "rgba(182, 115, 22, .52)";
+    context.lineWidth = 3;
+    context.lineJoin = "round";
+    context.lineCap = "round";
+    let drawing = false;
+    context.beginPath();
+    globalPath.points.forEach(([x, y]) => {
+      const point = mapPoint(x, y);
+      if (!pointIsOnMap(point)) { drawing = false; return; }
+      if (drawing) context.lineTo(point.x, point.y); else context.moveTo(point.x, point.y);
+      drawing = true;
+    });
+    context.stroke();
+    context.restore();
+  }
+
+  function currentMapSelection() {
+    if (!state.mapPointer) return state.mapSelection;
+    const start = mapCoordinates(state.mapPointer.start);
+    const end = mapCoordinates(state.mapPointer.current);
+    const distance = Math.hypot(end.x - start.x, end.y - start.y);
+    return {
+      kind: state.mapMode,
+      x: start.x,
+      y: start.y,
+      yaw: distance > 0.03 ? Math.atan2(end.y - start.y, end.x - start.x) : 0,
+    };
+  }
+
   function drawMap() {
     if (!state.map || !state.mapImage) return;
     context.clearRect(0, 0, canvas.width, canvas.height);
     context.drawImage(state.mapImage, 0, 0);
     const activeNavigation = state.status?.operations?.find((operation) => operation.kind === "navigate" && ["SUBMITTING", "ACTIVE", "CANCEL_REQUESTED"].includes(operation.status));
+    drawGlobalPath(state.status?.navigation?.global_path);
+    drawLaserScan(state.status?.scan);
     state.presets.forEach((preset) => {
       const point = mapPoint(preset.pose.x, preset.pose.y);
       context.fillStyle = activeNavigation?.preset_id === preset.id ? "#b67316" : "#2a8b51";
@@ -173,6 +270,9 @@
     }
     const pose = state.status?.map_pose;
     const boxPose = state.status?.box_map_pose;
+    if (activeNavigation?.target_pose) drawTargetMarker(activeNavigation.target_pose, "#b67316", true);
+    const selection = currentMapSelection();
+    if (selection) drawTargetMarker(selection, selection.kind === "initial_pose" ? "#75529a" : "#2a8b51");
     if (pose?.available) drawRobotMarker(pose);
     if (boxPose?.available) drawBoxMarker(boxPose);
   }
@@ -202,9 +302,29 @@
     byId("manipulation-state").textContent = status.manipulation_state.state;
     byId("localization-state").textContent = pose.fresh ? "Map pose current" : (pose.detail || "Unavailable");
     byId("box-pose-state").textContent = boxPose?.available ? (boxPose.fresh ? "Map position current" : boxPose.detail) : (boxPose?.detail || "Unavailable");
+    const metrics = status.localization_metrics || {};
+    const confidence = metrics.confidence;
+    const delay = metrics.delay_ms;
+    byId("localization-confidence").textContent = confidence?.fresh ? confidence.value.toFixed(3) : (confidence?.detail || "Waiting");
+    byId("localization-delay").textContent = delay?.fresh ? `${delay.value.toFixed(1)} ms` : (delay?.detail || "Waiting");
     byId("pick-server").textContent = status.servers.pick ? "Ready" : "Unavailable";
     byId("place-server").textContent = status.servers.place ? "Ready" : "Unavailable";
     byId("navigate-server").textContent = status.servers.navigate ? "Ready" : "Unavailable";
+    const navigation = status.navigation || {};
+    const lifecycle = Object.values(navigation.lifecycle || {});
+    const activeNodes = lifecycle.filter((node) => node.state_id === 3).length;
+    byId("nav2-lifecycle").textContent = lifecycle.length ? `${activeNodes}/${lifecycle.length} active` : "Waiting";
+    const goalStatus = navigation.goal_status;
+    byId("nav2-goal-state").textContent = goalStatus?.available ? (goalStatus.active ? "Active" : "Idle") : (goalStatus?.detail || "Waiting");
+    byId("nav2-odom-state").textContent = navigation.odom?.fresh ? "Current" : (navigation.odom?.detail || "Waiting");
+    const globalPath = navigation.global_path;
+    byId("global-path-state").textContent = globalPath?.fresh ? (globalPath.point_count ? `${globalPath.point_count} poses` : "No path") : (globalPath?.detail || "Waiting");
+    const scan = status.scan;
+    byId("scan-state").textContent = scan?.fresh ? `${scan.point_count} points` : (scan?.detail || "Waiting");
+    const moveit = status.moveit || {};
+    byId("move-group-state").textContent = moveit.move_group_action_ready ? "Ready" : "Unavailable";
+    byId("planning-scene-state").textContent = moveit.planning_scene_service_ready ? "Ready" : "Unavailable";
+    byId("joint-states-state").textContent = moveit.joint_states?.fresh ? "Current" : (moveit.joint_states?.detail || "Waiting");
     byId("map-pose-status").textContent = pose.fresh ? "Live map-frame position" : (pose.detail || "Localization unavailable");
     byId("map-coordinates").textContent = pose.available ? `x ${pose.x.toFixed(2)}  y ${pose.y.toFixed(2)}  yaw ${pose.yaw.toFixed(2)}` : "--";
     const unlock = status.execution_unlock_remaining_sec || 0;
@@ -214,6 +334,21 @@
     renderDiagnostics(status.diagnostics);
     renderOperations(status.operations);
     renderAudit(status.audit);
+    renderMapCommand();
+  }
+
+  function renderMapCommand() {
+    const selection = currentMapSelection();
+    const status = state.status?.initial_pose;
+    let text = "No map command selected";
+    if (selection) {
+      const label = selection.kind === "initial_pose" ? "Initial pose" : "Navigation goal";
+      text = `${label}: x ${selection.x.toFixed(2)}  y ${selection.y.toFixed(2)}  yaw ${selection.yaw.toFixed(2)}`;
+    } else if (status?.state === "PENDING" || status?.state === "TIMEOUT") {
+      text = status.detail;
+    }
+    byId("map-command-status").textContent = text;
+    byId("submit-map-command").disabled = !selection;
   }
 
   function renderDiagnostics(diagnostics) {
@@ -229,6 +364,92 @@
     const list = byId("preset-list"); list.textContent = "";
     if (!state.presets.length) { list.textContent = "No configured destinations"; return; }
     state.presets.forEach((preset) => { const button = document.createElement("button"); button.type = "button"; button.textContent = preset.label; button.addEventListener("click", () => navigate(preset)); list.appendChild(button); });
+  }
+
+  function setMapMode(mode) {
+    state.mapMode = mode;
+    state.mapSelection = null;
+    byId("select-initial-pose").classList.toggle("active", mode === "initial_pose");
+    byId("select-navigation-goal").classList.toggle("active", mode === "navigate");
+    renderMapCommand();
+    drawMap();
+  }
+
+  function startMapSelection(event) {
+    if (!state.map) return;
+    canvas.focus();
+    const point = canvasPoint(event);
+    state.mapPointer = { id: event.pointerId, start: point, current: point };
+    canvas.setPointerCapture(event.pointerId);
+    event.preventDefault();
+    renderMapCommand();
+    drawMap();
+  }
+
+  function updateMapSelection(event) {
+    if (!state.mapPointer || event.pointerId !== state.mapPointer.id) return;
+    state.mapPointer.current = canvasPoint(event);
+    renderMapCommand();
+    drawMap();
+  }
+
+  function finishMapSelection(event) {
+    if (!state.mapPointer || event.pointerId !== state.mapPointer.id) return;
+    state.mapPointer.current = canvasPoint(event);
+    state.mapSelection = currentMapSelection();
+    state.mapPointer = null;
+    if (canvas.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId);
+    renderMapCommand();
+    drawMap();
+  }
+
+  function clearMapSelection() {
+    state.mapPointer = null;
+    state.mapSelection = null;
+    renderMapCommand();
+    drawMap();
+  }
+
+  function confirmNav2IdleWithoutStatus() {
+    if (state.status?.navigation?.goal_status?.available) return false;
+    return window.confirm("Nav2 action status is unavailable. Verify Nav2 is idle before continuing.");
+  }
+
+  async function submitMapSelection() {
+    const selection = state.mapSelection;
+    if (!selection) return;
+    const label = selection.kind === "initial_pose" ? "Set this initial pose?" : "Navigate to this map goal?";
+    if (!window.confirm(label)) return;
+    try {
+      if (selection.kind === "initial_pose") {
+        const confirmNav2Idle = confirmNav2IdleWithoutStatus();
+        if (!state.status?.navigation?.goal_status?.available && !confirmNav2Idle) return;
+        await api("/api/initial-pose", {
+          method: "POST",
+          body: JSON.stringify({
+            x: selection.x,
+            y: selection.y,
+            yaw: selection.yaw,
+            confirmed: true,
+            confirm_nav2_idle: confirmNav2Idle,
+          }),
+        });
+      } else {
+        const confirmNav2Idle = confirmNav2IdleWithoutStatus();
+        if (!state.status?.navigation?.goal_status?.available && !confirmNav2Idle) return;
+        await api("/api/actions", {
+          method: "POST",
+          body: JSON.stringify({
+            kind: "navigate",
+            goal: { x: selection.x, y: selection.y, yaw: selection.yaw },
+            confirmed: true,
+            confirm_nav2_idle: confirmNav2Idle,
+          }),
+        });
+      }
+      clearMapSelection();
+      setError("");
+    } catch (error) { setError(error.message); }
   }
 
   function connectStatusStream() {
@@ -273,7 +494,9 @@
   }
   async function navigate(preset) {
     if (!window.confirm(`Navigate to ${preset.label}?`)) return;
-    try { await api("/api/actions", { method: "POST", body: JSON.stringify({ kind: "navigate", preset_id: preset.id, confirmed: true }) }); setError(""); } catch (error) { setError(error.message); }
+    const confirmNav2Idle = confirmNav2IdleWithoutStatus();
+    if (!state.status?.navigation?.goal_status?.available && !confirmNav2Idle) return;
+    try { await api("/api/actions", { method: "POST", body: JSON.stringify({ kind: "navigate", preset_id: preset.id, confirmed: true, confirm_nav2_idle: confirmNav2Idle }) }); setError(""); } catch (error) { setError(error.message); }
   }
   async function recoverState(requestedState) {
     if (!window.confirm(`Confirm manipulation state: ${requestedState}?`)) return;
@@ -298,4 +521,13 @@
   byId("recover-holding").addEventListener("click", () => recoverState("holding"));
   byId("unlock-execution").addEventListener("click", unlockExecution);
   byId("cancel-active").addEventListener("click", cancelActive);
+  byId("select-initial-pose").addEventListener("click", () => setMapMode("initial_pose"));
+  byId("select-navigation-goal").addEventListener("click", () => setMapMode("navigate"));
+  byId("show-scan").addEventListener("change", drawMap);
+  byId("clear-map-command").addEventListener("click", clearMapSelection);
+  byId("submit-map-command").addEventListener("click", submitMapSelection);
+  canvas.addEventListener("pointerdown", startMapSelection);
+  canvas.addEventListener("pointermove", updateMapSelection);
+  canvas.addEventListener("pointerup", finishMapSelection);
+  canvas.addEventListener("pointercancel", clearMapSelection);
 })();

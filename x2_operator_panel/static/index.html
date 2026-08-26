@@ -42,14 +42,28 @@
           </div>
           <div id="map-coordinates" class="coordinates">--</div>
         </div>
+        <div class="map-command-bar">
+          <div class="map-mode" role="group" aria-label="Map command mode">
+            <button id="select-initial-pose" class="secondary active" type="button">Initial pose</button>
+            <button id="select-navigation-goal" class="secondary" type="button">Navigation goal</button>
+          </div>
+          <p id="map-command-status" class="muted">No map command selected</p>
+          <div class="map-command-actions">
+            <label class="plan-toggle"><input id="show-scan" type="checkbox" checked>Laser scan</label>
+            <button id="clear-map-command" class="secondary" type="button">Clear</button>
+            <button id="submit-map-command" type="button" disabled>Confirm selection</button>
+          </div>
+        </div>
         <div class="map-viewport">
-          <canvas id="map-canvas" aria-label="Robot pose on navigation map"></canvas>
+          <canvas id="map-canvas" aria-label="Robot pose and map commands" tabindex="0"></canvas>
         </div>
         <div class="map-legend">
           <span><i class="legend robot"></i>Robot</span>
           <span><i class="legend box"></i>Box</span>
           <span><i class="legend destination"></i>Destination</span>
           <span><i class="legend target"></i>Active goal</span>
+          <span><i class="legend path"></i>Global path</span>
+          <span><i class="legend scan"></i>Laser scan</span>
         </div>
       </section>
 
@@ -60,9 +74,29 @@
             <div><dt>Manipulation</dt><dd id="manipulation-state">UNKNOWN</dd></div>
             <div><dt>Localization</dt><dd id="localization-state">Waiting</dd></div>
             <div><dt>Box pose</dt><dd id="box-pose-state">Waiting</dd></div>
+            <div><dt>Localization fit</dt><dd id="localization-confidence">Waiting</dd></div>
+            <div><dt>Localization delay</dt><dd id="localization-delay">Waiting</dd></div>
             <div><dt>Pick server</dt><dd id="pick-server">Waiting</dd></div>
             <div><dt>Place server</dt><dd id="place-server">Waiting</dd></div>
             <div><dt>Nav2 server</dt><dd id="navigate-server">Waiting</dd></div>
+          </dl>
+        </section>
+        <section>
+          <h2>Navigation health</h2>
+          <dl class="status-list">
+            <div><dt>Lifecycle</dt><dd id="nav2-lifecycle">Waiting</dd></div>
+            <div><dt>Goal state</dt><dd id="nav2-goal-state">Waiting</dd></div>
+            <div><dt>Odometry</dt><dd id="nav2-odom-state">Waiting</dd></div>
+            <div><dt>Global path</dt><dd id="global-path-state">Waiting</dd></div>
+            <div><dt>Laser scan</dt><dd id="scan-state">Waiting</dd></div>
+          </dl>
+        </section>
+        <section>
+          <h2>MoveIt health</h2>
+          <dl class="status-list">
+            <div><dt>move_group</dt><dd id="move-group-state">Waiting</dd></div>
+            <div><dt>Planning scene</dt><dd id="planning-scene-state">Waiting</dd></div>
+            <div><dt>Joint states</dt><dd id="joint-states-state">Waiting</dd></div>
           </dl>
         </section>
         <section>

@@ -42,9 +42,18 @@ source install/setup.bash
 ros2 launch x2_operator_panel operator_panel.launch.py
 ```
 
-The default address is `http://127.0.0.1:8080`. The server deliberately refuses
-non-loopback bind addresses because credentials and session cookies must not
-cross a LAN over cleartext HTTP.
+The panel expects the navigation stack to provide `/scan_nav/laser`. Start
+`x2_navigation` with its normal launch before starting the panel. It uses the
+standard `pointcloud_to_laserscan` package to convert the existing downsampled
+`/scan_nav/cloud` stream; it does not replace the self-filtered PointCloud2
+that Nav2 uses for obstacle avoidance. Verify the package is present on the
+robot image with `ros2 pkg prefix pointcloud_to_laserscan`. For a stock Humble
+image that lacks it, install `ros-humble-pointcloud-to-laserscan` and rebuild
+the workspace.
+
+The default address is `http://127.0.0.1:8080`. The server keeps this loopback
+default so credentials and session cookies do not cross a LAN over cleartext
+HTTP.
 
 For temporary remote access, tunnel both local ports over SSH and open
 `http://127.0.0.1:8080` on the operator workstation:
@@ -52,6 +61,83 @@ For temporary remote access, tunnel both local ports over SSH and open
 ```bash
 ssh -L 8080:127.0.0.1:8080 -L 8081:127.0.0.1:8081 robot-host
 ```
+
+The SSH host may be the robot's Wi-Fi address, for example:
+
+```bash
+ssh -L 8080:127.0.0.1:8080 -L 8081:127.0.0.1:8081 ubuntu@192.168.252.14
+```
+
+Then open `http://127.0.0.1:8080` on the personal computer. This works through
+the same Wi-Fi as long as the computer can SSH to the robot and the access
+point does not isolate Wi-Fi clients.
+
+For direct, same-Wi-Fi access without an SSH tunnel, explicitly bind the panel
+to the robot's private IPv4 address with TLS and a Wi-Fi source subnet
+allowlist. The certificate must include the robot IP as an IP subject
+alternative name, and the operator computer must trust its issuing CA:
+
+```bash
+ros2 launch x2_operator_panel operator_panel.launch.py \
+  bind_address:=192.168.252.14 \
+  allow_lan_access:=true \
+  lan_allowed_subnet:=192.168.252.0/24 \
+  tls_cert_file:=/etc/x2_operator_panel/robot-cert.pem \
+  tls_key_file:=/etc/x2_operator_panel/robot-key.pem
+```
+
+To generate a self-signed certificate on the robot, create a protected
+directory and include the robot IP as a certificate subject alternative name:
+
+```bash
+sudo install -d -m 700 /etc/x2_operator_panel
+sudo openssl req -x509 -newkey rsa:3072 -nodes -sha256 -days 365 \
+  -keyout /etc/x2_operator_panel/robot-key.pem \
+  -out /etc/x2_operator_panel/robot-cert.pem \
+  -subj "/CN=192.168.252.14" \
+  -addext "subjectAltName=IP:192.168.252.14" \
+  -addext "keyUsage=critical,digitalSignature,keyEncipherment" \
+  -addext "extendedKeyUsage=serverAuth"
+sudo chmod 600 /etc/x2_operator_panel/robot-key.pem
+sudo chmod 644 /etc/x2_operator_panel/robot-cert.pem
+sudo chown "$(id -un):$(id -gn)" /etc/x2_operator_panel
+sudo chown "$(id -un):$(id -gn)" /etc/x2_operator_panel/robot-key.pem \
+  /etc/x2_operator_panel/robot-cert.pem
+```
+
+Import only `robot-cert.pem` into the personal computer's trusted certificate
+store before opening the panel. From the personal computer, retrieve the public
+certificate and add it to the Ubuntu/Debian system CA bundle:
+
+```bash
+scp ubuntu@192.168.252.14:/etc/x2_operator_panel/robot-cert.pem \
+  ~/Downloads/robot-cert.crt
+sudo install -m 644 ~/Downloads/robot-cert.crt \
+  /usr/local/share/ca-certificates/robot-cert.crt
+sudo update-ca-certificates
+```
+
+Never transfer `robot-key.pem` off the robot. Restart the browser after
+importing (`chrome://restart` in Chrome).
+
+The panel process runs as the account that invokes
+`ros2 launch`, so that account must own the key while the file remains mode
+`0600`. Keep `robot-key.pem` only on the robot. Verify the certificate includes
+the required IP before launching:
+
+```bash
+openssl x509 -in /etc/x2_operator_panel/robot-cert.pem -noout -text | \
+  rg 'Subject:|IP Address'
+```
+
+Open `https://192.168.252.14:8080` from the personal computer. The browser
+also connects securely to `192.168.252.14:8081` for live panel updates. LAN
+mode accepts only the exact RFC1918 IPv4 address supplied as `bind_address`,
+rejects wildcard addresses such as `0.0.0.0`, and rejects HTTP/WebSocket
+clients outside `lan_allowed_subnet`. Configure the robot firewall to allow
+TCP 8080 and 8081 only from the same subnet. LAN mode cannot be combined with
+the reverse-proxy `websocket_url` setting below; leave `allowed_origin` empty
+to use the exact robot TLS origin automatically.
 
 For persistent LAN access, terminate TLS in an authenticated reverse proxy and
 proxy the HTTP and WebSocket ports separately. Keep this node bound to loopback,
@@ -77,6 +163,42 @@ server must still accept the goal. `NavigateToPose` has no plan-only mode, so a
 selected named destination always needs a confirmation before the panel sends
 the real Nav2 goal. Navigation is rejected unless the manipulation state is
 known and the `map -> base_link` transform is current.
+
+The map supports two confirmed commands. Select **Initial pose** or
+**Navigation goal**, then click and drag on the map to set the map-frame
+position and heading. Initial pose publishes `geometry_msgs/msg/PoseWithCovarianceStamped`
+to `/initialpose`, which the installed Open3D localizer subscribes to. When a
+Nav2 action status is available, the panel requires it to be idle. Some idle
+Nav2 deployments do not emit an action-status message; in that case the panel
+requires an additional confirmation that the operator verified Nav2 is idle
+and that the `NavigateToPose` action server is ready. After publishing, it
+holds new navigation requests until a `map -> base_link` transform is stamped
+after the publication and matches the requested pose within 0.5 m and 0.35 rad
+(both configurable launch parameters). A 10-second settle timeout is reported
+and remains a navigation interlock until localization is checked and a new
+initial pose is supplied. Nav2 action status expires after three seconds; the
+operator-idle confirmation is required again until a fresh status arrives. A
+map goal sends one confirmed `NavigateToPose`
+action; named preset buttons remain available for surveyed locations. The same
+additional idle confirmation is required for either kind of navigation goal
+when Nav2 has not emitted an action-status message.
+
+The map's optional laser layer renders at most 360 finite ranges from
+`/scan_nav/laser`, transformed into `map` at the scan timestamp. It is a
+localization-alignment aid only and is hidden from command decisions. The
+layer reports stale data or a missing scan transform rather than drawing it at
+an incorrect pose.
+
+Navigation health shows the five Nav2 lifecycle node states, action status,
+`/odom` freshness, and the newest global path from `/plan`. The map draws that
+map-frame path beneath the robot marker and removes it after three seconds
+without an update. `global_path_topic` must publish `nav_msgs/Path` in the
+`map` frame; other frames are reported but not drawn.
+MoveIt health shows the configured `move_group` action,
+`/get_planning_scene` service, and `/joint_states` freshness. Localization
+fitness and delay come from `/localization_3d_confidence` and
+`/localization_3d_delay_ms`. These are monitoring signals only; the panel does
+not issue MoveIt actions, lifecycle transitions, or velocity commands.
 
 Cancel sends native ROS action cancellation requests for goals created by this
 panel. It is cooperative and is not a hardware emergency stop. Use the

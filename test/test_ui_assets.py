@@ -64,3 +64,33 @@ class UiAssetsTest(unittest.TestCase):
         self.assertIn('id="box-pose-state"', page)
         self.assertIn("function drawBoxMarker", script)
         self.assertIn("if (boxPose?.available) drawBoxMarker(boxPose);", script)
+
+    def test_map_commands_and_scan_overlay_are_available(self):
+        package_root = Path(__file__).parents[1]
+        page = (package_root / "x2_operator_panel" / "static" / "index.html").read_text(
+            encoding="utf-8"
+        )
+        script = (package_root / "x2_operator_panel" / "static" / "app.js").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn('id="select-initial-pose"', page)
+        self.assertIn('id="select-navigation-goal"', page)
+        self.assertIn('id="show-scan"', page)
+        self.assertIn("function submitMapSelection", script)
+        self.assertIn('"/api/initial-pose"', script)
+        self.assertIn("confirm_nav2_idle", script)
+        self.assertIn("function drawLaserScan", script)
+
+    def test_global_path_has_a_map_overlay_and_health_state(self):
+        package_root = Path(__file__).parents[1]
+        page = (package_root / "x2_operator_panel" / "static" / "index.html").read_text(
+            encoding="utf-8"
+        )
+        script = (package_root / "x2_operator_panel" / "static" / "app.js").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn('id="global-path-state"', page)
+        self.assertIn("function drawGlobalPath", script)
+        self.assertIn("navigation?.global_path", script)
