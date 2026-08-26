@@ -425,6 +425,11 @@ class OperatorPanelNode(Node):
             reliability=ReliabilityPolicy.RELIABLE,
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
         )
+        scan_qos = QoSProfile(
+            depth=10,
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            durability=DurabilityPolicy.VOLATILE,
+        )
         self.create_subscription(
             ManipulationState, "/manipulation_state", self._on_manipulation_state, state_qos
         )
@@ -434,7 +439,7 @@ class OperatorPanelNode(Node):
         self.create_subscription(
             Odometry, "/odom", self._on_odom, 10
         )
-        self.create_subscription(LaserScan, self.scan_topic, self._on_scan, 10)
+        self.create_subscription(LaserScan, self.scan_topic, self._on_scan, scan_qos)
         self.create_subscription(NavPath, self.global_path_topic, self._on_global_path, 10)
         self.create_subscription(
             Float32,
