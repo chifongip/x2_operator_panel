@@ -186,6 +186,15 @@ def _pose_as_dict(pose: PoseStamped) -> dict[str, Any]:
     }
 
 
+def _display_telemetry_qos() -> QoSProfile:
+    """Keep only the latest non-safety telemetry sample under load."""
+    return QoSProfile(
+        depth=1,
+        reliability=ReliabilityPolicy.BEST_EFFORT,
+        durability=DurabilityPolicy.VOLATILE,
+    )
+
+
 class OperatorPanelNode(Node):
     """Single ROS owner for every browser-exposed robot interface."""
 
@@ -220,6 +229,12 @@ class OperatorPanelNode(Node):
         )
         self.websocket_send_timeout_sec = float(
             self.declare_parameter("websocket_send_timeout_sec", 1.0).value
+        )
+        self.status_publish_period_sec = float(
+            self.declare_parameter("status_publish_period_sec", 1.0).value
+        )
+        self.websocket_compression = bool(
+            self.declare_parameter("websocket_compression", False).value
         )
         self.login_per_source_limit = int(
             self.declare_parameter("login_per_source_limit", 5).value
@@ -279,6 +294,9 @@ class OperatorPanelNode(Node):
         self.service_timeout_sec = float(
             self.declare_parameter("service_timeout_sec", 5.0).value
         )
+        self.navigation_lifecycle_poll_period_sec = float(
+            self.declare_parameter("navigation_lifecycle_poll_period_sec", 5.0).value
+        )
         self.shutdown_cancel_grace_sec = float(
             self.declare_parameter("shutdown_cancel_grace_sec", 5.0).value
         )
@@ -290,6 +308,8 @@ class OperatorPanelNode(Node):
             "http_request_timeout_sec": self.http_request_timeout_sec,
             "websocket_client_limit": self.websocket_client_limit,
             "websocket_send_timeout_sec": self.websocket_send_timeout_sec,
+            "status_publish_period_sec": self.status_publish_period_sec,
+            "navigation_lifecycle_poll_period_sec": self.navigation_lifecycle_poll_period_sec,
             "login_per_source_limit": self.login_per_source_limit,
             "login_global_limit": self.login_global_limit,
             "login_window_sec": self.login_window_sec,
@@ -327,7 +347,7 @@ class OperatorPanelNode(Node):
             for preset in load_navigation_presets(self.presets_file)
         }
         self._execution_unlocked_until = 0.0
-        self._status_sink: Callable[[dict[str, Any]], None] | None = None
+        self._status_sink: Callable[[], None] | None = None
         self._audit_sink: Callable[[str, str, str], None] | None = None
         self._manipulation_state = {"state": "UNKNOWN", "detail": "No state received"}
         self._box_pose: dict[str, Any] | None = None
@@ -425,32 +445,35 @@ class OperatorPanelNode(Node):
             reliability=ReliabilityPolicy.RELIABLE,
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
         )
-        scan_qos = QoSProfile(
-            depth=10,
-            reliability=ReliabilityPolicy.BEST_EFFORT,
-            durability=DurabilityPolicy.VOLATILE,
-        )
+        telemetry_qos = _display_telemetry_qos()
         self.create_subscription(
             ManipulationState, "/manipulation_state", self._on_manipulation_state, state_qos
         )
         self.create_subscription(
-            PoseWithCovarianceStamped, "/box_pose", self._on_box_pose, 10
+            PoseWithCovarianceStamped, "/box_pose", self._on_box_pose, telemetry_qos
         )
         self.create_subscription(
-            Odometry, "/odom", self._on_odom, 10
+            Odometry, "/odom", self._on_odom, telemetry_qos
         )
-        self.create_subscription(LaserScan, self.scan_topic, self._on_scan, scan_qos)
-        self.create_subscription(NavPath, self.global_path_topic, self._on_global_path, 10)
+        self.create_subscription(LaserScan, self.scan_topic, self._on_scan, telemetry_qos)
+        self.create_subscription(
+            NavPath, self.global_path_topic, self._on_global_path, telemetry_qos
+        )
         self.create_subscription(
             Float32,
             self.localization_confidence_topic,
             self._on_localization_confidence,
-            10,
+            telemetry_qos,
         )
         self.create_subscription(
-            Float32, self.localization_delay_topic, self._on_localization_delay, 10
+            Float32,
+            self.localization_delay_topic,
+            self._on_localization_delay,
+            telemetry_qos,
         )
-        self.create_subscription(JointState, "/joint_states", self._on_joint_states, 10)
+        self.create_subscription(
+            JointState, "/joint_states", self._on_joint_states, telemetry_qos
+        )
         self.create_subscription(
             GoalStatusArray,
             "/navigate_to_pose/_action/status",
@@ -458,15 +481,20 @@ class OperatorPanelNode(Node):
             state_qos,
         )
         self.create_subscription(
-            DiagnosticArray, "/pick_place/planning_diagnostics", self._on_diagnostics, 10
+            DiagnosticArray,
+            "/pick_place/planning_diagnostics",
+            self._on_diagnostics,
+            telemetry_qos,
         )
         self.create_timer(0.05, self._drain_commands)
         self.create_timer(0.20, self._poll_map_pose)
         self.create_timer(0.20, self._expire_pending_operations)
-        self.create_timer(1.0, self._poll_navigation_lifecycle)
-        self.create_timer(0.25, self._publish_status)
+        self.create_timer(
+            self.navigation_lifecycle_poll_period_sec, self._poll_navigation_lifecycle
+        )
+        self.create_timer(self.status_publish_period_sec, self._publish_status)
 
-    def set_status_sink(self, sink: Callable[[dict[str, Any]], None]) -> None:
+    def set_status_sink(self, sink: Callable[[], None]) -> None:
         self._status_sink = sink
 
     def set_audit_sink(self, sink: Callable[[str, str, str], None]) -> None:
@@ -1558,7 +1586,7 @@ class OperatorPanelNode(Node):
 
     def _publish_status(self) -> None:
         if self._status_sink is not None:
-            self._status_sink(self.snapshot())
+            self._status_sink()
 
     def _audit(self, action: str, outcome: str, detail: str) -> None:
         if self._audit_sink is not None:

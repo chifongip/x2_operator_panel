@@ -24,6 +24,18 @@ class UiAssetsTest(unittest.TestCase):
         self.assertNotIn("__WS_PORT__", page)
         self.assertIn("websocketUrl || fallbackUrl", script)
         self.assertIn("event.code === 1008", script)
+        self.assertIn("function mergeStatus", script)
+        self.assertIn('message.type === "status_delta"', script)
+
+    def test_performance_launch_parameters_are_exposed(self):
+        package_root = Path(__file__).parents[1]
+        launch_file = (package_root / "launch" / "operator_panel.launch.py").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn('"navigation_lifecycle_poll_period_sec"', launch_file)
+        self.assertIn('"websocket_compression"', launch_file)
+        self.assertIn('default_value="false"', launch_file)
 
     def test_place_pose_defaults_to_tag_placement_with_manual_override(self):
         package_root = Path(__file__).parents[1]

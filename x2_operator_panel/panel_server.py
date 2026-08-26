@@ -39,6 +39,39 @@ _RFC1918_NETWORKS = (
 )
 
 
+def _status_delta(
+    current: dict[str, Any], previous: dict[str, Any]
+) -> dict[str, Any]:
+    """Return changed status fields and paths removed since the last update."""
+    changed: dict[str, Any] = {}
+    removed: list[list[str]] = []
+
+    def collect(
+        current_value: dict[str, Any],
+        previous_value: dict[str, Any],
+        path: tuple[str, ...],
+        output: dict[str, Any],
+    ) -> None:
+        for key in previous_value:
+            if key not in current_value:
+                removed.append(list(path + (key,)))
+        for key, value in current_value.items():
+            if key not in previous_value:
+                output[key] = value
+                continue
+            prior_value = previous_value[key]
+            if isinstance(value, dict) and isinstance(prior_value, dict):
+                nested: dict[str, Any] = {}
+                collect(value, prior_value, path + (key,), nested)
+                if nested:
+                    output[key] = nested
+            elif value is not prior_value and value != prior_value:
+                output[key] = value
+
+    collect(current, previous, (), changed)
+    return {"set": changed, "remove": removed}
+
+
 class RequestReadTimeout(TimeoutError):
     """The client did not provide its body within the configured limit."""
 
@@ -176,6 +209,7 @@ class WebsocketHub:
         self._broadcast_lock = threading.Lock()
         self._latest_payload: str | None = None
         self._broadcast_scheduled = False
+        self._previous_snapshot: dict[str, Any] | None = None
 
     def start(self) -> None:
         self._thread = threading.Thread(
@@ -194,11 +228,36 @@ class WebsocketHub:
         if self._thread is not None:
             self._thread.join(timeout=5.0)
 
+    def publish_status(self) -> None:
+        """Build a snapshot only when an authenticated client needs one."""
+        with self._broadcast_lock:
+            if self._loop is None or not self._clients:
+                return
+        self.broadcast(self._application.status())
+
     def broadcast(self, snapshot: dict[str, Any]) -> None:
         if self._loop is None:
             return
-        payload = json.dumps({"type": "status", "payload": snapshot}, separators=(",", ":"))
         with self._broadcast_lock:
+            if not self._clients:
+                return
+            if self._previous_snapshot is None or (
+                self._broadcast_scheduled and self._latest_payload is not None
+            ):
+                # Replacing an unsent delta with another delta could omit an
+                # intermediate change. A full snapshot keeps coalescing safe.
+                message = {"type": "status", "payload": snapshot}
+            else:
+                delta = _status_delta(snapshot, self._previous_snapshot)
+                if not delta["set"] and not delta["remove"]:
+                    self._previous_snapshot = snapshot
+                    return
+                message = {"type": "status_delta", "payload": delta}
+            self._previous_snapshot = snapshot
+        payload = json.dumps(message, separators=(",", ":"))
+        with self._broadcast_lock:
+            if not self._clients:
+                return
             self._latest_payload = payload
             if self._broadcast_scheduled:
                 return
@@ -230,7 +289,7 @@ class WebsocketHub:
             self._application.bind_address,
             self._application.websocket_port,
             ssl=self._application.tls_context,
-            compression="deflate",
+            compression="deflate" if self._application.websocket_compression else None,
             max_size=64 * 1024,
             max_queue=1,
         ):
@@ -248,15 +307,21 @@ class WebsocketHub:
         if token is None or not self._application.websocket_origin_is_allowed(headers):
             await connection.close(code=1008, reason="Unauthorized panel session")
             return
-        if len(self._clients) >= self._application.websocket_client_limit:
+        with self._broadcast_lock:
+            at_capacity = len(self._clients) >= self._application.websocket_client_limit
+            if not at_capacity:
+                self._clients[connection] = token
+        if at_capacity:
             await connection.close(code=1013, reason="Panel WebSocket limit reached")
             return
-        self._clients[connection] = token
+        initial_snapshot = self._application.status()
+        with self._broadcast_lock:
+            self._previous_snapshot = initial_snapshot
         try:
             await asyncio.wait_for(
                 connection.send(
                     json.dumps(
-                        {"type": "status", "payload": self._application.status()},
+                        {"type": "status", "payload": initial_snapshot},
                         separators=(",", ":"),
                     )
                 ),
@@ -269,7 +334,10 @@ class WebsocketHub:
         except (ConnectionClosed, asyncio.TimeoutError):
             pass
         finally:
-            self._clients.pop(connection, None)
+            with self._broadcast_lock:
+                self._clients.pop(connection, None)
+                if not self._clients:
+                    self._previous_snapshot = None
 
     async def _drain_broadcasts(self) -> None:
         while True:
@@ -282,7 +350,9 @@ class WebsocketHub:
             await self._broadcast(payload)
 
     async def _broadcast(self, payload: str) -> None:
-        if not self._clients:
+        with self._broadcast_lock:
+            clients = tuple(self._clients.items())
+        if not clients:
             return
 
         async def send_one(connection: Any, token: str) -> bool:
@@ -305,14 +375,16 @@ class WebsocketHub:
                     pass
                 return False
 
-        clients = tuple(self._clients.items())
         results = await asyncio.gather(
             *(send_one(connection, token) for connection, token in clients),
             return_exceptions=True,
         )
-        for (connection, _), result in zip(clients, results):
-            if result is not True:
-                self._clients.pop(connection, None)
+        with self._broadcast_lock:
+            for (connection, _), result in zip(clients, results):
+                if result is not True:
+                    self._clients.pop(connection, None)
+            if not self._clients:
+                self._previous_snapshot = None
 
 
 class PanelApplication:
@@ -333,6 +405,7 @@ class PanelApplication:
         )
         self.websocket_client_limit = node.websocket_client_limit
         self.websocket_send_timeout_sec = node.websocket_send_timeout_sec
+        self.websocket_compression = node.websocket_compression
         if (
             self.websocket_client_limit < 1
             or self.websocket_send_timeout_sec <= 0.0
@@ -368,7 +441,7 @@ class PanelApplication:
             expected_scheme = "wss" if self.secure_cookies else "ws"
             if parsed_websocket.scheme != expected_scheme or not parsed_websocket.netloc:
                 raise ValueError(f"websocket_url must use {expected_scheme}:// with a host")
-        self.node.set_status_sink(self.websocket_hub.broadcast)
+        self.node.set_status_sink(self.websocket_hub.publish_status)
         self.node.set_audit_sink(self.audit.add)
 
     def start(self) -> None:

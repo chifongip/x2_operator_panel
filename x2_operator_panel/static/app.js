@@ -32,6 +32,27 @@
 
   function setError(message) { byId("panel-error").textContent = message || ""; }
   function setLoginError(message) { byId("login-error").textContent = message || ""; }
+  function mergeStatus(current, delta) {
+    const mergeObject = (target, changes) => {
+      const merged = target && typeof target === "object" && !Array.isArray(target) ? { ...target } : {};
+      Object.entries(changes || {}).forEach(([key, value]) => {
+        merged[key] = value && typeof value === "object" && !Array.isArray(value)
+          ? mergeObject(merged[key], value)
+          : value;
+      });
+      return merged;
+    };
+    const merged = mergeObject(current, delta?.set);
+    (delta?.remove || []).forEach((path) => {
+      let parent = merged;
+      for (const key of path.slice(0, -1)) {
+        if (!parent || typeof parent !== "object") return;
+        parent = parent[key];
+      }
+      if (parent && typeof parent === "object") delete parent[path[path.length - 1]];
+    });
+    return merged;
+  }
   function returnToLogin(message) {
     state.authenticated = false;
     if (state.socket) {
@@ -463,7 +484,13 @@
     const socket = new WebSocket(window.X2_PANEL_CONFIG.websocketUrl || fallbackUrl);
     state.socket = socket;
     socket.onopen = () => { byId("connection-status").textContent = "Live status connected"; };
-    socket.onmessage = (event) => { try { const message = JSON.parse(event.data); if (message.type === "status") applyStatus(message.payload); } catch (_) { setError("Received an invalid status update"); } };
+    socket.onmessage = (event) => {
+      try {
+        const message = JSON.parse(event.data);
+        if (message.type === "status") applyStatus(message.payload);
+        if (message.type === "status_delta") applyStatus(mergeStatus(state.status, message.payload));
+      } catch (_) { setError("Received an invalid status update"); }
+    };
     socket.onclose = (event) => {
       if (state.socket !== socket) return;
       state.socket = null;

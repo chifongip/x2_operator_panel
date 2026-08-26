@@ -1,11 +1,16 @@
+import json
 import unittest
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 from x2_operator_panel.panel_server import (
     PanelApplication,
+    WebsocketHub,
     _build_lan_tls_context,
     _is_loopback_host,
     _is_rfc1918_ipv4_host,
     _parse_lan_allowed_subnet,
+    _status_delta,
     _validate_bind_address,
 )
 
@@ -90,6 +95,50 @@ class PanelServerPolicyTest(unittest.TestCase):
             application._build_allowed_origins(
                 "http://localhost:8080,https://robot.example"
             )
+
+    def test_status_delta_omits_unchanged_arrays_and_reports_removed_fields(self):
+        previous = {
+            "scan": {"points": [[1.0, 2.0]], "fresh": True},
+            "servers": {"pick": True, "place": True},
+        }
+        current = {
+            "scan": {"points": [[1.0, 2.0]], "fresh": False},
+            "servers": {"pick": False},
+        }
+
+        delta = _status_delta(current, previous)
+
+        self.assertEqual(
+            delta["set"],
+            {"scan": {"fresh": False}, "servers": {"pick": False}},
+        )
+        self.assertEqual(delta["remove"], [["servers", "place"]])
+
+    def test_status_publish_skips_snapshot_when_no_clients_are_connected(self):
+        application = SimpleNamespace(status=Mock())
+        hub = WebsocketHub(application)
+        hub._loop = object()
+
+        with patch("x2_operator_panel.panel_server.json.dumps") as dumps:
+            hub.publish_status()
+
+        application.status.assert_not_called()
+        dumps.assert_not_called()
+
+    def test_coalesced_status_update_falls_back_to_a_full_snapshot(self):
+        hub = WebsocketHub(SimpleNamespace())
+        hub._loop = object()
+        hub._clients = {object(): "session"}
+        hub._previous_snapshot = {"value": 1}
+        hub._broadcast_scheduled = True
+        hub._latest_payload = '{"type":"status_delta","payload":{}}'
+
+        hub.broadcast({"value": 2})
+
+        self.assertEqual(json.loads(hub._latest_payload), {
+            "type": "status",
+            "payload": {"value": 2},
+        })
 
 
 if __name__ == "__main__":

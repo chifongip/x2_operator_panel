@@ -109,11 +109,24 @@ def generate_launch_description():
             ),
             DeclareLaunchArgument("goal_admission_timeout_sec", default_value="5.0"),
             DeclareLaunchArgument("service_timeout_sec", default_value="5.0"),
+            DeclareLaunchArgument(
+                "navigation_lifecycle_poll_period_sec", default_value="5.0"
+            ),
             DeclareLaunchArgument("shutdown_cancel_grace_sec", default_value="5.0"),
             DeclareLaunchArgument("http_worker_limit", default_value="16"),
             DeclareLaunchArgument("http_request_timeout_sec", default_value="5.0"),
             DeclareLaunchArgument("websocket_client_limit", default_value="4"),
             DeclareLaunchArgument("websocket_send_timeout_sec", default_value="1.0"),
+            DeclareLaunchArgument(
+                "websocket_compression",
+                default_value="false",
+                description="Enable WebSocket per-message compression.",
+            ),
+            DeclareLaunchArgument(
+                "status_publish_period_sec",
+                default_value="1.0",
+                description="Interval between browser status broadcasts in seconds.",
+            ),
             DeclareLaunchArgument("login_per_source_limit", default_value="5"),
             DeclareLaunchArgument("login_global_limit", default_value="30"),
             DeclareLaunchArgument("login_window_sec", default_value="60.0"),
@@ -186,6 +199,9 @@ def generate_launch_description():
                             "goal_admission_timeout_sec"
                         ),
                         "service_timeout_sec": LaunchConfiguration("service_timeout_sec"),
+                        "navigation_lifecycle_poll_period_sec": LaunchConfiguration(
+                            "navigation_lifecycle_poll_period_sec"
+                        ),
                         "shutdown_cancel_grace_sec": LaunchConfiguration(
                             "shutdown_cancel_grace_sec"
                         ),
@@ -198,6 +214,12 @@ def generate_launch_description():
                         ),
                         "websocket_send_timeout_sec": LaunchConfiguration(
                             "websocket_send_timeout_sec"
+                        ),
+                        "websocket_compression": ParameterValue(
+                            LaunchConfiguration("websocket_compression"), value_type=bool
+                        ),
+                        "status_publish_period_sec": LaunchConfiguration(
+                            "status_publish_period_sec"
                         ),
                         "login_per_source_limit": LaunchConfiguration(
                             "login_per_source_limit"

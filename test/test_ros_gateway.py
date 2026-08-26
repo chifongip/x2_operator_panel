@@ -13,7 +13,9 @@ from x2_operator_panel.ros_gateway import (
     Operation,
     OperatorPanelNode,
     PanelCommandError,
+    _display_telemetry_qos,
 )
+from rclpy.qos import DurabilityPolicy, ReliabilityPolicy
 
 
 class FakeGoalHandle:
@@ -37,6 +39,13 @@ class FakeGoalHandle:
 
 
 class RosGatewayTest(unittest.TestCase):
+    def test_display_telemetry_qos_keeps_only_the_latest_lossy_sample(self):
+        qos = _display_telemetry_qos()
+
+        self.assertEqual(qos.depth, 1)
+        self.assertEqual(qos.reliability, ReliabilityPolicy.BEST_EFFORT)
+        self.assertEqual(qos.durability, DurabilityPolicy.VOLATILE)
+
     @staticmethod
     def _map_transform(stamp_sec):
         return SimpleNamespace(

@@ -214,6 +214,37 @@ Request-handler, login, WebSocket-client, operation-history, action-admission,
 and service-response limits are bounded by launch parameters. Keep the shipped
 defaults unless deployment testing justifies changing them.
 
+## Performance tuning
+
+The panel publishes browser status updates once per second by default. This
+only affects display freshness; it does not change command processing, action
+handling, TF polling, or navigation and manipulation safety checks. Increase
+`status_publish_period_sec` to reduce the browser update rate further:
+
+```bash
+ros2 launch x2_operator_panel operator_panel.launch.py \
+  status_publish_period_sec:=2.0
+```
+
+Display-only ROS telemetry uses best-effort QoS with a depth of one, so the
+panel shows the newest sample rather than spending CPU catching up on stale
+visual data. Command-interlock topics retain reliable QoS. Nav2 lifecycle
+health checks run every five seconds by default; configure
+`navigation_lifecycle_poll_period_sec` when a different cadence is needed.
+
+WebSocket compression is disabled by default to avoid CPU spent compressing
+small status updates over loopback or SSH. Enable it only when a LAN deployment
+needs the bandwidth reduction:
+
+```bash
+ros2 launch x2_operator_panel operator_panel.launch.py \
+  websocket_compression:=true
+```
+
+New WebSocket clients receive a full status snapshot. Later updates contain
+only changed fields, while `/api/status` continues to return the complete
+snapshot.
+
 The map marker is unavailable when the `map -> base_link` TF chain cannot be
 resolved. An amber marker means the last transform is retained but has not been
 observed updating within `tf_freshness_sec`; navigation remains disabled in
