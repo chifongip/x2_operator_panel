@@ -182,6 +182,20 @@ map goal sends one confirmed `NavigateToPose`
 action; named preset buttons remain available for surveyed locations. The same
 additional idle confirmation is required for either kind of navigation goal
 when Nav2 has not emitted an action-status message.
+Panel-submitted navigation also requires the command mux action server and
+Collision Monitor lifecycle node to be available.
+
+After coarse navigation, **Check fine alignment** sends a measurement-only
+`/fine_align` goal. **Fine align** requires the timed, one-shot physical-motion
+unlock plus a separate confirmation and permits coupled forward, lateral, and
+yaw correction toward the tag9-derived table pose. Both require Nav2 idle and
+manipulation state `EMPTY` or `HOLDING`; physical alignment additionally requires
+an active Collision Monitor lifecycle node. Reverse x is controlled by the
+navigation server's `allow_reverse_x` parameter and remains disabled by default.
+Feedback and final planar error appear in operation history and native action
+cancellation remains available. **Cancel docking** cancels only the active
+fine-alignment goal; **Cancel active goals** still cancels every cancelable panel
+operation.
 
 The map's optional laser layer renders at most 360 finite ranges from
 `/scan_nav/laser`, transformed into `map` at the scan timestamp. It is a
@@ -189,11 +203,18 @@ localization-alignment aid only and is hidden from command decisions. The
 layer reports stale data or a missing scan transform rather than drawing it at
 an incorrect pose.
 
-Navigation health shows the five Nav2 lifecycle node states, action status,
-`/odom` freshness, and the newest global path from `/plan`. The map draws that
+Navigation health shows all six Nav2 lifecycle node states, including collision
+monitoring, plus action status, `/odom` freshness, and the newest global path
+from `/plan`. The map draws that
 map-frame path beneath the robot marker and removes it after three seconds
 without an update. `global_path_topic` must publish `nav_msgs/Path` in the
 `map` frame; other frames are reported but not drawn.
+
+**Clear Costmap** calls both Nav2 `ClearEntireCostmap` services for the global
+and local costmaps after operator confirmation. The button is enabled only when
+both services are ready, and the combined result or any partial failure appears
+in operation history and the audit log.
+
 MoveIt health shows the configured `move_group` action,
 `/get_planning_scene` service, and `/joint_states` freshness. Localization
 fitness and delay come from `/localization_3d_confidence` and

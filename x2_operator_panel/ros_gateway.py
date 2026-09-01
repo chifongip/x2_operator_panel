@@ -24,7 +24,9 @@ from lifecycle_msgs.srv import GetState
 from moveit_msgs.action import MoveGroup
 from moveit_msgs.srv import GetPlanningScene
 from nav2_msgs.action import NavigateToPose
+from nav2_msgs.srv import ClearEntireCostmap
 from nav_msgs.msg import Odometry, Path as NavPath
+from x2_navigation.action import FineAlign
 from rclpy.action import ActionClient
 from rclpy.duration import Duration
 from rclpy.node import Node
@@ -409,6 +411,7 @@ class OperatorPanelNode(Node):
                 "controller_server",
                 "behavior_server",
                 "bt_navigator",
+                "collision_monitor",
             )
         }
         self._nav_lifecycle_requests: dict[str, float] = {}
@@ -423,6 +426,7 @@ class OperatorPanelNode(Node):
             "pick_place": ActionClient(self, PickPlace, "/pick_place"),
             "reset": ActionClient(self, ResetManipulation, "/reset_manipulation"),
             "navigate": ActionClient(self, NavigateToPose, "/navigate_to_pose"),
+            "fine_align": ActionClient(self, FineAlign, "/fine_align"),
         }
         self._move_group_action_client = ActionClient(
             self, MoveGroup, self.move_group_action_name
@@ -433,6 +437,16 @@ class OperatorPanelNode(Node):
         self._nav_lifecycle_clients = {
             name: self.create_client(GetState, f"/{name}/get_state")
             for name in self._nav_lifecycle_status
+        }
+        self._costmap_clear_clients = {
+            "global": self.create_client(
+                ClearEntireCostmap,
+                "/global_costmap/clear_entirely_global_costmap",
+            ),
+            "local": self.create_client(
+                ClearEntireCostmap,
+                "/local_costmap/clear_entirely_local_costmap",
+            ),
         }
         self._recovery_client = self.create_client(
             RecoverManipulationState, "/recover_manipulation_state"
@@ -548,6 +562,10 @@ class OperatorPanelNode(Node):
                         self._odom_received_monotonic, "/odom"
                     ),
                     "global_path": self._global_path_in_map_locked(),
+                    "costmap_clear_services": {
+                        name: client.service_is_ready()
+                        for name, client in self._costmap_clear_clients.items()
+                    },
                 },
                 "moveit": {
                     "move_group_action_ready": self._move_group_action_client.server_is_ready(),
@@ -572,7 +590,10 @@ class OperatorPanelNode(Node):
             if not command.response.set_running_or_notify_cancel():
                 continue
             try:
-                if self._shutting_down and command.name != "cancel_active":
+                if self._shutting_down and command.name not in {
+                    "cancel_active",
+                    "cancel_fine_align",
+                }:
                     raise PanelCommandError("The operator panel is shutting down")
                 if command.name == "unlock_execution":
                     result = self._unlock_execution()
@@ -580,10 +601,14 @@ class OperatorPanelNode(Node):
                     result = self._submit(command.payload)
                 elif command.name == "cancel_active":
                     result = self._cancel_active()
+                elif command.name == "cancel_fine_align":
+                    result = self._cancel_fine_align()
                 elif command.name == "recover_state":
                     result = self._recover_state(command.payload)
                 elif command.name == "set_initial_pose":
                     result = self._set_initial_pose(command.payload)
+                elif command.name == "clear_costmaps":
+                    result = self._clear_costmaps(command.payload)
                 else:
                     raise PanelCommandError("Unknown panel command")
                 command.response.set_result(result)
@@ -595,6 +620,91 @@ class OperatorPanelNode(Node):
             self._execution_unlocked_until = time.monotonic() + self.execution_unlock_sec
         self._audit("execution_unlock", "accepted", "Physical manipulation unlock granted")
         return {"unlocked_for_sec": self.execution_unlock_sec}
+
+    def _clear_costmaps(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if payload.get("confirmed") is not True:
+            raise PanelCommandError("Clearing costmaps requires confirmation")
+        if any(
+            operation.kind == "clear_costmaps"
+            for operation in self._active_operations()
+        ):
+            raise PanelCommandError("A costmap clear request is already active")
+        unavailable = [
+            name
+            for name, client in self._costmap_clear_clients.items()
+            if not client.service_is_ready()
+        ]
+        if unavailable:
+            raise PanelCommandError(
+                "Costmap clear services are unavailable: " + ", ".join(unavailable)
+            )
+        operation = Operation(
+            identifier=str(uuid4()),
+            kind="clear_costmaps",
+            requested_at=time.time(),
+            plan_only=None,
+            stage="Clearing global and local costmaps",
+            cancelable=False,
+            service_deadline=time.monotonic() + self.service_timeout_sec,
+        )
+        self._register_operation(operation)
+        self._audit("clear_costmaps", "submitted", "global and local")
+        for name, client in self._costmap_clear_clients.items():
+            try:
+                future = client.call_async(ClearEntireCostmap.Request())
+            except Exception as error:
+                self._on_costmap_clear_result(operation.identifier, name, error=error)
+                continue
+            future.add_done_callback(
+                lambda completed, costmap=name: self._on_costmap_clear_result(
+                    operation.identifier, costmap, completed=completed
+                )
+            )
+        return {"operation": operation.as_dict()}
+
+    def _on_costmap_clear_result(
+        self,
+        operation_id: str,
+        costmap: str,
+        completed: Any | None = None,
+        error: Exception | None = None,
+    ) -> None:
+        if error is None:
+            try:
+                completed.result()
+            except Exception as service_error:
+                error = service_error
+        with self._lock:
+            operation = self._operations.get(operation_id)
+            if operation is None or operation.status not in _ACTIVE_STATUSES:
+                return
+            outcomes = operation.feedback.setdefault("costmaps", {})
+            outcomes[costmap] = {
+                "success": error is None,
+                "message": "" if error is None else str(error),
+            }
+            if len(outcomes) != len(self._costmap_clear_clients):
+                return
+            failures = {
+                name: outcome["message"]
+                for name, outcome in outcomes.items()
+                if not outcome["success"]
+            }
+        if failures:
+            message = "; ".join(
+                f"{name} costmap: {detail}" for name, detail in failures.items()
+            )
+            self._finish_operation(
+                operation_id,
+                "ERROR",
+                {"success": False, "message": "Failed to clear " + message},
+            )
+        else:
+            self._finish_operation(
+                operation_id,
+                "SUCCEEDED",
+                {"success": True, "message": "Global and local costmaps cleared"},
+            )
 
     def _set_initial_pose(self, payload: dict[str, Any]) -> dict[str, Any]:
         if payload.get("confirmed") is not True:
@@ -661,9 +771,72 @@ class OperatorPanelNode(Node):
             raise PanelCommandError("Wait for the active operation to reach a terminal state")
         if kind == "navigate":
             operation = self._submit_navigation(payload)
+        elif kind == "fine_align":
+            operation = self._submit_fine_align(payload)
         else:
             operation = self._submit_manipulation(kind, payload)
         return {"operation": operation.as_dict()}
+
+    def _submit_fine_align(self, payload: dict[str, Any]) -> Operation:
+        execute = self._optional_boolean(payload, "execute", False)
+        if execute and payload.get("confirmed") is not True:
+            raise PanelCommandError("Physical fine alignment requires confirmation")
+        with self._lock:
+            manipulation_state = self._manipulation_state["state"]
+            nav_goal_status = self._nav_goal_status_locked()
+            if execute:
+                inactive = [
+                    name
+                    for name in ("collision_monitor",)
+                    if self._nav_lifecycle_status.get(name, {}).get("state_id") != 3
+                ]
+                if inactive:
+                    raise PanelCommandError(
+                        "Physical fine alignment requires active lifecycle nodes: "
+                        + ", ".join(inactive)
+                    )
+                if time.monotonic() >= self._execution_unlocked_until:
+                    raise PanelCommandError("Physical execution unlock has expired")
+        if manipulation_state not in {"EMPTY", "HOLDING"}:
+            raise PanelCommandError(
+                "Fine alignment requires a known EMPTY or HOLDING manipulation state"
+            )
+        if nav_goal_status.get("available") and nav_goal_status.get("active") is not False:
+            raise PanelCommandError("Nav2 must be idle before fine alignment")
+        if not nav_goal_status.get("available") and payload.get("confirm_nav2_idle") is not True:
+            raise PanelCommandError(
+                "Nav2 action status is unavailable; verify Nav2 is idle and confirm again"
+            )
+        if execute:
+            with self._lock:
+                if time.monotonic() >= self._execution_unlocked_until:
+                    raise PanelCommandError("Physical execution unlock has expired")
+                self._execution_unlocked_until = 0.0
+        goal = FineAlign.Goal()
+        goal.execute = execute
+        operation = Operation(
+            identifier=str(uuid4()),
+            kind="fine_align",
+            requested_at=time.time(),
+            plan_only=not execute,
+            admission_deadline=time.monotonic() + self.goal_admission_timeout_sec,
+        )
+        self._register_operation(operation)
+        try:
+            future = self._action_clients["fine_align"].send_goal_async(
+                goal,
+                feedback_callback=lambda message: self._on_feedback(
+                    operation.identifier, message
+                ),
+            )
+        except Exception as error:
+            self._finish_operation(operation.identifier, "ERROR", {"message": str(error)})
+            raise PanelCommandError(f"Failed to submit fine alignment: {error}") from error
+        future.add_done_callback(
+            lambda sent: self._on_goal_response(operation.identifier, sent)
+        )
+        self._audit("fine_align", "submitted", "execution" if execute else "measure_only")
+        return operation
 
     def _submit_manipulation(self, kind: str, payload: dict[str, Any]) -> Operation:
         plan_only = self._optional_boolean(payload, "plan_only", True) if kind != "reset" else None
@@ -705,7 +878,17 @@ class OperatorPanelNode(Node):
     def _submit_navigation(self, payload: dict[str, Any]) -> Operation:
         if payload.get("confirmed") is not True:
             raise PanelCommandError("Navigation requires confirmation")
+        mux_client = getattr(self, "_action_clients", {}).get("fine_align")
+        if mux_client is not None and not mux_client.server_is_ready():
+            raise PanelCommandError("Navigation velocity command mux is unavailable")
         with self._lock:
+            collision_status = getattr(self, "_nav_lifecycle_status", {}).get(
+                "collision_monitor"
+            )
+            if collision_status is not None and collision_status.get("state_id") != 3:
+                raise PanelCommandError(
+                    "Navigation requires an active Collision Monitor lifecycle node"
+                )
             manipulation_state = self._manipulation_state["state"]
             map_pose = dict(self._map_pose)
             nav_goal_status = self._nav_goal_status_locked()
@@ -889,6 +1072,14 @@ class OperatorPanelNode(Node):
             details["number_of_recoveries"] = int(feedback.number_of_recoveries)
         if hasattr(feedback, "current_pose"):
             details["current_pose"] = _pose_as_dict(feedback.current_pose)
+        if hasattr(feedback, "current_error"):
+            details["current_error"] = {
+                "x": float(feedback.current_error.x),
+                "y": float(feedback.current_error.y),
+                "yaw": float(feedback.current_error.theta),
+            }
+        if hasattr(feedback, "tag_visible"):
+            details["tag_visible"] = bool(feedback.tag_visible)
         with self._lock:
             operation = self._operations.get(operation_id)
             if operation is None:
@@ -915,6 +1106,14 @@ class OperatorPanelNode(Node):
                 details[attribute] = getattr(result, attribute)
         if hasattr(result, "achieved_pose"):
             details["achieved_pose"] = _pose_as_dict(result.achieved_pose)
+        if hasattr(result, "final_error"):
+            details["final_error"] = {
+                "x": float(result.final_error.x),
+                "y": float(result.final_error.y),
+                "yaw": float(result.final_error.theta),
+            }
+        if hasattr(result, "manipulation_state"):
+            details["manipulation_state"] = int(result.manipulation_state)
         return details
 
     def _finish_operation(self, operation_id: str, status: str, result: dict[str, Any]) -> None:
@@ -953,6 +1152,35 @@ class OperatorPanelNode(Node):
                     )
         if canceled:
             self._audit("cancel", "requested", ", ".join(canceled))
+        return {
+            "operation_ids": canceled,
+            "non_cancelable_operation_ids": non_cancelable,
+        }
+
+    def _cancel_fine_align(self) -> dict[str, Any]:
+        canceled: list[str] = []
+        non_cancelable: list[str] = []
+        with self._lock:
+            active_fine_alignments = [
+                operation
+                for operation in self._active_operations()
+                if operation.kind == "fine_align"
+            ]
+            if not active_fine_alignments:
+                raise PanelCommandError("No active fine alignment to cancel")
+            for operation in active_fine_alignments:
+                if not operation.cancelable:
+                    non_cancelable.append(operation.identifier)
+                    continue
+                operation.status = "CANCEL_REQUESTED"
+                operation.stage = "Fine-alignment cancellation requested"
+                canceled.append(operation.identifier)
+                if operation.goal_handle is not None:
+                    self._request_goal_cancel(
+                        operation.identifier, operation.goal_handle
+                    )
+        if canceled:
+            self._audit("cancel_fine_align", "requested", ", ".join(canceled))
         return {
             "operation_ids": canceled,
             "non_cancelable_operation_ids": non_cancelable,
@@ -1065,7 +1293,7 @@ class OperatorPanelNode(Node):
                 self._finish_operation(
                     operation.identifier,
                     "OUTCOME_UNKNOWN",
-                    {"message": "Recovery service response timed out"},
+                    {"message": "Service response timed out"},
                 )
 
     def _active_operations(self) -> list[Operation]:

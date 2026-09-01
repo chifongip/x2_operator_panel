@@ -79,6 +79,7 @@
             <div><dt>Pick server</dt><dd id="pick-server">Waiting</dd></div>
             <div><dt>Place server</dt><dd id="place-server">Waiting</dd></div>
             <div><dt>Nav2 server</dt><dd id="navigate-server">Waiting</dd></div>
+            <div><dt>Fine align</dt><dd id="fine-align-server">Waiting</dd></div>
           </dl>
         </section>
         <section>
@@ -139,6 +140,12 @@
         <section class="command-group">
           <h2>Navigation destinations</h2>
           <div id="preset-list" class="preset-list">No configured destinations</div>
+          <div class="command-row">
+            <button id="clear-costmaps" class="secondary" type="button" disabled>Clear Costmap</button>
+            <button id="check-fine-align" class="secondary" type="button">Check fine alignment</button>
+            <button id="execute-fine-align" type="button">Fine align</button>
+            <button id="cancel-fine-align" class="danger" type="button" disabled>Cancel docking</button>
+          </div>
         </section>
       </section>
 

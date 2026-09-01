@@ -19,7 +19,6 @@ class UiAssetsTest(unittest.TestCase):
         script = (package_root / "x2_operator_panel" / "static" / "app.js").read_text(
             encoding="utf-8"
         )
-
         self.assertIn('src="/assets/config.js"', page)
         self.assertNotIn("__WS_PORT__", page)
         self.assertIn("websocketUrl || fallbackUrl", script)
@@ -85,14 +84,32 @@ class UiAssetsTest(unittest.TestCase):
         script = (package_root / "x2_operator_panel" / "static" / "app.js").read_text(
             encoding="utf-8"
         )
+        server = (package_root / "x2_operator_panel" / "panel_server.py").read_text(
+            encoding="utf-8"
+        )
 
         self.assertIn('id="select-initial-pose"', page)
         self.assertIn('id="select-navigation-goal"', page)
+        self.assertIn('id="check-fine-align"', page)
+        self.assertIn('id="execute-fine-align"', page)
+        self.assertIn('id="cancel-fine-align"', page)
+        self.assertIn('id="clear-costmaps"', page)
         self.assertIn('id="show-scan"', page)
         self.assertIn("function submitMapSelection", script)
         self.assertIn('"/api/initial-pose"', script)
         self.assertIn("confirm_nav2_idle", script)
         self.assertIn("function drawLaserScan", script)
+        self.assertIn("function clearCostmaps", script)
+        self.assertIn('"/api/costmaps/clear"', script)
+        self.assertIn("function cancelFineAlign", script)
+        self.assertIn('"/api/fine-align/cancel"', script)
+        self.assertIn('request("clear_costmaps", payload)', server)
+        self.assertIn('request("cancel_fine_align", {})', server)
+        self.assertIn("function formatPlanarError", script)
+        self.assertIn("operation.result?.final_error", script)
+        self.assertIn("operation.feedback?.current_error", script)
+        self.assertIn("error.yaw", script)
+        self.assertNotIn("error.theta", script)
 
     def test_global_path_has_a_map_overlay_and_health_state(self):
         package_root = Path(__file__).parents[1]

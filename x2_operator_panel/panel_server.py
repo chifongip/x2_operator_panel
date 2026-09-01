@@ -676,10 +676,14 @@ def _make_request_handler(application: PanelApplication) -> type[BaseHTTPRequest
                     response = application.node.request("submit", payload)
                 elif path == "/api/cancel":
                     response = application.node.request("cancel_active", {})
+                elif path == "/api/fine-align/cancel":
+                    response = application.node.request("cancel_fine_align", {})
                 elif path == "/api/recover-state":
                     response = application.node.request("recover_state", payload)
                 elif path == "/api/initial-pose":
                     response = application.node.request("set_initial_pose", payload)
+                elif path == "/api/costmaps/clear":
+                    response = application.node.request("clear_costmaps", payload)
                 else:
                     self._json_error(HTTPStatus.NOT_FOUND, "Unknown API endpoint")
                     return

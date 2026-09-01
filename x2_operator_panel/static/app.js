@@ -331,6 +331,7 @@
     byId("pick-server").textContent = status.servers.pick ? "Ready" : "Unavailable";
     byId("place-server").textContent = status.servers.place ? "Ready" : "Unavailable";
     byId("navigate-server").textContent = status.servers.navigate ? "Ready" : "Unavailable";
+    byId("fine-align-server").textContent = status.servers.fine_align ? "Ready" : "Unavailable";
     const navigation = status.navigation || {};
     const lifecycle = Object.values(navigation.lifecycle || {});
     const activeNodes = lifecycle.filter((node) => node.state_id === 3).length;
@@ -338,6 +339,15 @@
     const goalStatus = navigation.goal_status;
     byId("nav2-goal-state").textContent = goalStatus?.available ? (goalStatus.active ? "Active" : "Idle") : (goalStatus?.detail || "Waiting");
     byId("nav2-odom-state").textContent = navigation.odom?.fresh ? "Current" : (navigation.odom?.detail || "Waiting");
+    const costmapServices = navigation.costmap_clear_services || {};
+    const clearCostmapsButton = byId("clear-costmaps");
+    clearCostmapsButton.disabled = !(costmapServices.global && costmapServices.local);
+    clearCostmapsButton.title = clearCostmapsButton.disabled ? "Costmap clear services are unavailable" : "Clear both Nav2 costmaps";
+    const fineAlignActive = (status.operations || []).some((operation) =>
+      operation.kind === "fine_align" && ["SUBMITTING", "ACTIVE"].includes(operation.status));
+    const cancelFineAlignButton = byId("cancel-fine-align");
+    cancelFineAlignButton.disabled = !fineAlignActive;
+    cancelFineAlignButton.title = fineAlignActive ? "Cancel the active fine-alignment goal" : "No active fine-alignment goal";
     const globalPath = navigation.global_path;
     byId("global-path-state").textContent = globalPath?.fresh ? (globalPath.point_count ? `${globalPath.point_count} poses` : "No path") : (globalPath?.detail || "Waiting");
     const scan = status.scan;
@@ -375,8 +385,17 @@
   function renderDiagnostics(diagnostics) {
     byId("diagnostics").textContent = diagnostics?.length ? diagnostics.map((item) => `${item.name}: ${item.message}`).join("\n") : "No diagnostics received";
   }
+  function formatPlanarError(error) {
+    if (!error || ![error.x, error.y, error.yaw].every(Number.isFinite)) return "";
+    return `error x ${error.x.toFixed(3)} m, y ${error.y.toFixed(3)} m, yaw ${error.yaw.toFixed(3)} rad`;
+  }
   function renderOperations(operations) {
-    byId("operations").innerHTML = (operations || []).slice(0, 15).map((operation) => `<tr><td>${escapeHtml(operation.kind)}</td><td>${escapeHtml(operation.status)}</td><td>${escapeHtml(operation.stage)}</td><td>${operation.progress == null ? "--" : `${Math.round(operation.progress * 100)}%`}</td><td>${escapeHtml(operation.result?.message || operation.result?.error_msg || operation.detail || "--")}</td></tr>`).join("") || '<tr><td colspan="5">No panel operations</td></tr>';
+    byId("operations").innerHTML = (operations || []).slice(0, 15).map((operation) => {
+      const message = operation.result?.message || operation.result?.error_msg || operation.detail || "--";
+      const planarError = formatPlanarError(operation.result?.final_error || operation.feedback?.current_error);
+      const detail = planarError ? `${message}; ${planarError}` : message;
+      return `<tr><td>${escapeHtml(operation.kind)}</td><td>${escapeHtml(operation.status)}</td><td>${escapeHtml(operation.stage)}</td><td>${operation.progress == null ? "--" : `${Math.round(operation.progress * 100)}%`}</td><td>${escapeHtml(detail)}</td></tr>`;
+    }).join("") || '<tr><td colspan="5">No panel operations</td></tr>';
   }
   function renderAudit(entries) {
     byId("audit-log").innerHTML = (entries || []).slice(0, 20).map((entry) => `<li><time>${escapeHtml(new Date(entry.timestamp).toLocaleTimeString())}</time><strong>${escapeHtml(entry.action)}</strong> ${escapeHtml(entry.outcome)} ${escapeHtml(entry.detail)}</li>`).join("") || "<li>No audit events</li>";
@@ -525,17 +544,48 @@
     if (!state.status?.navigation?.goal_status?.available && !confirmNav2Idle) return;
     try { await api("/api/actions", { method: "POST", body: JSON.stringify({ kind: "navigate", preset_id: preset.id, confirmed: true, confirm_nav2_idle: confirmNav2Idle }) }); setError(""); } catch (error) { setError(error.message); }
   }
+  async function fineAlign(execute) {
+    if (execute && !window.confirm("Move the robot in x, y, and yaw to fine-align with the table?")) return;
+    const confirmNav2Idle = confirmNav2IdleWithoutStatus();
+    if (!state.status?.navigation?.goal_status?.available && !confirmNav2Idle) return;
+    try {
+      await api("/api/actions", {
+        method: "POST",
+        body: JSON.stringify({
+          kind: "fine_align",
+          execute,
+          confirmed: execute,
+          confirm_nav2_idle: confirmNav2Idle,
+        }),
+      });
+      setError("");
+    } catch (error) { setError(error.message); }
+  }
   async function recoverState(requestedState) {
     if (!window.confirm(`Confirm manipulation state: ${requestedState}?`)) return;
     try { await api("/api/recover-state", { method: "POST", body: JSON.stringify({ requested_state: requestedState, confirmed: true }) }); setError(""); } catch (error) { setError(error.message); }
   }
   async function unlockExecution() {
-    if (!window.confirm("Temporarily unlock one physical manipulation command?")) return;
+    if (!window.confirm("Temporarily unlock one physical motion command?")) return;
     try { await api("/api/unlock/execution", { method: "POST", body: JSON.stringify({ confirmed: true }) }); setError(""); } catch (error) { setError(error.message); }
   }
   async function cancelActive() {
     if (!window.confirm("Request cancellation for all active panel goals?")) return;
     try { await api("/api/cancel", { method: "POST", body: "{}" }); setError(""); } catch (error) { setError(error.message); }
+  }
+  async function cancelFineAlign() {
+    if (!window.confirm("Cancel the active fine-alignment docking goal?")) return;
+    try {
+      await api("/api/fine-align/cancel", { method: "POST", body: "{}" });
+      setError("");
+    } catch (error) { setError(error.message); }
+  }
+  async function clearCostmaps() {
+    if (!window.confirm("Clear both the global and local Nav2 costmaps?")) return;
+    try {
+      await api("/api/costmaps/clear", { method: "POST", body: JSON.stringify({ confirmed: true }) });
+      setError("");
+    } catch (error) { setError(error.message); }
   }
 
   byId("login-form").addEventListener("submit", login);
@@ -548,6 +598,10 @@
   byId("recover-holding").addEventListener("click", () => recoverState("holding"));
   byId("unlock-execution").addEventListener("click", unlockExecution);
   byId("cancel-active").addEventListener("click", cancelActive);
+  byId("cancel-fine-align").addEventListener("click", cancelFineAlign);
+  byId("clear-costmaps").addEventListener("click", clearCostmaps);
+  byId("check-fine-align").addEventListener("click", () => fineAlign(false));
+  byId("execute-fine-align").addEventListener("click", () => fineAlign(true));
   byId("select-initial-pose").addEventListener("click", () => setMapMode("initial_pose"));
   byId("select-navigation-goal").addEventListener("click", () => setMapMode("navigate"));
   byId("show-scan").addEventListener("change", drawMap);

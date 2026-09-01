@@ -38,6 +38,26 @@ class FakeGoalHandle:
         return self.result_future
 
 
+class FakeServiceClient:
+    def __init__(self, result=None, error=None, ready=True):
+        self.calls = []
+        self.error = error
+        self.ready = ready
+        self.result = result if result is not None else object()
+
+    def service_is_ready(self):
+        return self.ready
+
+    def call_async(self, request):
+        self.calls.append(request)
+        future = Future()
+        if self.error is None:
+            future.set_result(self.result)
+        else:
+            future.set_exception(self.error)
+        return future
+
+
 class RosGatewayTest(unittest.TestCase):
     def test_display_telemetry_qos_keeps_only_the_latest_lossy_sample(self):
         qos = _display_telemetry_qos()
@@ -198,6 +218,58 @@ class RosGatewayTest(unittest.TestCase):
         self.assertEqual(operation.progress, 1.0)
         self.assertEqual(operation.status, "SUCCEEDED")
 
+    def test_clear_costmaps_calls_global_and_local_services(self):
+        node = object.__new__(OperatorPanelNode)
+        node._lock = threading.RLock()
+        node._operations = {}
+        node._operation_history = deque(maxlen=10)
+        node._audit_sink = None
+        node.service_timeout_sec = 5.0
+        node._costmap_clear_clients = {
+            "global": FakeServiceClient(),
+            "local": FakeServiceClient(),
+        }
+
+        response = node._clear_costmaps({"confirmed": True})
+
+        operation = node._operations[response["operation"]["id"]]
+        self.assertEqual(operation.status, "SUCCEEDED")
+        self.assertEqual(operation.result["message"], "Global and local costmaps cleared")
+        self.assertEqual(len(node._costmap_clear_clients["global"].calls), 1)
+        self.assertEqual(len(node._costmap_clear_clients["local"].calls), 1)
+
+    def test_clear_costmaps_reports_partial_failure(self):
+        node = object.__new__(OperatorPanelNode)
+        node._lock = threading.RLock()
+        node._operations = {}
+        node._operation_history = deque(maxlen=10)
+        node._audit_sink = None
+        node.service_timeout_sec = 5.0
+        node._costmap_clear_clients = {
+            "global": FakeServiceClient(error=RuntimeError("service failed")),
+            "local": FakeServiceClient(),
+        }
+
+        response = node._clear_costmaps({"confirmed": True})
+
+        operation = node._operations[response["operation"]["id"]]
+        self.assertEqual(operation.status, "ERROR")
+        self.assertIn("global costmap: service failed", operation.result["message"])
+
+    def test_clear_costmaps_requires_confirmation_and_ready_services(self):
+        node = object.__new__(OperatorPanelNode)
+        node._lock = threading.RLock()
+        node._operations = {}
+        node._costmap_clear_clients = {
+            "global": FakeServiceClient(),
+            "local": FakeServiceClient(ready=False),
+        }
+
+        with self.assertRaisesRegex(PanelCommandError, "requires confirmation"):
+            node._clear_costmaps({})
+        with self.assertRaisesRegex(PanelCommandError, "local"):
+            node._clear_costmaps({"confirmed": True})
+
     def test_unsuccessful_operation_retains_last_reported_progress(self):
         node = object.__new__(OperatorPanelNode)
         node._lock = threading.RLock()
@@ -230,6 +302,14 @@ class RosGatewayTest(unittest.TestCase):
         node._map_pose = {"available": True, "fresh": False}
 
         with self.assertRaisesRegex(PanelCommandError, "fresh map"):
+            node._submit_navigation({"confirmed": True, "preset_id": "dock"})
+
+    def test_navigation_requires_active_collision_monitor(self):
+        node = object.__new__(OperatorPanelNode)
+        node._lock = threading.RLock()
+        node._nav_lifecycle_status = {"collision_monitor": {"state_id": 2}}
+
+        with self.assertRaisesRegex(PanelCommandError, "active Collision Monitor"):
             node._submit_navigation({"confirmed": True, "preset_id": "dock"})
 
     def test_initial_pose_is_rejected_until_nav2_reports_idle(self):
@@ -337,6 +417,115 @@ class RosGatewayTest(unittest.TestCase):
             node._submit_navigation(
                 {"confirmed": True, "goal": {"x": 2.0, "y": -1.0, "yaw": 0.0}}
             )
+
+    def test_fine_alignment_defaults_to_measure_only(self):
+        sent = Future()
+        sent.set_result(FakeGoalHandle())
+        goals = []
+        node = object.__new__(OperatorPanelNode)
+        node._lock = threading.RLock()
+        node._manipulation_state = {"state": "HOLDING"}
+        node._nav_goal_status = {"available": True, "active": False}
+        node._operations = {}
+        node._operation_history = deque(maxlen=10)
+        node.goal_admission_timeout_sec = 5.0
+        node._audit_sink = None
+        node._action_clients = {
+            "fine_align": SimpleNamespace(
+                send_goal_async=lambda goal, feedback_callback: goals.append(goal) or sent
+            )
+        }
+
+        operation = node._submit_fine_align({})
+
+        self.assertTrue(operation.plan_only)
+        self.assertFalse(goals[0].execute)
+
+    def test_fine_align_pose_errors_use_the_panel_yaw_field(self):
+        node = object.__new__(OperatorPanelNode)
+        node._lock = threading.RLock()
+        operation = Operation("fine-align", "fine_align", time.time())
+        node._operations = {operation.identifier: operation}
+
+        feedback = SimpleNamespace(
+            stage=2,
+            progress=0.5,
+            current_error=SimpleNamespace(x=0.10, y=-0.20, theta=0.30),
+        )
+        node._on_feedback(operation.identifier, SimpleNamespace(feedback=feedback))
+
+        self.assertEqual(
+            operation.feedback["current_error"],
+            {"x": 0.10, "y": -0.20, "yaw": 0.30},
+        )
+        result = OperatorPanelNode._result_as_dict(
+            SimpleNamespace(final_error=SimpleNamespace(x=-0.01, y=0.02, theta=-0.03))
+        )
+        self.assertEqual(
+            result["final_error"],
+            {"x": -0.01, "y": 0.02, "yaw": -0.03},
+        )
+
+    def test_physical_fine_alignment_requires_confirmation(self):
+        node = object.__new__(OperatorPanelNode)
+        node._lock = threading.RLock()
+        node._manipulation_state = {"state": "EMPTY"}
+        node._nav_goal_status = {"available": True, "active": False}
+
+        with self.assertRaisesRegex(PanelCommandError, "requires confirmation"):
+            node._submit_fine_align({"execute": True})
+
+    def test_physical_fine_alignment_requires_execution_unlock(self):
+        node = object.__new__(OperatorPanelNode)
+        node._lock = threading.RLock()
+        node._manipulation_state = {"state": "EMPTY"}
+        node._nav_goal_status = {"available": True, "active": False}
+        node._nav_lifecycle_status = {
+            "collision_monitor": {"state_id": 3},
+        }
+        node._execution_unlocked_until = 0.0
+
+        with self.assertRaisesRegex(PanelCommandError, "unlock has expired"):
+            node._submit_fine_align({"execute": True, "confirmed": True})
+
+    def test_physical_fine_alignment_requires_safety_lifecycle_nodes(self):
+        node = object.__new__(OperatorPanelNode)
+        node._lock = threading.RLock()
+        node._manipulation_state = {"state": "EMPTY"}
+        node._nav_goal_status = {"available": True, "active": False}
+        node._nav_lifecycle_status = {
+            "collision_monitor": {"state_id": 2},
+        }
+        node._execution_unlocked_until = time.monotonic() + 30.0
+
+        with self.assertRaisesRegex(PanelCommandError, "collision_monitor"):
+            node._submit_fine_align({"execute": True, "confirmed": True})
+
+    def test_physical_fine_alignment_does_not_require_docking_server(self):
+        sent = Future()
+        sent.set_result(FakeGoalHandle())
+        goals = []
+        node = object.__new__(OperatorPanelNode)
+        node._lock = threading.RLock()
+        node._manipulation_state = {"state": "EMPTY"}
+        node._nav_goal_status = {"available": True, "active": False}
+        node._nav_lifecycle_status = {"collision_monitor": {"state_id": 3}}
+        node._execution_unlocked_until = time.monotonic() + 30.0
+        node._operations = {}
+        node._operation_history = deque(maxlen=10)
+        node.goal_admission_timeout_sec = 5.0
+        node._audit_sink = None
+        node._action_clients = {
+            "fine_align": SimpleNamespace(
+                send_goal_async=lambda goal, feedback_callback: goals.append(goal) or sent
+            )
+        }
+
+        operation = node._submit_fine_align({"execute": True, "confirmed": True})
+
+        self.assertFalse(operation.plan_only)
+        self.assertTrue(goals[0].execute)
+        self.assertEqual(node._execution_unlocked_until, 0.0)
 
     def test_scan_points_are_projected_into_map_frame(self):
         scan = SimpleNamespace(
@@ -483,6 +672,37 @@ class RosGatewayTest(unittest.TestCase):
         self.assertEqual(handle.cancel_calls, 1)
         self.assertEqual(operation.status, "ACTIVE")
         self.assertIn("transport failed", operation.detail)
+
+    def test_cancel_fine_alignment_does_not_cancel_other_operations(self):
+        node = object.__new__(OperatorPanelNode)
+        node._lock = threading.RLock()
+        node._audit_sink = None
+        fine_align_handle = FakeGoalHandle()
+        navigation_handle = FakeGoalHandle()
+        fine_align = Operation("fine-align", "fine_align", time.time(), status="ACTIVE")
+        fine_align.goal_handle = fine_align_handle
+        navigation = Operation("navigate", "navigate", time.time(), status="ACTIVE")
+        navigation.goal_handle = navigation_handle
+        node._operations = {
+            fine_align.identifier: fine_align,
+            navigation.identifier: navigation,
+        }
+
+        result = node._cancel_fine_align()
+
+        self.assertEqual(result["operation_ids"], [fine_align.identifier])
+        self.assertEqual(fine_align_handle.cancel_calls, 1)
+        self.assertEqual(fine_align.status, "CANCEL_REQUESTED")
+        self.assertEqual(navigation_handle.cancel_calls, 0)
+        self.assertEqual(navigation.status, "ACTIVE")
+
+    def test_cancel_fine_alignment_requires_an_active_goal(self):
+        node = object.__new__(OperatorPanelNode)
+        node._lock = threading.RLock()
+        node._operations = {}
+
+        with self.assertRaisesRegex(PanelCommandError, "No active fine alignment"):
+            node._cancel_fine_align()
 
     def test_admission_timeout_requests_late_goal_cancellation(self):
         node = object.__new__(OperatorPanelNode)
