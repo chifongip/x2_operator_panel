@@ -16,6 +16,7 @@ from x2_operator_panel.ros_gateway import (
     _display_telemetry_qos,
 )
 from rclpy.qos import DurabilityPolicy, ReliabilityPolicy
+from x2_navigation.action import FineAlign
 
 
 class FakeGoalHandle:
@@ -458,6 +459,7 @@ class RosGatewayTest(unittest.TestCase):
             operation.feedback["current_error"],
             {"x": 0.10, "y": -0.20, "yaw": 0.30},
         )
+        self.assertEqual(operation.stage, "Controlling")
         result = OperatorPanelNode._result_as_dict(
             SimpleNamespace(final_error=SimpleNamespace(x=-0.01, y=0.02, theta=-0.03))
         )
@@ -465,6 +467,21 @@ class RosGatewayTest(unittest.TestCase):
             result["final_error"],
             {"x": -0.01, "y": 0.02, "yaw": -0.03},
         )
+
+    def test_fine_align_reacquiring_feedback_has_a_readable_stage(self):
+        node = object.__new__(OperatorPanelNode)
+        node._lock = threading.RLock()
+        operation = Operation("fine-align", "fine_align", time.time())
+        node._operations = {operation.identifier: operation}
+        feedback = SimpleNamespace(
+            stage=FineAlign.Feedback.REACQUIRING,
+            progress=0.0,
+            current_error=SimpleNamespace(x=0.10, y=-0.20, theta=0.30),
+        )
+
+        node._on_feedback(operation.identifier, SimpleNamespace(feedback=feedback))
+
+        self.assertEqual(operation.stage, "Reacquiring target")
 
     def test_physical_fine_alignment_requires_confirmation(self):
         node = object.__new__(OperatorPanelNode)

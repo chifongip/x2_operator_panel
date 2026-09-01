@@ -54,6 +54,13 @@ _MANIPULATION_STATE_NAMES = {
     ManipulationState.HOLDING: "HOLDING",
     ManipulationState.RECOVERY_REQUIRED: "RECOVERY_REQUIRED",
 }
+_FINE_ALIGN_STAGE_NAMES = {
+    FineAlign.Feedback.VALIDATING: "Validating",
+    FineAlign.Feedback.ACQUIRING: "Acquiring target",
+    FineAlign.Feedback.CONTROLLING: "Controlling",
+    FineAlign.Feedback.REACQUIRING: "Reacquiring target",
+    FineAlign.Feedback.SETTLING: "Settling",
+}
 
 
 class PanelCommandError(ValueError):
@@ -1078,6 +1085,10 @@ class OperatorPanelNode(Node):
                 "y": float(feedback.current_error.y),
                 "yaw": float(feedback.current_error.theta),
             }
+            if "stage" in details:
+                details["stage"] = _FINE_ALIGN_STAGE_NAMES.get(
+                    details["stage"], str(details["stage"])
+                )
         if hasattr(feedback, "tag_visible"):
             details["tag_visible"] = bool(feedback.tag_visible)
         with self._lock:
