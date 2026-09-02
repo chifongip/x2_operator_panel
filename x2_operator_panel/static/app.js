@@ -332,6 +332,7 @@
     byId("place-server").textContent = status.servers.place ? "Ready" : "Unavailable";
     byId("navigate-server").textContent = status.servers.navigate ? "Ready" : "Unavailable";
     byId("fine-align-server").textContent = status.servers.fine_align ? "Ready" : "Unavailable";
+    byId("undock-server").textContent = status.servers.undock ? "Ready" : "Unavailable";
     const navigation = status.navigation || {};
     const lifecycle = Object.values(navigation.lifecycle || {});
     const activeNodes = lifecycle.filter((node) => node.state_id === 3).length;
@@ -343,11 +344,11 @@
     const clearCostmapsButton = byId("clear-costmaps");
     clearCostmapsButton.disabled = !(costmapServices.global && costmapServices.local);
     clearCostmapsButton.title = clearCostmapsButton.disabled ? "Costmap clear services are unavailable" : "Clear both Nav2 costmaps";
-    const fineAlignActive = (status.operations || []).some((operation) =>
-      operation.kind === "fine_align" && ["SUBMITTING", "ACTIVE"].includes(operation.status));
-    const cancelFineAlignButton = byId("cancel-fine-align");
-    cancelFineAlignButton.disabled = !fineAlignActive;
-    cancelFineAlignButton.title = fineAlignActive ? "Cancel the active fine-alignment goal" : "No active fine-alignment goal";
+    const dockingMotionActive = (status.operations || []).some((operation) =>
+      ["fine_align", "undock"].includes(operation.kind) && ["SUBMITTING", "ACTIVE"].includes(operation.status));
+    const cancelDockingMotionButton = byId("cancel-docking-motion");
+    cancelDockingMotionButton.disabled = !dockingMotionActive;
+    cancelDockingMotionButton.title = dockingMotionActive ? "Cancel the active docking motion" : "No active docking motion";
     const globalPath = navigation.global_path;
     byId("global-path-state").textContent = globalPath?.fresh ? (globalPath.point_count ? `${globalPath.point_count} poses` : "No path") : (globalPath?.detail || "Waiting");
     const scan = status.scan;
@@ -389,11 +390,26 @@
     if (!error || ![error.x, error.y, error.yaw].every(Number.isFinite)) return "";
     return `error x ${error.x.toFixed(3)} m, y ${error.y.toFixed(3)} m, yaw ${error.yaw.toFixed(3)} rad`;
   }
+  function formatUndockDistance(operation) {
+    const traveled = operation.result?.distance_traveled ?? operation.feedback?.distance_traveled;
+    if (!Number.isFinite(traveled)) return "";
+    const parts = [`traveled ${traveled.toFixed(3)} m`];
+    const remaining = operation.feedback?.distance_remaining;
+    const commandedSpeed = operation.feedback?.commanded_speed;
+    const commandedLateralSpeed = operation.feedback?.commanded_lateral_speed;
+    const commandedYawSpeed = operation.feedback?.commanded_yaw_speed;
+    if (Number.isFinite(remaining)) parts.push(`remaining ${remaining.toFixed(3)} m`);
+    if (Number.isFinite(commandedSpeed)) parts.push(`command x ${commandedSpeed.toFixed(3)} m/s`);
+    if (Number.isFinite(commandedLateralSpeed)) parts.push(`y ${commandedLateralSpeed.toFixed(3)} m/s`);
+    if (Number.isFinite(commandedYawSpeed)) parts.push(`yaw ${commandedYawSpeed.toFixed(3)} rad/s`);
+    return parts.join(", ");
+  }
   function renderOperations(operations) {
     byId("operations").innerHTML = (operations || []).slice(0, 15).map((operation) => {
       const message = operation.result?.message || operation.result?.error_msg || operation.detail || "--";
       const planarError = formatPlanarError(operation.result?.final_error || operation.feedback?.current_error);
-      const detail = planarError ? `${message}; ${planarError}` : message;
+      const motionDetail = planarError || formatUndockDistance(operation);
+      const detail = motionDetail ? `${message}; ${motionDetail}` : message;
       return `<tr><td>${escapeHtml(operation.kind)}</td><td>${escapeHtml(operation.status)}</td><td>${escapeHtml(operation.stage)}</td><td>${operation.progress == null ? "--" : `${Math.round(operation.progress * 100)}%`}</td><td>${escapeHtml(detail)}</td></tr>`;
     }).join("") || '<tr><td colspan="5">No panel operations</td></tr>';
   }
@@ -561,6 +577,22 @@
       setError("");
     } catch (error) { setError(error.message); }
   }
+  async function undock() {
+    if (!window.confirm("Move the robot backward using the configured undocking profile?")) return;
+    const confirmNav2Idle = confirmNav2IdleWithoutStatus();
+    if (!state.status?.navigation?.goal_status?.available && !confirmNav2Idle) return;
+    try {
+      await api("/api/actions", {
+        method: "POST",
+        body: JSON.stringify({
+          kind: "undock",
+          confirmed: true,
+          confirm_nav2_idle: confirmNav2Idle,
+        }),
+      });
+      setError("");
+    } catch (error) { setError(error.message); }
+  }
   async function recoverState(requestedState) {
     if (!window.confirm(`Confirm manipulation state: ${requestedState}?`)) return;
     try { await api("/api/recover-state", { method: "POST", body: JSON.stringify({ requested_state: requestedState, confirmed: true }) }); setError(""); } catch (error) { setError(error.message); }
@@ -573,10 +605,10 @@
     if (!window.confirm("Request cancellation for all active panel goals?")) return;
     try { await api("/api/cancel", { method: "POST", body: "{}" }); setError(""); } catch (error) { setError(error.message); }
   }
-  async function cancelFineAlign() {
-    if (!window.confirm("Cancel the active fine-alignment docking goal?")) return;
+  async function cancelDockingMotion() {
+    if (!window.confirm("Cancel the active docking motion?")) return;
     try {
-      await api("/api/fine-align/cancel", { method: "POST", body: "{}" });
+      await api("/api/docking/cancel", { method: "POST", body: "{}" });
       setError("");
     } catch (error) { setError(error.message); }
   }
@@ -598,10 +630,11 @@
   byId("recover-holding").addEventListener("click", () => recoverState("holding"));
   byId("unlock-execution").addEventListener("click", unlockExecution);
   byId("cancel-active").addEventListener("click", cancelActive);
-  byId("cancel-fine-align").addEventListener("click", cancelFineAlign);
+  byId("cancel-docking-motion").addEventListener("click", cancelDockingMotion);
   byId("clear-costmaps").addEventListener("click", clearCostmaps);
   byId("check-fine-align").addEventListener("click", () => fineAlign(false));
   byId("execute-fine-align").addEventListener("click", () => fineAlign(true));
+  byId("execute-undock").addEventListener("click", undock);
   byId("select-initial-pose").addEventListener("click", () => setMapMode("initial_pose"));
   byId("select-navigation-goal").addEventListener("click", () => setMapMode("navigate"));
   byId("show-scan").addEventListener("change", drawMap);

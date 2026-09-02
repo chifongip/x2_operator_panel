@@ -26,7 +26,7 @@ from moveit_msgs.srv import GetPlanningScene
 from nav2_msgs.action import NavigateToPose
 from nav2_msgs.srv import ClearEntireCostmap
 from nav_msgs.msg import Odometry, Path as NavPath
-from x2_navigation.action import FineAlign
+from x2_navigation.action import FineAlign, Undock
 from rclpy.action import ActionClient
 from rclpy.duration import Duration
 from rclpy.node import Node
@@ -60,6 +60,11 @@ _FINE_ALIGN_STAGE_NAMES = {
     FineAlign.Feedback.CONTROLLING: "Controlling",
     FineAlign.Feedback.REACQUIRING: "Reacquiring target",
     FineAlign.Feedback.SETTLING: "Settling",
+}
+_UNDOCK_STAGE_NAMES = {
+    Undock.Feedback.VALIDATING: "Validating",
+    Undock.Feedback.MOVING: "Moving backward",
+    Undock.Feedback.SETTLING: "Settling",
 }
 
 
@@ -434,6 +439,7 @@ class OperatorPanelNode(Node):
             "reset": ActionClient(self, ResetManipulation, "/reset_manipulation"),
             "navigate": ActionClient(self, NavigateToPose, "/navigate_to_pose"),
             "fine_align": ActionClient(self, FineAlign, "/fine_align"),
+            "undock": ActionClient(self, Undock, "/undock"),
         }
         self._move_group_action_client = ActionClient(
             self, MoveGroup, self.move_group_action_name
@@ -600,6 +606,7 @@ class OperatorPanelNode(Node):
                 if self._shutting_down and command.name not in {
                     "cancel_active",
                     "cancel_fine_align",
+                    "cancel_docking_motion",
                 }:
                     raise PanelCommandError("The operator panel is shutting down")
                 if command.name == "unlock_execution":
@@ -609,7 +616,9 @@ class OperatorPanelNode(Node):
                 elif command.name == "cancel_active":
                     result = self._cancel_active()
                 elif command.name == "cancel_fine_align":
-                    result = self._cancel_fine_align()
+                    result = self._cancel_docking_motion()
+                elif command.name == "cancel_docking_motion":
+                    result = self._cancel_docking_motion()
                 elif command.name == "recover_state":
                     result = self._recover_state(command.payload)
                 elif command.name == "set_initial_pose":
@@ -780,6 +789,8 @@ class OperatorPanelNode(Node):
             operation = self._submit_navigation(payload)
         elif kind == "fine_align":
             operation = self._submit_fine_align(payload)
+        elif kind == "undock":
+            operation = self._submit_undock(payload)
         else:
             operation = self._submit_manipulation(kind, payload)
         return {"operation": operation.as_dict()}
@@ -843,6 +854,58 @@ class OperatorPanelNode(Node):
             lambda sent: self._on_goal_response(operation.identifier, sent)
         )
         self._audit("fine_align", "submitted", "execution" if execute else "measure_only")
+        return operation
+
+    def _submit_undock(self, payload: dict[str, Any]) -> Operation:
+        if payload.get("confirmed") is not True:
+            raise PanelCommandError("Physical undocking requires confirmation")
+        with self._lock:
+            manipulation_state = self._manipulation_state["state"]
+            nav_goal_status = self._nav_goal_status_locked()
+            collision_state = self._nav_lifecycle_status.get("collision_monitor", {})
+            if collision_state.get("state_id") != 3:
+                raise PanelCommandError(
+                    "Physical undocking requires an active Collision Monitor lifecycle node"
+                )
+            if time.monotonic() >= self._execution_unlocked_until:
+                raise PanelCommandError("Physical execution unlock has expired")
+        if manipulation_state not in {"EMPTY", "HOLDING"}:
+            raise PanelCommandError(
+                "Undocking requires a known EMPTY or HOLDING manipulation state"
+            )
+        if nav_goal_status.get("available") and nav_goal_status.get("active") is not False:
+            raise PanelCommandError("Nav2 must be idle before undocking")
+        if not nav_goal_status.get("available") and payload.get("confirm_nav2_idle") is not True:
+            raise PanelCommandError(
+                "Nav2 action status is unavailable; verify Nav2 is idle and confirm again"
+            )
+        with self._lock:
+            if time.monotonic() >= self._execution_unlocked_until:
+                raise PanelCommandError("Physical execution unlock has expired")
+            self._execution_unlocked_until = 0.0
+
+        operation = Operation(
+            identifier=str(uuid4()),
+            kind="undock",
+            requested_at=time.time(),
+            plan_only=False,
+            admission_deadline=time.monotonic() + self.goal_admission_timeout_sec,
+        )
+        self._register_operation(operation)
+        try:
+            future = self._action_clients["undock"].send_goal_async(
+                Undock.Goal(),
+                feedback_callback=lambda message: self._on_feedback(
+                    operation.identifier, message
+                ),
+            )
+        except Exception as error:
+            self._finish_operation(operation.identifier, "ERROR", {"message": str(error)})
+            raise PanelCommandError(f"Failed to submit undocking: {error}") from error
+        future.add_done_callback(
+            lambda sent: self._on_goal_response(operation.identifier, sent)
+        )
+        self._audit("undock", "submitted", "execution")
         return operation
 
     def _submit_manipulation(self, kind: str, payload: dict[str, Any]) -> Operation:
@@ -1075,6 +1138,20 @@ class OperatorPanelNode(Node):
             details["box_pose"] = _pose_as_dict(feedback.box_pose)
         if hasattr(feedback, "distance_remaining"):
             details["distance_remaining"] = float(feedback.distance_remaining)
+        if hasattr(feedback, "distance_traveled"):
+            details["distance_traveled"] = float(feedback.distance_traveled)
+        if hasattr(feedback, "commanded_speed"):
+            details["commanded_speed"] = float(feedback.commanded_speed)
+            if "stage" in details:
+                details["stage"] = _UNDOCK_STAGE_NAMES.get(
+                    details["stage"], str(details["stage"])
+                )
+        if hasattr(feedback, "commanded_lateral_speed"):
+            details["commanded_lateral_speed"] = float(
+                feedback.commanded_lateral_speed
+            )
+        if hasattr(feedback, "commanded_yaw_speed"):
+            details["commanded_yaw_speed"] = float(feedback.commanded_yaw_speed)
         if hasattr(feedback, "number_of_recoveries"):
             details["number_of_recoveries"] = int(feedback.number_of_recoveries)
         if hasattr(feedback, "current_pose"):
@@ -1112,7 +1189,14 @@ class OperatorPanelNode(Node):
     @staticmethod
     def _result_as_dict(result: Any) -> dict[str, Any]:
         details: dict[str, Any] = {}
-        for attribute in ("success", "error_code", "message", "object_held", "error_msg"):
+        for attribute in (
+            "success",
+            "error_code",
+            "message",
+            "object_held",
+            "error_msg",
+            "distance_traveled",
+        ):
             if hasattr(result, attribute):
                 details[attribute] = getattr(result, attribute)
         if hasattr(result, "achieved_pose"):
@@ -1168,34 +1252,38 @@ class OperatorPanelNode(Node):
             "non_cancelable_operation_ids": non_cancelable,
         }
 
-    def _cancel_fine_align(self) -> dict[str, Any]:
+    def _cancel_docking_motion(self) -> dict[str, Any]:
         canceled: list[str] = []
         non_cancelable: list[str] = []
         with self._lock:
-            active_fine_alignments = [
+            active_docking_operations = [
                 operation
                 for operation in self._active_operations()
-                if operation.kind == "fine_align"
+                if operation.kind in {"fine_align", "undock"}
             ]
-            if not active_fine_alignments:
-                raise PanelCommandError("No active fine alignment to cancel")
-            for operation in active_fine_alignments:
+            if not active_docking_operations:
+                raise PanelCommandError("No active docking motion to cancel")
+            for operation in active_docking_operations:
                 if not operation.cancelable:
                     non_cancelable.append(operation.identifier)
                     continue
                 operation.status = "CANCEL_REQUESTED"
-                operation.stage = "Fine-alignment cancellation requested"
+                operation.stage = "Docking-motion cancellation requested"
                 canceled.append(operation.identifier)
                 if operation.goal_handle is not None:
                     self._request_goal_cancel(
                         operation.identifier, operation.goal_handle
                     )
         if canceled:
-            self._audit("cancel_fine_align", "requested", ", ".join(canceled))
+            self._audit("cancel_docking_motion", "requested", ", ".join(canceled))
         return {
             "operation_ids": canceled,
             "non_cancelable_operation_ids": non_cancelable,
         }
+
+    def _cancel_fine_align(self) -> dict[str, Any]:
+        """Backward-compatible alias for the shared docking-motion cancellation."""
+        return self._cancel_docking_motion()
 
     def _request_goal_cancel(self, operation_id: str, goal_handle: Any) -> None:
         try:

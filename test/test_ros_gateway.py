@@ -16,7 +16,7 @@ from x2_operator_panel.ros_gateway import (
     _display_telemetry_qos,
 )
 from rclpy.qos import DurabilityPolicy, ReliabilityPolicy
-from x2_navigation.action import FineAlign
+from x2_navigation.action import FineAlign, Undock
 
 
 class FakeGoalHandle:
@@ -544,6 +544,61 @@ class RosGatewayTest(unittest.TestCase):
         self.assertTrue(goals[0].execute)
         self.assertEqual(node._execution_unlocked_until, 0.0)
 
+    def test_undocking_requires_unlock_and_submits_fixed_profile_goal(self):
+        sent = Future()
+        sent.set_result(FakeGoalHandle())
+        goals = []
+        node = object.__new__(OperatorPanelNode)
+        node._lock = threading.RLock()
+        node._manipulation_state = {"state": "EMPTY"}
+        node._nav_goal_status = {"available": True, "active": False}
+        node._nav_lifecycle_status = {"collision_monitor": {"state_id": 3}}
+        node._execution_unlocked_until = time.monotonic() + 30.0
+        node._operations = {}
+        node._operation_history = deque(maxlen=10)
+        node.goal_admission_timeout_sec = 5.0
+        node._audit_sink = None
+        node._action_clients = {
+            "undock": SimpleNamespace(
+                send_goal_async=lambda goal, feedback_callback: goals.append(goal) or sent
+            )
+        }
+
+        operation = node._submit_undock({"confirmed": True})
+
+        self.assertEqual(operation.kind, "undock")
+        self.assertFalse(operation.plan_only)
+        self.assertIsInstance(goals[0], Undock.Goal)
+        self.assertEqual(node._execution_unlocked_until, 0.0)
+
+    def test_undock_feedback_and_result_include_distance(self):
+        node = object.__new__(OperatorPanelNode)
+        node._lock = threading.RLock()
+        operation = Operation("undock", "undock", time.time())
+        node._operations = {operation.identifier: operation}
+        feedback = SimpleNamespace(
+            stage=Undock.Feedback.MOVING,
+            progress=0.5,
+            distance_traveled=0.15,
+            distance_remaining=0.15,
+            commanded_speed=-0.1,
+            commanded_lateral_speed=-0.02,
+            commanded_yaw_speed=-0.05,
+        )
+
+        node._on_feedback(operation.identifier, SimpleNamespace(feedback=feedback))
+
+        self.assertEqual(operation.stage, "Moving backward")
+        self.assertEqual(operation.feedback["distance_traveled"], 0.15)
+        self.assertEqual(operation.feedback["distance_remaining"], 0.15)
+        self.assertEqual(operation.feedback["commanded_speed"], -0.1)
+        self.assertEqual(operation.feedback["commanded_lateral_speed"], -0.02)
+        self.assertEqual(operation.feedback["commanded_yaw_speed"], -0.05)
+        result = OperatorPanelNode._result_as_dict(
+            SimpleNamespace(success=True, distance_traveled=0.31)
+        )
+        self.assertEqual(result["distance_traveled"], 0.31)
+
     def test_scan_points_are_projected_into_map_frame(self):
         scan = SimpleNamespace(
             ranges=[1.0, inf, 2.0],
@@ -713,12 +768,27 @@ class RosGatewayTest(unittest.TestCase):
         self.assertEqual(navigation_handle.cancel_calls, 0)
         self.assertEqual(navigation.status, "ACTIVE")
 
+    def test_shared_docking_cancel_cancels_undocking(self):
+        node = object.__new__(OperatorPanelNode)
+        node._lock = threading.RLock()
+        node._audit_sink = None
+        handle = FakeGoalHandle()
+        undock = Operation("undock", "undock", time.time(), status="ACTIVE")
+        undock.goal_handle = handle
+        node._operations = {undock.identifier: undock}
+
+        result = node._cancel_docking_motion()
+
+        self.assertEqual(result["operation_ids"], [undock.identifier])
+        self.assertEqual(handle.cancel_calls, 1)
+        self.assertEqual(undock.status, "CANCEL_REQUESTED")
+
     def test_cancel_fine_alignment_requires_an_active_goal(self):
         node = object.__new__(OperatorPanelNode)
         node._lock = threading.RLock()
         node._operations = {}
 
-        with self.assertRaisesRegex(PanelCommandError, "No active fine alignment"):
+        with self.assertRaisesRegex(PanelCommandError, "No active docking motion"):
             node._cancel_fine_align()
 
     def test_admission_timeout_requests_late_goal_cancellation(self):

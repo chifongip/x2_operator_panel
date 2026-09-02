@@ -193,9 +193,14 @@ manipulation state `EMPTY` or `HOLDING`; physical alignment additionally require
 an active Collision Monitor lifecycle node. Reverse x is controlled by the
 navigation server's `allow_reverse_x` parameter and remains disabled by default.
 Feedback and final planar error appear in operation history and native action
-cancellation remains available. **Cancel docking** cancels only the active
-fine-alignment goal; **Cancel active goals** still cancels every cancelable panel
-operation.
+cancellation remains available. **Undock** submits the fixed-profile `/undock`
+action, which moves backward while correcting lateral and yaw drift using the
+distance and speed limits configured by `x2_navigation`; it requires the same physical-motion unlock, confirmation,
+Nav2-idle check, manipulation-state gate, and active Collision Monitor as physical
+fine alignment. **Cancel docking motion** cancels the active fine-alignment or
+undocking goal; **Cancel active goals** still cancels every cancelable panel
+operation. `/api/fine-align/cancel` remains a compatibility alias for the shared
+`/api/docking/cancel` endpoint.
 
 The map's optional laser layer renders at most 360 finite ranges from
 `/scan_nav/laser`, transformed into `map` at the scan timestamp. It is a
