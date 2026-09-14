@@ -14,7 +14,13 @@ from typing import Any, Callable
 from uuid import uuid4
 
 from action_msgs.msg import GoalStatus, GoalStatusArray
-from agibot_x2_manipulation_msgs.action import Pick, PickPlace, Place, ResetManipulation
+from agibot_x2_manipulation_msgs.action import (
+    MoveCarryPose,
+    Pick,
+    PickPlace,
+    Place,
+    ResetManipulation,
+)
 from agibot_x2_manipulation_msgs.msg import ManipulationState
 from agibot_x2_manipulation_msgs.srv import RecoverManipulationState
 from ament_index_python.packages import get_package_share_directory
@@ -436,6 +442,9 @@ class OperatorPanelNode(Node):
             "pick": ActionClient(self, Pick, "/pick_box"),
             "place": ActionClient(self, Place, "/place_box"),
             "pick_place": ActionClient(self, PickPlace, "/pick_place"),
+            "move_carry_pose": ActionClient(
+                self, MoveCarryPose, "/move_carry_pose"
+            ),
             "reset": ActionClient(self, ResetManipulation, "/reset_manipulation"),
             "navigate": ActionClient(self, NavigateToPose, "/navigate_to_pose"),
             "fine_align": ActionClient(self, FineAlign, "/fine_align"),
@@ -912,6 +921,11 @@ class OperatorPanelNode(Node):
         plan_only = self._optional_boolean(payload, "plan_only", True) if kind != "reset" else None
         if kind == "reset" and payload.get("confirm_empty") is not True:
             raise PanelCommandError("Reset requires confirmation that no box is held")
+        if kind == "move_carry_pose":
+            with self._lock:
+                manipulation_state = self._manipulation_state["state"]
+            if manipulation_state != "HOLDING":
+                raise PanelCommandError("Carry-pose transitions require manipulation state HOLDING")
         requires_execution = kind == "reset" or plan_only is False
         goal = self._build_manipulation_goal(kind, payload, plan_only)
         if requires_execution:
@@ -1050,6 +1064,19 @@ class OperatorPanelNode(Node):
             if "place_pose" in payload:
                 goal.place_pose = self._parse_place_pose(payload["place_pose"])
             # A default-constructed pose tells pick_place_server to use tag9.
+            goal.plan_only = bool(plan_only)
+            return goal
+        if kind == "move_carry_pose":
+            target_pose = payload.get("target_pose")
+            if isinstance(target_pose, bool) or not isinstance(target_pose, int):
+                raise PanelCommandError("Carry-pose target must be Carry A or Carry B")
+            if target_pose not in {
+                MoveCarryPose.Goal.CARRY_A,
+                MoveCarryPose.Goal.CARRY_B,
+            }:
+                raise PanelCommandError("Carry-pose target must be Carry A or Carry B")
+            goal = MoveCarryPose.Goal()
+            goal.target_pose = target_pose
             goal.plan_only = bool(plan_only)
             return goal
         if kind == "reset":

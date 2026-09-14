@@ -54,6 +54,23 @@ class UiAssetsTest(unittest.TestCase):
         self.assertIn('id="use-manual-place-pose"', page)
         self.assertIn('id="manual-place-fields" class="place-pose-fields" disabled', page)
 
+    def test_manual_carry_pose_transition_controls_are_available(self):
+        package_root = Path(__file__).parents[1]
+        page = (package_root / "x2_operator_panel" / "static" / "index.html").read_text(
+            encoding="utf-8"
+        )
+        script = (package_root / "x2_operator_panel" / "static" / "app.js").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn('id="carry-pose-server"', page)
+        self.assertIn('id="move-carry-a"', page)
+        self.assertIn('id="move-carry-b"', page)
+        self.assertIn('submitManipulation("move_carry_pose", { target_pose: 0 })', script)
+        self.assertIn('submitManipulation("move_carry_pose", { target_pose: 1 })', script)
+        self.assertIn("const carryPoseReady", script)
+        self.assertIn("button.disabled = !carryPoseReady", script)
+
     def test_available_pose_always_draws_a_robot_marker(self):
         package_root = Path(__file__).parents[1]
         script = (package_root / "x2_operator_panel" / "static" / "app.js").read_text(

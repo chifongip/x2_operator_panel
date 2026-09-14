@@ -330,6 +330,15 @@
     byId("localization-delay").textContent = delay?.fresh ? `${delay.value.toFixed(1)} ms` : (delay?.detail || "Waiting");
     byId("pick-server").textContent = status.servers.pick ? "Ready" : "Unavailable";
     byId("place-server").textContent = status.servers.place ? "Ready" : "Unavailable";
+    byId("carry-pose-server").textContent = status.servers.move_carry_pose ? "Ready" : "Unavailable";
+    const carryPoseReady = status.servers.move_carry_pose && status.manipulation_state.state === "HOLDING";
+    const carryPoseDetail = !status.servers.move_carry_pose
+      ? "Carry-pose action server is unavailable"
+      : "Carry-pose transitions require manipulation state HOLDING";
+    [byId("move-carry-a"), byId("move-carry-b")].forEach((button) => {
+      button.disabled = !carryPoseReady;
+      button.title = carryPoseReady ? "Plan or move the held box to this carry pose" : carryPoseDetail;
+    });
     byId("navigate-server").textContent = status.servers.navigate ? "Ready" : "Unavailable";
     byId("fine-align-server").textContent = status.servers.fine_align ? "Ready" : "Unavailable";
     byId("undock-server").textContent = status.servers.undock ? "Ready" : "Unavailable";
@@ -625,6 +634,8 @@
   byId("use-manual-place-pose").addEventListener("change", syncManualPlacePoseFields);
   syncManualPlacePoseFields();
   byId("place-form").addEventListener("submit", (event) => { event.preventDefault(); submitManipulation("place"); });
+  byId("move-carry-a").addEventListener("click", () => submitManipulation("move_carry_pose", { target_pose: 0 }));
+  byId("move-carry-b").addEventListener("click", () => submitManipulation("move_carry_pose", { target_pose: 1 }));
   byId("reset-manipulation").addEventListener("click", () => submitManipulation("reset", { confirm_empty: true }));
   byId("recover-empty").addEventListener("click", () => recoverState("empty"));
   byId("recover-holding").addEventListener("click", () => recoverState("holding"));

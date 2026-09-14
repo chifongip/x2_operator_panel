@@ -9,6 +9,7 @@ import unittest
 from unittest.mock import patch
 
 from builtin_interfaces.msg import Time
+from agibot_x2_manipulation_msgs.action import MoveCarryPose
 from x2_operator_panel.ros_gateway import (
     Operation,
     OperatorPanelNode,
@@ -189,6 +190,33 @@ class RosGatewayTest(unittest.TestCase):
             self.assertAlmostEqual(goal.place_pose.pose.position.y, 0.0)
             self.assertAlmostEqual(goal.place_pose.pose.position.z, 0.29)
             self.assertAlmostEqual(goal.place_pose.pose.orientation.w, 1.0)
+
+    def test_carry_pose_goal_selects_a_or_b(self):
+        node = object.__new__(OperatorPanelNode)
+
+        for target in (MoveCarryPose.Goal.CARRY_A, MoveCarryPose.Goal.CARRY_B):
+            goal = node._build_manipulation_goal(
+                "move_carry_pose", {"target_pose": target}, True
+            )
+
+            self.assertTrue(goal.plan_only)
+            self.assertEqual(goal.target_pose, target)
+
+    def test_carry_pose_goal_rejects_an_unknown_target(self):
+        node = object.__new__(OperatorPanelNode)
+
+        with self.assertRaisesRegex(PanelCommandError, "Carry-pose target"):
+            node._build_manipulation_goal("move_carry_pose", {"target_pose": 2}, True)
+
+    def test_carry_pose_transition_requires_a_held_object(self):
+        node = object.__new__(OperatorPanelNode)
+        node._lock = threading.RLock()
+        node._manipulation_state = {"state": "EMPTY"}
+
+        with self.assertRaisesRegex(PanelCommandError, "state HOLDING"):
+            node._submit_manipulation(
+                "move_carry_pose", {"target_pose": MoveCarryPose.Goal.CARRY_B}
+            )
 
     def test_timed_out_queued_command_is_not_executed_later(self):
         node = object.__new__(OperatorPanelNode)

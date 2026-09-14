@@ -164,6 +164,12 @@ selected named destination always needs a confirmation before the panel sends
 the real Nav2 goal. Navigation is rejected unless the manipulation state is
 known and the `map -> base_link` transform is current.
 
+The **Move to Carry A** and **Move to Carry B** controls submit the manual
+`/move_carry_pose` manipulation action. They are available only while the
+reported manipulation state is `HOLDING`; both use the same plan-only toggle,
+execution unlock, and physical-motion confirmation as pick/place. Carry B is a
+calibrated payload pose, not a base-navigation command.
+
 The map supports two confirmed commands. Select **Initial pose** or
 **Navigation goal**, then click and drag on the map to set the map-frame
 position and heading. Initial pose publishes `geometry_msgs/msg/PoseWithCovarianceStamped`
