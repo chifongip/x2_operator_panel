@@ -127,6 +127,26 @@ def generate_launch_description():
                 default_value="1.0",
                 description="Interval between browser status broadcasts in seconds.",
             ),
+            DeclareLaunchArgument(
+                "front_center_camera_topic",
+                default_value="/aima/hal/sensor/rgb_head_front_center/rgb_image_rect",
+                description="Rectified front-center image shown in the operator panel.",
+            ),
+            DeclareLaunchArgument(
+                "throttled_camera_topic",
+                default_value="/x2/rgb_image_throttled",
+                description="Throttled AprilTag input image shown in the operator panel.",
+            ),
+            DeclareLaunchArgument(
+                "camera_display_rate_hz",
+                default_value="1.0",
+                description="Maximum JPEG encode and browser refresh rate per camera.",
+            ),
+            DeclareLaunchArgument(
+                "camera_jpeg_quality",
+                default_value="70",
+                description="JPEG quality for camera previews (1-100).",
+            ),
             DeclareLaunchArgument("login_per_source_limit", default_value="5"),
             DeclareLaunchArgument("login_global_limit", default_value="30"),
             DeclareLaunchArgument("login_window_sec", default_value="60.0"),
@@ -220,6 +240,18 @@ def generate_launch_description():
                         ),
                         "status_publish_period_sec": LaunchConfiguration(
                             "status_publish_period_sec"
+                        ),
+                        "front_center_camera_topic": LaunchConfiguration(
+                            "front_center_camera_topic"
+                        ),
+                        "throttled_camera_topic": LaunchConfiguration(
+                            "throttled_camera_topic"
+                        ),
+                        "camera_display_rate_hz": LaunchConfiguration(
+                            "camera_display_rate_hz"
+                        ),
+                        "camera_jpeg_quality": LaunchConfiguration(
+                            "camera_jpeg_quality"
                         ),
                         "login_per_source_limit": LaunchConfiguration(
                             "login_per_source_limit"

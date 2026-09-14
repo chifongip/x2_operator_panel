@@ -406,6 +406,9 @@ class PanelApplication:
         self.websocket_client_limit = node.websocket_client_limit
         self.websocket_send_timeout_sec = node.websocket_send_timeout_sec
         self.websocket_compression = node.websocket_compression
+        self.camera_refresh_period_ms = max(
+            1, round(1000.0 / node.camera_display_rate_hz)
+        )
         if (
             self.websocket_client_limit < 1
             or self.websocket_send_timeout_sec <= 0.0
@@ -607,6 +610,9 @@ def _make_request_handler(application: PanelApplication) -> type[BaseHTTPRequest
                     self._bytes(HTTPStatus.OK, application.map_asset.png, "image/png")
                 elif path == "/api/presets":
                     self._json(HTTPStatus.OK, {"presets": application.node.presets()})
+                elif path in {"/api/cameras/front-center", "/api/cameras/throttled"}:
+                    camera_name = path.rsplit("/", 1)[-1].replace("-", "_")
+                    self._camera_image(camera_name)
                 else:
                     self._json_error(HTTPStatus.NOT_FOUND, "Unknown API endpoint")
                 return
@@ -735,6 +741,7 @@ def _make_request_handler(application: PanelApplication) -> type[BaseHTTPRequest
                 config = {
                     "websocketPort": application.websocket_port,
                     "websocketUrl": application.websocket_url,
+                    "cameraRefreshPeriodMs": application.camera_refresh_period_ms,
                 }
                 body = f"window.X2_PANEL_CONFIG={json.dumps(config)};\n".encode("utf-8")
                 self._bytes(
@@ -757,6 +764,31 @@ def _make_request_handler(application: PanelApplication) -> type[BaseHTTPRequest
                 status,
                 json.dumps(value, separators=(",", ":")).encode("utf-8"),
                 "application/json; charset=utf-8",
+            )
+
+        def _camera_image(self, camera_name: str) -> None:
+            frame = application.node.camera_frame(camera_name)
+            if frame is None:
+                self._bytes(HTTPStatus.NO_CONTENT, b"", "text/plain; charset=utf-8")
+                return
+
+            requested_etags = {
+                etag.strip()
+                for etag in self.headers.get("If-None-Match", "").split(",")
+            }
+            if "*" in requested_etags or frame.etag in requested_etags:
+                self._bytes(
+                    HTTPStatus.NOT_MODIFIED,
+                    b"",
+                    "image/jpeg",
+                    {"ETag": frame.etag},
+                )
+                return
+            self._bytes(
+                HTTPStatus.OK,
+                frame.jpeg,
+                "image/jpeg",
+                {"ETag": frame.etag},
             )
 
         def _json_error(
@@ -789,7 +821,7 @@ def _make_request_handler(application: PanelApplication) -> type[BaseHTTPRequest
             self.send_header(
                 "Content-Security-Policy",
                 "default-src 'self'; connect-src 'self' ws: wss:; "
-                "img-src 'self'; style-src 'self'; script-src 'self'; "
+                "img-src 'self' blob:; style-src 'self'; script-src 'self'; "
                 "frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
             )
             for name, value in (headers or {}).items():

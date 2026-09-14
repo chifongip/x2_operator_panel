@@ -51,6 +51,31 @@ robot image with `ros2 pkg prefix pointcloud_to_laserscan`. For a stock Humble
 image that lacks it, install `ros-humble-pointcloud-to-laserscan` and rebuild
 the workspace.
 
+## Camera previews
+
+After sign-in, the panel shows the rectified front-center AprilTag image from
+`/aima/hal/sensor/rgb_head_front_center/rgb_image_rect` and the throttled
+detector input from `/x2/rgb_image_throttled`. Camera frames are delivered as
+authenticated JPEG responses, not through the status WebSocket. By default,
+the panel encodes and polls each preview at no more than 1 Hz with JPEG quality
+70; unchanged frames use HTTP conditional requests and do not resend the JPEG.
+Use the checked-by-default **Show previews** control to pause both browser image
+requests entirely while leaving the rest of the panel active.
+
+For a lower-bandwidth remote view, for example 0.5 Hz at JPEG quality 60:
+
+```bash
+ros2 launch x2_operator_panel operator_panel.launch.py \
+  camera_display_rate_hz:=0.5 \
+  camera_jpeg_quality:=60
+```
+
+These parameters limit panel encoding and browser traffic only. They do not
+alter AprilTag detection or reduce DDS traffic from a camera publisher to a
+panel running on another machine. Run the panel on the robot with the camera
+publishers, or rate-limit the source image pipeline, when that DDS link must
+also be reduced.
+
 The default address is `http://127.0.0.1:8080`. The server keeps this loopback
 default so credentials and session cookies do not cross a LAN over cleartext
 HTTP.

@@ -10,7 +10,12 @@
     mapMode: "initial_pose",
     mapSelection: null,
     mapPointer: null,
+    cameraPollTimer: null,
   };
+  const cameraStreams = [
+    { endpoint: "/api/cameras/front-center", imageId: "front-center-image", statusId: "front-center-camera-status", etag: null, objectUrl: null, inFlight: false },
+    { endpoint: "/api/cameras/throttled", imageId: "throttled-image", statusId: "throttled-camera-status", etag: null, objectUrl: null, inFlight: false },
+  ];
   const byId = (id) => document.getElementById(id);
   const canvas = byId("map-canvas");
   const context = canvas.getContext("2d");
@@ -55,6 +60,7 @@
   }
   function returnToLogin(message) {
     state.authenticated = false;
+    stopCameraStreams();
     if (state.socket) {
       state.socket.onclose = null;
       state.socket.close();
@@ -110,6 +116,7 @@
       renderPresets();
       applyStatus(status);
       connectStatusStream();
+      startCameraStreams();
     } catch (error) { setError(error.message); }
   }
 
@@ -120,6 +127,80 @@
       image.onerror = () => reject(new Error("Could not load the local navigation map"));
       image.src = url;
     });
+  }
+
+  function stopCameraStreams() {
+    if (state.cameraPollTimer !== null) {
+      window.clearInterval(state.cameraPollTimer);
+      state.cameraPollTimer = null;
+    }
+    cameraStreams.forEach((stream) => { stream.inFlight = false; stream.etag = null; });
+  }
+
+  function cameraPreviewsEnabled() {
+    return byId("show-camera-previews").checked;
+  }
+
+  async function refreshCameraStream(stream) {
+    if (!state.authenticated || stream.inFlight) return;
+    stream.inFlight = true;
+    try {
+      const headers = stream.etag ? { "If-None-Match": stream.etag } : {};
+      const response = await fetch(stream.endpoint, { credentials: "same-origin", headers });
+      if (response.status === 401) {
+        returnToLogin("Your operator session expired. Sign in again.");
+        return;
+      }
+      if (response.status === 304) return;
+      if (response.status === 204) {
+        byId(stream.statusId).textContent = "Waiting for image";
+        return;
+      }
+      if (!response.ok) throw new Error(`Preview request failed (${response.status})`);
+      const image = byId(stream.imageId);
+      const previousUrl = stream.objectUrl;
+      stream.objectUrl = URL.createObjectURL(await response.blob());
+      stream.etag = response.headers.get("ETag");
+      image.onload = () => {
+        if (previousUrl) URL.revokeObjectURL(previousUrl);
+        byId(stream.statusId).textContent = "Live";
+      };
+      image.onerror = () => {
+        URL.revokeObjectURL(stream.objectUrl);
+        stream.objectUrl = null;
+        byId(stream.statusId).textContent = "Could not display image";
+      };
+      image.src = stream.objectUrl;
+    } catch (_) {
+      if (state.authenticated) byId(stream.statusId).textContent = "Preview unavailable";
+    } finally {
+      stream.inFlight = false;
+    }
+  }
+
+  function startCameraStreams() {
+    stopCameraStreams();
+    if (!cameraPreviewsEnabled()) {
+      byId("camera-refresh-rate").textContent = "Previews paused";
+      return;
+    }
+    const refreshPeriodMs = Math.max(1, Number(window.X2_PANEL_CONFIG.cameraRefreshPeriodMs) || 1000);
+    byId("camera-refresh-rate").textContent = `At most ${(1000 / refreshPeriodMs).toFixed(1)} frame/s per preview`;
+    cameraStreams.forEach(refreshCameraStream);
+    state.cameraPollTimer = window.setInterval(
+      () => cameraStreams.forEach(refreshCameraStream), refreshPeriodMs
+    );
+  }
+
+  function toggleCameraPreviews() {
+    const enabled = cameraPreviewsEnabled();
+    byId("camera-grid").hidden = !enabled;
+    if (enabled) {
+      startCameraStreams();
+    } else {
+      stopCameraStreams();
+      byId("camera-refresh-rate").textContent = "Previews paused";
+    }
   }
 
   function mapPoint(x, y) {
@@ -649,6 +730,7 @@
   byId("select-initial-pose").addEventListener("click", () => setMapMode("initial_pose"));
   byId("select-navigation-goal").addEventListener("click", () => setMapMode("navigate"));
   byId("show-scan").addEventListener("change", drawMap);
+  byId("show-camera-previews").addEventListener("change", toggleCameraPreviews);
   byId("clear-map-command").addEventListener("click", clearMapSelection);
   byId("submit-map-command").addEventListener("click", submitMapSelection);
   canvas.addEventListener("pointerdown", startMapSelection);

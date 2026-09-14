@@ -13,6 +13,8 @@ import time
 from typing import Any, Callable
 from uuid import uuid4
 
+import cv2
+import numpy as np
 from action_msgs.msg import GoalStatus, GoalStatusArray
 from agibot_x2_manipulation_msgs.action import (
     MoveCarryPose,
@@ -38,7 +40,7 @@ from rclpy.duration import Duration
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.time import Time
-from sensor_msgs.msg import JointState, LaserScan
+from sensor_msgs.msg import Image, JointState, LaserScan
 from std_msgs.msg import Float32
 from tf2_ros import Buffer, TransformException, TransformListener
 import yaml
@@ -140,6 +142,14 @@ class QueuedCommand:
     response: Future[dict[str, Any]]
 
 
+@dataclass(frozen=True)
+class CameraFrame:
+    """A JPEG preview cached for an authenticated browser request."""
+
+    jpeg: bytes
+    etag: str
+
+
 def load_navigation_presets(path: str | Path) -> list[NavigationPreset]:
     presets_path = Path(path)
     if not presets_path.is_file():
@@ -215,6 +225,42 @@ def _display_telemetry_qos() -> QoSProfile:
     )
 
 
+def _image_to_bgr8(message: Image) -> Any:
+    """Convert the supported 8-bit ROS image encodings into OpenCV BGR."""
+    encodings = {
+        "bgr8": (3, None),
+        "rgb8": (3, cv2.COLOR_RGB2BGR),
+        "mono8": (1, cv2.COLOR_GRAY2BGR),
+        "bgra8": (4, cv2.COLOR_BGRA2BGR),
+        "rgba8": (4, cv2.COLOR_RGBA2BGR),
+        # Generic ROS 8-bit encodings do not define channel order; follow the
+        # conventional OpenCV BGR/BGRA interpretation for preview purposes.
+        "8uc1": (1, cv2.COLOR_GRAY2BGR),
+        "8uc3": (3, None),
+        "8uc4": (4, cv2.COLOR_BGRA2BGR),
+    }
+    encoding = message.encoding.lower()
+    if encoding not in encodings:
+        raise ValueError(f"unsupported image encoding {message.encoding!r}")
+    if message.width <= 0 or message.height <= 0:
+        raise ValueError("image dimensions must be positive")
+
+    channels, conversion = encodings[encoding]
+    row_bytes = message.width * channels
+    if message.step < row_bytes:
+        raise ValueError("image step is shorter than a row of pixel data")
+    required_bytes = message.step * message.height
+    data = memoryview(message.data)
+    if data.nbytes < required_bytes:
+        raise ValueError("image data is shorter than its declared dimensions")
+
+    rows = np.frombuffer(data, dtype=np.uint8, count=required_bytes).reshape(
+        message.height, message.step
+    )
+    pixels = rows[:, :row_bytes].reshape(message.height, message.width, channels)
+    return cv2.cvtColor(pixels, conversion) if conversion is not None else pixels
+
+
 class OperatorPanelNode(Node):
     """Single ROS owner for every browser-exposed robot interface."""
 
@@ -252,6 +298,19 @@ class OperatorPanelNode(Node):
         )
         self.status_publish_period_sec = float(
             self.declare_parameter("status_publish_period_sec", 1.0).value
+        )
+        self.front_center_camera_topic = self.declare_parameter(
+            "front_center_camera_topic",
+            "/aima/hal/sensor/rgb_head_front_center/rgb_image_rect",
+        ).value
+        self.throttled_camera_topic = self.declare_parameter(
+            "throttled_camera_topic", "/x2/rgb_image_throttled"
+        ).value
+        self.camera_display_rate_hz = float(
+            self.declare_parameter("camera_display_rate_hz", 1.0).value
+        )
+        self.camera_jpeg_quality = int(
+            self.declare_parameter("camera_jpeg_quality", 70).value
         )
         self.websocket_compression = bool(
             self.declare_parameter("websocket_compression", False).value
@@ -329,6 +388,7 @@ class OperatorPanelNode(Node):
             "websocket_client_limit": self.websocket_client_limit,
             "websocket_send_timeout_sec": self.websocket_send_timeout_sec,
             "status_publish_period_sec": self.status_publish_period_sec,
+            "camera_display_rate_hz": self.camera_display_rate_hz,
             "navigation_lifecycle_poll_period_sec": self.navigation_lifecycle_poll_period_sec,
             "login_per_source_limit": self.login_per_source_limit,
             "login_global_limit": self.login_global_limit,
@@ -357,6 +417,10 @@ class OperatorPanelNode(Node):
             raise ValueError("HTTP and WebSocket ports must be between 1 and 65535")
         if self.http_port == self.websocket_port:
             raise ValueError("HTTP and WebSocket ports must be different")
+        if not 1 <= self.camera_jpeg_quality <= 100:
+            raise ValueError("camera_jpeg_quality must be between 1 and 100")
+        if not self.front_center_camera_topic or not self.throttled_camera_topic:
+            raise ValueError("Camera preview topics must not be empty")
 
         self._lock = threading.RLock()
         self._commands: Queue[QueuedCommand] = Queue()
@@ -369,6 +433,9 @@ class OperatorPanelNode(Node):
         self._execution_unlocked_until = 0.0
         self._status_sink: Callable[[], None] | None = None
         self._audit_sink: Callable[[str, str, str], None] | None = None
+        self._camera_frames: dict[str, CameraFrame] = {}
+        self._camera_last_encoded_monotonic: dict[str, float] = {}
+        self._camera_frame_versions: dict[str, int] = {}
         self._manipulation_state = {"state": "UNKNOWN", "detail": "No state received"}
         self._box_pose: dict[str, Any] | None = None
         self._box_pose_received_monotonic: float | None = None
@@ -522,6 +589,18 @@ class OperatorPanelNode(Node):
             self._on_diagnostics,
             telemetry_qos,
         )
+        self.create_subscription(
+            Image,
+            self.front_center_camera_topic,
+            lambda message: self._on_camera_image("front_center", message),
+            telemetry_qos,
+        )
+        self.create_subscription(
+            Image,
+            self.throttled_camera_topic,
+            lambda message: self._on_camera_image("throttled", message),
+            telemetry_qos,
+        )
         self.create_timer(0.05, self._drain_commands)
         self.create_timer(0.20, self._poll_map_pose)
         self.create_timer(0.20, self._expire_pending_operations)
@@ -538,6 +617,11 @@ class OperatorPanelNode(Node):
 
     def presets(self) -> list[dict[str, Any]]:
         return [preset.as_dict() for preset in self._presets.values()]
+
+    def camera_frame(self, camera_name: str) -> CameraFrame | None:
+        """Return the latest encoded camera preview without retaining ROS data."""
+        with self._lock:
+            return self._camera_frames.get(camera_name)
 
     def request(
         self, name: str, payload: dict[str, Any], timeout_sec: float = 5.0
@@ -1527,6 +1611,40 @@ class OperatorPanelNode(Node):
     def _on_joint_states(self, _: JointState) -> None:
         with self._lock:
             self._joint_states_received_monotonic = time.monotonic()
+
+    def _on_camera_image(self, camera_name: str, message: Image) -> None:
+        """Encode at most one browser preview per configured interval and camera."""
+        now = time.monotonic()
+        with self._lock:
+            last_encoded = self._camera_last_encoded_monotonic.get(camera_name)
+            if (
+                last_encoded is not None
+                and now - last_encoded < 1.0 / self.camera_display_rate_hz
+            ):
+                return
+            self._camera_last_encoded_monotonic[camera_name] = now
+
+        try:
+            bgr_image = _image_to_bgr8(message)
+            encoded, jpeg = cv2.imencode(
+                ".jpg",
+                bgr_image,
+                [int(cv2.IMWRITE_JPEG_QUALITY), self.camera_jpeg_quality],
+            )
+            if not encoded:
+                raise ValueError("JPEG encoder did not return an image")
+        except (ValueError, cv2.error) as error:
+            self.get_logger().warn(
+                f"Could not encode {camera_name} camera preview: {error}"
+            )
+            return
+
+        with self._lock:
+            version = self._camera_frame_versions.get(camera_name, 0) + 1
+            self._camera_frame_versions[camera_name] = version
+            self._camera_frames[camera_name] = CameraFrame(
+                jpeg=jpeg.tobytes(), etag=f'"{version}"'
+            )
 
     def _on_localization_confidence(self, message: Float32) -> None:
         self._on_localization_metric("confidence", float(message.data))

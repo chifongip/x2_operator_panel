@@ -36,6 +36,30 @@ class UiAssetsTest(unittest.TestCase):
         self.assertIn('"websocket_compression"', launch_file)
         self.assertIn('default_value="false"', launch_file)
 
+    def test_camera_previews_use_configurable_conditional_refreshes(self):
+        package_root = Path(__file__).parents[1]
+        page = (package_root / "x2_operator_panel" / "static" / "index.html").read_text(
+            encoding="utf-8"
+        )
+        script = (package_root / "x2_operator_panel" / "static" / "app.js").read_text(
+            encoding="utf-8"
+        )
+        server = (package_root / "x2_operator_panel" / "panel_server.py").read_text(
+            encoding="utf-8"
+        )
+        launch_file = (package_root / "launch" / "operator_panel.launch.py").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn('id="front-center-image"', page)
+        self.assertIn('id="throttled-image"', page)
+        self.assertIn('id="show-camera-previews"', page)
+        self.assertIn("function startCameraStreams", script)
+        self.assertIn("function toggleCameraPreviews", script)
+        self.assertIn('"If-None-Match"', script)
+        self.assertIn('"/api/cameras/front-center"', server)
+        self.assertIn('"camera_display_rate_hz"', launch_file)
+
     def test_place_pose_defaults_to_tag_placement_with_manual_override(self):
         package_root = Path(__file__).parents[1]
         script = (package_root / "x2_operator_panel" / "static" / "app.js").read_text(

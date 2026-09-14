@@ -108,6 +108,34 @@
         </section>
       </aside>
 
+      <section class="camera-section" aria-label="AprilTag camera previews">
+        <div class="section-heading">
+          <div>
+            <h2>AprilTag camera previews</h2>
+            <p id="camera-refresh-rate" class="muted">Loading preview rate</p>
+          </div>
+          <label class="plan-toggle"><input id="show-camera-previews" type="checkbox" checked>Show previews</label>
+        </div>
+        <div id="camera-grid" class="camera-grid">
+          <figure class="camera-card">
+            <figcaption>
+              <strong>Front-center rectified</strong>
+              <span>/aima/hal/sensor/rgb_head_front_center/rgb_image_rect</span>
+              <small id="front-center-camera-status">Waiting for image</small>
+            </figcaption>
+            <div class="camera-frame"><img id="front-center-image" alt="Latest rectified front-center camera frame"></div>
+          </figure>
+          <figure class="camera-card">
+            <figcaption>
+              <strong>Throttled detector input</strong>
+              <span>/x2/rgb_image_throttled</span>
+              <small id="throttled-camera-status">Waiting for image</small>
+            </figcaption>
+            <div class="camera-frame"><img id="throttled-image" alt="Latest throttled AprilTag detector input frame"></div>
+          </figure>
+        </div>
+      </section>
+
       <section class="commands-section" aria-label="Commands">
         <section class="command-group">
           <div class="section-heading compact">
