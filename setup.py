@@ -19,7 +19,7 @@ setup(
             "x2_operator_panel/static/style.css",
         ]),
     ],
-    install_requires=["setuptools", "PyYAML", "websockets"],
+    install_requires=["setuptools", "Pillow", "PyYAML", "websockets"],
     zip_safe=True,
     maintainer="oscar",
     maintainer_email="oscar.ip@lscm.hk",

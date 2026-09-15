@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import deque
 from concurrent.futures import Future, TimeoutError as FutureTimeoutError
 from dataclasses import dataclass, field
+from io import BytesIO
 from math import atan2, cos, hypot, isfinite, sin
 from pathlib import Path
 from queue import Empty, Queue
@@ -13,6 +14,7 @@ import time
 from typing import Any, Callable
 from uuid import uuid4
 
+from PIL import Image as PillowImage
 from action_msgs.msg import GoalStatus, GoalStatusArray
 from agibot_x2_manipulation_msgs.action import (
     MoveCarryPose,
@@ -38,7 +40,7 @@ from rclpy.duration import Duration
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.time import Time
-from sensor_msgs.msg import CompressedImage, JointState, LaserScan
+from sensor_msgs.msg import Image, JointState, LaserScan
 from std_msgs.msg import Float32
 from tf2_ros import Buffer, TransformException, TransformListener
 import yaml
@@ -146,6 +148,60 @@ class CameraFrame:
 
     jpeg: bytes
     etag: str
+
+
+_CAMERA_ENCODINGS = {
+    "rgb8": ("RGB", "RGB", 3),
+    "bgr8": ("RGB", "BGR", 3),
+    "rgba8": ("RGBA", "RGBA", 4),
+    "bgra8": ("RGBA", "BGRA", 4),
+    "mono8": ("L", "L", 1),
+}
+
+
+def encode_camera_image_as_jpeg(message: Image, quality: int) -> bytes:
+    """Convert a supported ROS raw image into browser-ready JPEG bytes."""
+    encoding = message.encoding.lower()
+    try:
+        mode, raw_mode, bytes_per_pixel = _CAMERA_ENCODINGS[encoding]
+    except KeyError as error:
+        supported = ", ".join(sorted(_CAMERA_ENCODINGS))
+        raise ValueError(
+            f"Unsupported camera encoding {message.encoding!r}; expected one of {supported}"
+        ) from error
+
+    if message.width <= 0 or message.height <= 0:
+        raise ValueError("Camera image dimensions must be positive")
+    minimum_step = message.width * bytes_per_pixel
+    if message.step < minimum_step:
+        raise ValueError(
+            f"Camera image step {message.step} is smaller than {minimum_step} bytes"
+        )
+    payload = bytes(message.data)
+    expected_size = message.step * message.height
+    if len(payload) < expected_size:
+        raise ValueError(
+            f"Camera image has {len(payload)} bytes but requires {expected_size} bytes"
+        )
+
+    source = PillowImage.frombytes(
+        mode,
+        (message.width, message.height),
+        payload,
+        "raw",
+        raw_mode,
+        message.step,
+        1,
+    )
+    preview = source.convert("RGB") if source.mode == "RGBA" else source
+    try:
+        encoded = BytesIO()
+        preview.save(encoded, format="JPEG", quality=quality)
+        return encoded.getvalue()
+    finally:
+        if preview is not source:
+            preview.close()
+        source.close()
 
 
 def load_navigation_presets(path: str | Path) -> list[NavigationPreset]:
@@ -261,16 +317,19 @@ class OperatorPanelNode(Node):
         self.status_publish_period_sec = float(
             self.declare_parameter("status_publish_period_sec", 1.0).value
         )
-        self.front_center_compressed_camera_topic = self.declare_parameter(
-            "front_center_compressed_camera_topic",
-            "/x2/operator_panel/front_center_preview/compressed",
+        self.front_center_camera_topic = self.declare_parameter(
+            "front_center_camera_topic",
+            "/aima/hal/sensor/rgb_head_front_center/rgb_image_rect",
         ).value
-        self.throttled_compressed_camera_topic = self.declare_parameter(
-            "throttled_compressed_camera_topic",
-            "/x2/operator_panel/throttled_preview/compressed",
+        self.throttled_camera_topic = self.declare_parameter(
+            "throttled_camera_topic",
+            "/x2/rgb_image_throttled",
         ).value
         self.camera_display_rate_hz = float(
             self.declare_parameter("camera_display_rate_hz", 1.0).value
+        )
+        self.camera_jpeg_quality = int(
+            self.declare_parameter("camera_jpeg_quality", 70).value
         )
         self.websocket_compression = bool(
             self.declare_parameter("websocket_compression", False).value
@@ -377,11 +436,10 @@ class OperatorPanelNode(Node):
             raise ValueError("HTTP and WebSocket ports must be between 1 and 65535")
         if self.http_port == self.websocket_port:
             raise ValueError("HTTP and WebSocket ports must be different")
-        if (
-            not self.front_center_compressed_camera_topic
-            or not self.throttled_compressed_camera_topic
-        ):
+        if not self.front_center_camera_topic or not self.throttled_camera_topic:
             raise ValueError("Camera preview topics must not be empty")
+        if not 1 <= self.camera_jpeg_quality <= 100:
+            raise ValueError("camera_jpeg_quality must be between 1 and 100")
 
         self._lock = threading.RLock()
         self._commands: Queue[QueuedCommand] = Queue()
@@ -396,6 +454,7 @@ class OperatorPanelNode(Node):
         self._audit_sink: Callable[[str, str, str], None] | None = None
         self._camera_frames: dict[str, CameraFrame] = {}
         self._camera_frame_versions: dict[str, int] = {}
+        self._camera_last_encoded_monotonic: dict[str, float] = {}
         self._manipulation_state = {"state": "UNKNOWN", "detail": "No state received"}
         self._box_pose: dict[str, Any] | None = None
         self._box_pose_received_monotonic: float | None = None
@@ -550,14 +609,14 @@ class OperatorPanelNode(Node):
             telemetry_qos,
         )
         self.create_subscription(
-            CompressedImage,
-            self.front_center_compressed_camera_topic,
+            Image,
+            self.front_center_camera_topic,
             lambda message: self._on_camera_image("front_center", message),
             telemetry_qos,
         )
         self.create_subscription(
-            CompressedImage,
-            self.throttled_compressed_camera_topic,
+            Image,
+            self.throttled_camera_topic,
             lambda message: self._on_camera_image("throttled", message),
             telemetry_qos,
         )
@@ -1572,11 +1631,23 @@ class OperatorPanelNode(Node):
         with self._lock:
             self._joint_states_received_monotonic = time.monotonic()
 
-    def _on_camera_image(self, camera_name: str, message: CompressedImage) -> None:
-        """Cache JPEG data emitted by the C++ image_transport compressor."""
-        if "jpeg" not in message.format.lower() or not message.data:
+    def _on_camera_image(self, camera_name: str, message: Image) -> None:
+        """Rate-limit raw camera frames, then encode only the selected frame."""
+        now = time.monotonic()
+        with self._lock:
+            last_encoded = self._camera_last_encoded_monotonic.get(camera_name)
+            if (
+                last_encoded is not None
+                and now - last_encoded < 1.0 / self.camera_display_rate_hz
+            ):
+                return
+            self._camera_last_encoded_monotonic[camera_name] = now
+
+        try:
+            jpeg = encode_camera_image_as_jpeg(message, self.camera_jpeg_quality)
+        except (OSError, ValueError) as error:
             self.get_logger().warn(
-                f"Ignoring non-JPEG {camera_name} camera preview frame"
+                f"Ignoring {camera_name} camera preview frame: {error}"
             )
             return
 
@@ -1584,7 +1655,7 @@ class OperatorPanelNode(Node):
             version = self._camera_frame_versions.get(camera_name, 0) + 1
             self._camera_frame_versions[camera_name] = version
             self._camera_frames[camera_name] = CameraFrame(
-                jpeg=bytes(message.data), etag=f'"{version}"'
+                jpeg=jpeg, etag=f'"{version}"'
             )
 
     def _on_localization_confidence(self, message: Float32) -> None:

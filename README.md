@@ -70,17 +70,21 @@ ros2 launch x2_operator_panel operator_panel.launch.py \
   camera_jpeg_quality:=60
 ```
 
-These parameters limit panel encoding and browser traffic only. They do not
+The panel subscribes directly to the raw `Image` topics, drops frames before
+conversion, and uses Pillow to encode only the selected preview frame as a
+JPEG. It does not use OpenCV or NumPy, so it avoids the Jetson OpenCV/NumPy ABI
+mismatch. Install the prebuilt `python3-pil` package on a robot image that does
+not already provide Pillow:
+
+```bash
+sudo apt install python3-pil
+```
+
+These parameters limit Pillow encoding and browser traffic only. They do not
 alter AprilTag detection or reduce DDS traffic from a camera publisher to a
 panel running on another machine. Run the panel on the robot with the camera
 publishers, or rate-limit the source image pipeline, when that DDS link must
 also be reduced.
-
-The launch file rate-limits each raw source, then uses ROS 2's C++
-`image_transport` compressor to create JPEG previews. The Python panel only
-relays those `CompressedImage` bytes: it does not import OpenCV, NumPy, or
-Pillow. This keeps the panel compatible with Jetson ROS 2 images whose Python
-OpenCV was built against a different NumPy ABI.
 
 The default address is `http://127.0.0.1:8080`. The server keeps this loopback
 default so credentials and session cookies do not cross a LAN over cleartext
