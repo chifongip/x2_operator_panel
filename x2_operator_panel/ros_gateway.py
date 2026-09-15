@@ -23,7 +23,7 @@ from agibot_x2_manipulation_msgs.action import (
     Place,
     ResetManipulation,
 )
-from agibot_x2_manipulation_msgs.msg import ManipulationState
+from agibot_x2_manipulation_msgs.msg import BoxStateArray, ManipulationState
 from agibot_x2_manipulation_msgs.srv import RecoverManipulationState
 from ament_index_python.packages import get_package_share_directory
 from diagnostic_msgs.msg import DiagnosticArray
@@ -349,6 +349,12 @@ class OperatorPanelNode(Node):
         self.box_pose_freshness_sec = float(
             self.declare_parameter("box_pose_freshness_sec", 0.5).value
         )
+        self.box_states_topic = self.declare_parameter(
+            "box_states_topic", "/box_states"
+        ).value
+        self.box_states_freshness_sec = float(
+            self.declare_parameter("box_states_freshness_sec", 0.5).value
+        )
         self.tf_freshness_sec = float(self.declare_parameter("tf_freshness_sec", 1.0).value)
         self.scan_topic = self.declare_parameter("scan_topic", "/scan_nav/laser").value
         self.scan_freshness_sec = float(
@@ -415,6 +421,7 @@ class OperatorPanelNode(Node):
             "session_ttl_sec": self.session_ttl_sec,
             "execution_unlock_sec": self.execution_unlock_sec,
             "box_pose_freshness_sec": self.box_pose_freshness_sec,
+            "box_states_freshness_sec": self.box_states_freshness_sec,
             "tf_freshness_sec": self.tf_freshness_sec,
             "scan_freshness_sec": self.scan_freshness_sec,
             "scan_max_points": self.scan_max_points,
@@ -438,6 +445,8 @@ class OperatorPanelNode(Node):
             raise ValueError("HTTP and WebSocket ports must be different")
         if not self.front_center_camera_topic or not self.throttled_camera_topic:
             raise ValueError("Camera preview topics must not be empty")
+        if not self.box_states_topic:
+            raise ValueError("box_states_topic must not be empty")
         if not 1 <= self.camera_jpeg_quality <= 100:
             raise ValueError("camera_jpeg_quality must be between 1 and 100")
 
@@ -458,6 +467,8 @@ class OperatorPanelNode(Node):
         self._manipulation_state = {"state": "UNKNOWN", "detail": "No state received"}
         self._box_pose: dict[str, Any] | None = None
         self._box_pose_received_monotonic: float | None = None
+        self._visible_boxes: dict[str, dict[str, Any]] = {}
+        self._box_states_received_monotonic: float | None = None
         self._diagnostics: list[dict[str, Any]] = []
         self._map_pose: dict[str, Any] = {
             "available": False,
@@ -575,6 +586,12 @@ class OperatorPanelNode(Node):
             PoseWithCovarianceStamped, "/box_pose", self._on_box_pose, telemetry_qos
         )
         self.create_subscription(
+            BoxStateArray,
+            self.box_states_topic,
+            self._on_box_states,
+            telemetry_qos,
+        )
+        self.create_subscription(
             Odometry, "/odom", self._on_odom, telemetry_qos
         )
         self.create_subscription(LaserScan, self.scan_topic, self._on_scan, telemetry_qos)
@@ -664,6 +681,7 @@ class OperatorPanelNode(Node):
         with self._lock:
             operations = [operation.as_dict() for operation in self._operations.values()]
             operations.sort(key=lambda item: item["requested_at"], reverse=True)
+            visible_boxes = self._fresh_visible_boxes_locked()
             return {
                 "servers": {
                     name: client.server_is_ready()
@@ -673,6 +691,16 @@ class OperatorPanelNode(Node):
                 "manipulation_state": dict(self._manipulation_state),
                 "box_pose": dict(self._box_pose) if self._box_pose is not None else None,
                 "box_map_pose": self._box_pose_in_map_locked(),
+                "visible_boxes": {
+                    "available": self._box_states_received_monotonic is not None,
+                    "fresh": bool(visible_boxes),
+                    "box_count": len(visible_boxes),
+                    "boxes": visible_boxes,
+                    "detail": self._visible_boxes_detail_locked(visible_boxes),
+                },
+                "box_map_poses": [
+                    self._box_state_in_map_locked(box) for box in visible_boxes
+                ],
                 "map_pose": dict(self._map_pose),
                 "initial_pose": self._initial_pose_status_locked(),
                 "scan": self._scan_in_map_locked(),
@@ -1030,7 +1058,8 @@ class OperatorPanelNode(Node):
             if manipulation_state != "HOLDING":
                 raise PanelCommandError("Carry-pose transitions require manipulation state HOLDING")
         requires_execution = kind == "reset" or plan_only is False
-        goal = self._build_manipulation_goal(kind, payload, plan_only)
+        instance_id = self._selected_visible_box_id(kind, payload)
+        goal = self._build_manipulation_goal(kind, payload, plan_only, instance_id)
         if requires_execution:
             if payload.get("confirmed") is not True:
                 raise PanelCommandError("Physical manipulation requires per-command confirmation")
@@ -1059,8 +1088,33 @@ class OperatorPanelNode(Node):
         future.add_done_callback(
             lambda sent: self._on_goal_response(operation.identifier, sent)
         )
-        self._audit(kind, "submitted", "plan_only" if plan_only else "execution")
+        audit_detail = "plan_only" if plan_only else "execution"
+        if instance_id is not None:
+            audit_detail = f"{audit_detail}; {instance_id}"
+        self._audit(kind, "submitted", audit_detail)
         return operation
+
+    def _selected_visible_box_id(
+        self, kind: str, payload: dict[str, Any]
+    ) -> str | None:
+        if kind not in {"pick", "pick_place"}:
+            return None
+        instance_id = payload.get("instance_id")
+        if not isinstance(instance_id, str) or not instance_id:
+            raise PanelCommandError(
+                "Select a fresh visible box before submitting a pick command"
+            )
+        if instance_id != instance_id.strip() or len(instance_id) > 128:
+            raise PanelCommandError("Selected box ID is invalid")
+        with self._lock:
+            visible_ids = {
+                box["instance_id"] for box in self._fresh_visible_boxes_locked()
+            }
+        if instance_id not in visible_ids:
+            raise PanelCommandError(
+                "The selected box is no longer a fresh visible detection; select it again"
+            )
+        return instance_id
 
     def _submit_navigation(self, payload: dict[str, Any]) -> Operation:
         if payload.get("confirmed") is not True:
@@ -1156,14 +1210,21 @@ class OperatorPanelNode(Node):
         )
 
     def _build_manipulation_goal(
-        self, kind: str, payload: dict[str, Any], plan_only: bool | None
+        self,
+        kind: str,
+        payload: dict[str, Any],
+        plan_only: bool | None,
+        instance_id: str | None = None,
     ) -> Any:
         if kind == "pick":
             goal = Pick.Goal()
+            goal.instance_id = instance_id or ""
             goal.plan_only = bool(plan_only)
             return goal
         if kind in {"place", "pick_place"}:
             goal = Place.Goal() if kind == "place" else PickPlace.Goal()
+            if kind == "pick_place":
+                goal.instance_id = instance_id or ""
             if "place_pose" in payload:
                 goal.place_pose = self._parse_place_pose(payload["place_pose"])
             # A default-constructed pose tells pick_place_server to use tag9.
@@ -1571,6 +1632,115 @@ class OperatorPanelNode(Node):
                 message.header.stamp.sec + message.header.stamp.nanosec / 1_000_000_000
             )
             self._box_pose_received_monotonic = time.monotonic()
+
+    def _on_box_states(self, message: BoxStateArray) -> None:
+        """Cache each localized profile instance until its detection expires."""
+        received_monotonic = time.monotonic()
+        visible_boxes: dict[str, dict[str, Any]] = {}
+        for state in message.boxes:
+            instance_id = state.instance_id
+            profile_id = state.profile_id
+            if (
+                not instance_id
+                or instance_id != instance_id.strip()
+                or len(instance_id) > 128
+                or not profile_id
+                or profile_id != profile_id.strip()
+                or len(profile_id) > 128
+                or not state.header.frame_id
+            ):
+                continue
+            pose = PoseStamped()
+            pose.header = state.header
+            pose.pose = state.pose.pose
+            record = _pose_as_dict(pose)
+            if not all(
+                isfinite(float(record[field]))
+                for field in ("x", "y", "z", "qx", "qy", "qz", "qw")
+            ):
+                continue
+            record.update(
+                {
+                    "instance_id": instance_id,
+                    "profile_id": profile_id,
+                    "stamp": (
+                        state.header.stamp.sec
+                        + state.header.stamp.nanosec / 1_000_000_000
+                    ),
+                    "received_monotonic": received_monotonic,
+                }
+            )
+            visible_boxes[instance_id] = record
+
+        with self._lock:
+            self._box_states_received_monotonic = received_monotonic
+            self._visible_boxes.update(visible_boxes)
+
+    def _fresh_visible_boxes_locked(self) -> list[dict[str, Any]]:
+        now = time.monotonic()
+        fresh_boxes: list[dict[str, Any]] = []
+        stale_ids: list[str] = []
+        for instance_id, box in self._visible_boxes.items():
+            age = now - float(box["received_monotonic"])
+            if age > self.box_states_freshness_sec:
+                stale_ids.append(instance_id)
+                continue
+            snapshot = {
+                key: value for key, value in box.items() if key != "received_monotonic"
+            }
+            snapshot["age_sec"] = age
+            fresh_boxes.append(snapshot)
+        for instance_id in stale_ids:
+            del self._visible_boxes[instance_id]
+        return sorted(fresh_boxes, key=lambda box: box["instance_id"])
+
+    def _visible_boxes_detail_locked(self, visible_boxes: list[dict[str, Any]]) -> str:
+        if visible_boxes:
+            return ""
+        if self._box_states_received_monotonic is None:
+            return f"Waiting for {self.box_states_topic}"
+        return "No fresh visible boxes"
+
+    def _box_state_in_map_locked(self, source: dict[str, Any]) -> dict[str, Any]:
+        frame_id = source["frame_id"]
+        if frame_id == "map":
+            x = source["x"]
+            y = source["y"]
+            map_fresh = True
+        elif frame_id == "base_link":
+            map_pose = self._map_pose
+            if not map_pose.get("available"):
+                return {
+                    "available": False,
+                    "fresh": False,
+                    "instance_id": source["instance_id"],
+                    "profile_id": source["profile_id"],
+                    "detail": "Waiting for map -> base_link to locate the box",
+                }
+            map_yaw = map_pose["yaw"]
+            x = map_pose["x"] + cos(map_yaw) * source["x"] - sin(map_yaw) * source["y"]
+            y = map_pose["y"] + sin(map_yaw) * source["x"] + cos(map_yaw) * source["y"]
+            map_fresh = bool(map_pose.get("fresh"))
+        else:
+            return {
+                "available": False,
+                "fresh": False,
+                "instance_id": source["instance_id"],
+                "profile_id": source["profile_id"],
+                "detail": f"Cannot display {self.box_states_topic} frame {frame_id!r} on the map",
+            }
+        return {
+            "available": True,
+            "fresh": map_fresh,
+            "instance_id": source["instance_id"],
+            "profile_id": source["profile_id"],
+            "x": x,
+            "y": y,
+            "z": source["z"],
+            "source_frame_id": frame_id,
+            "age_sec": source["age_sec"],
+            "detail": "" if map_fresh else "map -> base_link has not updated recently",
+        }
 
     def _box_pose_in_map_locked(self) -> dict[str, Any]:
         if self._box_pose is None or self._box_pose_received_monotonic is None:

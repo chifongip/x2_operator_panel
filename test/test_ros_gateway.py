@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 from builtin_interfaces.msg import Time
 from agibot_x2_manipulation_msgs.action import MoveCarryPose
+from agibot_x2_manipulation_msgs.msg import BoxState, BoxStateArray
 from sensor_msgs.msg import Image
 from x2_operator_panel.ros_gateway import (
     Operation,
@@ -193,6 +194,67 @@ class RosGatewayTest(unittest.TestCase):
         self.assertTrue(box_pose["available"])
         self.assertFalse(box_pose["fresh"])
         self.assertIn("/box_pose has not updated", box_pose["detail"])
+
+    def test_visible_box_states_are_cached_by_instance_and_expire(self):
+        node = object.__new__(OperatorPanelNode)
+        node._lock = threading.RLock()
+        node._visible_boxes = {}
+        node._box_states_received_monotonic = None
+        node.box_states_freshness_sec = 0.5
+        node.box_states_topic = "/box_states"
+        message = BoxStateArray()
+        box = BoxState()
+        box.header.frame_id = "base_link"
+        box.header.stamp = Time(sec=42)
+        box.instance_id = "tag:180"
+        box.profile_id = "grey_box"
+        box.pose.pose.position.x = 0.4
+        box.pose.pose.position.y = -0.1
+        box.pose.pose.position.z = 0.2
+        box.pose.pose.orientation.w = 1.0
+        message.boxes.append(box)
+
+        with patch("x2_operator_panel.ros_gateway.time.monotonic", return_value=100.0):
+            node._on_box_states(message)
+        with patch("x2_operator_panel.ros_gateway.time.monotonic", return_value=100.1):
+            visible_boxes = node._fresh_visible_boxes_locked()
+
+        self.assertEqual(len(visible_boxes), 1)
+        self.assertEqual(visible_boxes[0]["instance_id"], "tag:180")
+        self.assertEqual(visible_boxes[0]["profile_id"], "grey_box")
+        self.assertAlmostEqual(visible_boxes[0]["age_sec"], 0.1)
+        with patch("x2_operator_panel.ros_gateway.time.monotonic", return_value=100.6):
+            self.assertEqual(node._fresh_visible_boxes_locked(), [])
+
+    def test_pick_requires_a_current_box_selection(self):
+        node = object.__new__(OperatorPanelNode)
+        node._lock = threading.RLock()
+        node._visible_boxes = {
+            "tag:180": {
+                "instance_id": "tag:180",
+                "profile_id": "grey_box",
+                "received_monotonic": 100.0,
+            }
+        }
+        node.box_states_freshness_sec = 0.5
+
+        with patch("x2_operator_panel.ros_gateway.time.monotonic", return_value=100.1):
+            self.assertEqual(
+                node._selected_visible_box_id("pick", {"instance_id": "tag:180"}),
+                "tag:180",
+            )
+        with patch("x2_operator_panel.ros_gateway.time.monotonic", return_value=100.6):
+            with self.assertRaisesRegex(PanelCommandError, "no longer"):
+                node._selected_visible_box_id("pick", {"instance_id": "tag:180"})
+
+    def test_pick_goals_include_the_selected_visible_box_id(self):
+        for kind in ("pick", "pick_place"):
+            goal = OperatorPanelNode._build_manipulation_goal(
+                object.__new__(OperatorPanelNode), kind, {}, True, "tag:180"
+            )
+
+            self.assertEqual(goal.instance_id, "tag:180")
+            self.assertTrue(goal.plan_only)
 
     def test_place_commands_leave_place_pose_empty(self):
         node = object.__new__(OperatorPanelNode)

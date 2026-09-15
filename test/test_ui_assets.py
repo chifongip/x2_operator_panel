@@ -120,7 +120,30 @@ class UiAssetsTest(unittest.TestCase):
 
         self.assertIn('id="box-pose-state"', page)
         self.assertIn("function drawBoxMarker", script)
-        self.assertIn("if (boxPose?.available) drawBoxMarker(boxPose);", script)
+        self.assertIn("visibleBoxPoses.forEach", script)
+        self.assertIn("drawBoxMarker(visibleBox", script)
+        self.assertIn("drawBoxMarker(boxPose);", script)
+
+    def test_visible_box_picker_selects_an_instance_for_pick_goals(self):
+        package_root = Path(__file__).parents[1]
+        page = (package_root / "x2_operator_panel" / "static" / "index.html").read_text(
+            encoding="utf-8"
+        )
+        script = (package_root / "x2_operator_panel" / "static" / "app.js").read_text(
+            encoding="utf-8"
+        )
+        launch_file = (package_root / "launch" / "operator_panel.launch.py").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn('id="visible-box-select"', page)
+        self.assertIn('id="visible-box-status"', page)
+        self.assertIn('id="visible-box-count"', page)
+        self.assertIn("function renderVisibleBoxes", script)
+        self.assertIn("instance_id: state.selectedBoxId", script)
+        self.assertIn("Select a fresh visible box before picking", script)
+        self.assertIn('"box_states_topic"', launch_file)
+        self.assertIn('"box_states_freshness_sec"', launch_file)
 
     def test_map_commands_and_scan_overlay_are_available(self):
         package_root = Path(__file__).parents[1]

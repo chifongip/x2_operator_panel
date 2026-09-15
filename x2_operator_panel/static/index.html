@@ -59,7 +59,7 @@
         </div>
         <div class="map-legend">
           <span><i class="legend robot"></i>Robot</span>
-          <span><i class="legend box"></i>Box</span>
+          <span><i class="legend box"></i>Boxes</span>
           <span><i class="legend destination"></i>Destination</span>
           <span><i class="legend target"></i>Active goal</span>
           <span><i class="legend path"></i>Global path</span>
@@ -74,6 +74,7 @@
             <div><dt>Manipulation</dt><dd id="manipulation-state">UNKNOWN</dd></div>
             <div><dt>Localization</dt><dd id="localization-state">Waiting</dd></div>
             <div><dt>Box pose</dt><dd id="box-pose-state">Waiting</dd></div>
+            <div><dt>Visible boxes</dt><dd id="visible-box-count">Waiting</dd></div>
             <div><dt>Localization fit</dt><dd id="localization-confidence">Waiting</dd></div>
             <div><dt>Localization delay</dt><dd id="localization-delay">Waiting</dd></div>
             <div><dt>Pick server</dt><dd id="pick-server">Waiting</dd></div>
@@ -141,6 +142,13 @@
           <div class="section-heading compact">
             <h2>Manipulation</h2>
             <label class="plan-toggle"><input id="plan-only" type="checkbox" checked>Plan only</label>
+          </div>
+          <div class="visible-box-picker">
+            <label for="visible-box-select">Visible box</label>
+            <select id="visible-box-select" disabled>
+              <option value="">Waiting for visible boxes</option>
+            </select>
+            <p id="visible-box-status" class="muted">Waiting for /box_states</p>
           </div>
           <div class="command-row">
             <button data-command="pick" type="button">Pick box</button>

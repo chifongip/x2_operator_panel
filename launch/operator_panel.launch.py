@@ -74,6 +74,12 @@ def generate_launch_description():
             DeclareLaunchArgument("session_ttl_sec", default_value="1800.0"),
             DeclareLaunchArgument("execution_unlock_sec", default_value="30.0"),
             DeclareLaunchArgument("box_pose_freshness_sec", default_value="0.5"),
+            DeclareLaunchArgument(
+                "box_states_topic",
+                default_value="/box_states",
+                description="Localized box profile instances available for selection.",
+            ),
+            DeclareLaunchArgument("box_states_freshness_sec", default_value="0.5"),
             DeclareLaunchArgument("tf_freshness_sec", default_value="1.0"),
             DeclareLaunchArgument("scan_topic", default_value="/scan_nav/laser"),
             DeclareLaunchArgument("scan_freshness_sec", default_value="1.0"),
@@ -179,6 +185,10 @@ def generate_launch_description():
                         "execution_unlock_sec": LaunchConfiguration("execution_unlock_sec"),
                         "box_pose_freshness_sec": LaunchConfiguration(
                             "box_pose_freshness_sec"
+                        ),
+                        "box_states_topic": LaunchConfiguration("box_states_topic"),
+                        "box_states_freshness_sec": LaunchConfiguration(
+                            "box_states_freshness_sec"
                         ),
                         "tf_freshness_sec": LaunchConfiguration("tf_freshness_sec"),
                         "scan_topic": LaunchConfiguration("scan_topic"),

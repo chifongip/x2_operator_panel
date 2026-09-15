@@ -318,11 +318,16 @@ observed updating within `tf_freshness_sec`; navigation remains disabled in
 that state. `/odom` is never used as a replacement because it is not globally
 map-aligned.
 
-The panel also displays the `/box_pose` detection. The standard manipulation
-localizer publishes this pose in `base_link`, which the panel projects into the
-map using the current robot pose. A stale box detection is amber after
-`box_pose_freshness_sec`; an unsupported source frame is reported in System
-status instead of being plotted incorrectly.
+The panel subscribes to `/box_states` and lists every fresh localized box by
+its stable `instance_id` and profile. Select a box before using **Pick box** or
+**Pick and place**; the panel passes that ID in the action goal and rejects a
+selection that is no longer fresh. With one visible box, the panel selects it
+automatically; with multiple boxes, the operator must choose one explicitly.
+With the default manipulation-server configuration, fresh non-selected boxes
+remain collision obstacles.
+The panel expires visible detections after `box_states_freshness_sec` (default
+0.5 s) and projects `base_link` detections onto the map. Its legacy
+`/box_pose` marker remains available for older single-box localizers.
 
 ## Future improvement
 

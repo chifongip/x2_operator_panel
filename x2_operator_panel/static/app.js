@@ -11,6 +11,7 @@
     mapSelection: null,
     mapPointer: null,
     cameraPollTimer: null,
+    selectedBoxId: null,
   };
   const cameraStreams = [
     { endpoint: "/api/cameras/front-center", imageId: "front-center-image", statusId: "front-center-camera-status", etag: null, objectUrl: null, inFlight: false },
@@ -269,14 +270,14 @@
     context.restore();
   }
 
-  function drawBoxMarker(boxPose) {
+  function drawBoxMarker(boxPose, selected = false) {
     const actualPoint = mapPoint(boxPose.x, boxPose.y);
     const onMap = pointIsOnMap(actualPoint);
     const point = onMap ? actualPoint : clampPointToMap(actualPoint, 9);
     context.save();
     context.translate(point.x, point.y);
     context.rotate(Math.PI / 4);
-    context.fillStyle = boxPose.fresh ? "#a63e50" : "#b67316";
+    context.fillStyle = selected ? "#75529a" : (boxPose.fresh ? "#a63e50" : "#b67316");
     context.fillRect(-6, -6, 12, 12);
     context.strokeStyle = "#fff";
     context.lineWidth = 2;
@@ -372,11 +373,18 @@
     }
     const pose = state.status?.map_pose;
     const boxPose = state.status?.box_map_pose;
+    const visibleBoxPoses = state.status?.box_map_poses;
     if (activeNavigation?.target_pose) drawTargetMarker(activeNavigation.target_pose, "#b67316", true);
     const selection = currentMapSelection();
     if (selection) drawTargetMarker(selection, selection.kind === "initial_pose" ? "#75529a" : "#2a8b51");
     if (pose?.available) drawRobotMarker(pose);
-    if (boxPose?.available) drawBoxMarker(boxPose);
+    if (Array.isArray(visibleBoxPoses) && visibleBoxPoses.length) {
+      visibleBoxPoses.forEach((visibleBox) => {
+        if (visibleBox.available) drawBoxMarker(visibleBox, visibleBox.instance_id === state.selectedBoxId);
+      });
+    } else if (boxPose?.available) {
+      drawBoxMarker(boxPose);
+    }
   }
 
   function applyStatus(status) {
@@ -404,6 +412,11 @@
     byId("manipulation-state").textContent = status.manipulation_state.state;
     byId("localization-state").textContent = pose.fresh ? "Map pose current" : (pose.detail || "Unavailable");
     byId("box-pose-state").textContent = boxPose?.available ? (boxPose.fresh ? "Map position current" : boxPose.detail) : (boxPose?.detail || "Unavailable");
+    const visibleBoxes = status.visible_boxes;
+    byId("visible-box-count").textContent = visibleBoxes?.fresh
+      ? `${visibleBoxes.box_count} fresh`
+      : (visibleBoxes?.detail || "Waiting");
+    renderVisibleBoxes(visibleBoxes);
     const metrics = status.localization_metrics || {};
     const confidence = metrics.confidence;
     const delay = metrics.delay_ms;
@@ -457,6 +470,39 @@
     renderOperations(status.operations);
     renderAudit(status.audit);
     renderMapCommand();
+  }
+
+  function renderVisibleBoxes(visibleBoxes) {
+    const boxes = Array.isArray(visibleBoxes?.boxes) ? visibleBoxes.boxes : [];
+    const selector = byId("visible-box-select");
+    const previousSelection = state.selectedBoxId;
+    const selectedStillVisible = boxes.some((box) => box.instance_id === previousSelection);
+    if (!selectedStillVisible) {
+      state.selectedBoxId = boxes.length === 1 ? boxes[0].instance_id : null;
+    }
+    selector.textContent = "";
+    const placeholder = document.createElement("option");
+    placeholder.value = "";
+    placeholder.textContent = boxes.length ? "Select a visible box" : "No fresh visible boxes";
+    selector.appendChild(placeholder);
+    boxes.forEach((box) => {
+      const option = document.createElement("option");
+      option.value = box.instance_id;
+      const age = Number.isFinite(box.age_sec) ? `, ${box.age_sec.toFixed(1)} s` : "";
+      option.textContent = `${box.instance_id} — ${box.profile_id}${age}`;
+      selector.appendChild(option);
+    });
+    selector.disabled = boxes.length === 0;
+    selector.value = state.selectedBoxId || "";
+    const selected = boxes.find((box) => box.instance_id === state.selectedBoxId);
+    byId("visible-box-status").textContent = selected
+      ? `Selected ${selected.instance_id} (${selected.profile_id})`
+      : (visibleBoxes?.detail || "Select a fresh visible box before picking");
+    const pickReady = Boolean(selected);
+    document.querySelectorAll('[data-command="pick"], [data-command="pick_place"]').forEach((button) => {
+      button.disabled = !pickReady;
+      button.title = pickReady ? `Pick ${selected.instance_id}` : "Select a fresh visible box first";
+    });
   }
 
   function renderMapCommand() {
@@ -631,6 +677,10 @@
 
   async function submitManipulation(kind, extra = {}) {
     try {
+      if (["pick", "pick_place"].includes(kind)) {
+        if (!state.selectedBoxId) throw new Error("Select a fresh visible box before picking");
+        extra = { ...extra, instance_id: state.selectedBoxId };
+      }
       if (["place", "pick_place"].includes(kind) && manualPlacePoseEnabled() && !extra.place_pose) {
         extra = { ...extra, place_pose: placePose() };
       }
@@ -712,6 +762,11 @@
 
   byId("login-form").addEventListener("submit", login);
   document.querySelectorAll("[data-command]").forEach((button) => button.addEventListener("click", () => submitManipulation(button.dataset.command)));
+  byId("visible-box-select").addEventListener("change", (event) => {
+    state.selectedBoxId = event.target.value || null;
+    renderVisibleBoxes(state.status?.visible_boxes);
+    drawMap();
+  });
   byId("use-manual-place-pose").addEventListener("change", syncManualPlacePoseFields);
   syncManualPlacePoseFields();
   byId("place-form").addEventListener("submit", (event) => { event.preventDefault(); submitManipulation("place"); });
