@@ -59,6 +59,18 @@ class UiAssetsTest(unittest.TestCase):
         self.assertIn('"If-None-Match"', script)
         self.assertIn('"/api/cameras/front-center"', server)
         self.assertIn('"camera_display_rate_hz"', launch_file)
+        self.assertIn('package="image_transport"', launch_file)
+        self.assertIn('"qos_overrides."', launch_file)
+        self.assertIn('".publisher.reliability"', launch_file)
+        self.assertIn('value="reliable"', launch_file)
+        self.assertIn(
+            '"out/compressed:=/x2/operator_panel/front_center_preview/compressed"',
+            launch_file,
+        )
+        self.assertIn(
+            '"out/compressed:=/x2/operator_panel/throttled_preview/compressed"',
+            launch_file,
+        )
 
     def test_place_pose_defaults_to_tag_placement_with_manual_override(self):
         package_root = Path(__file__).parents[1]

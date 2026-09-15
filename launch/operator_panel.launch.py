@@ -5,7 +5,7 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
-from launch_ros.parameter_descriptions import ParameterValue
+from launch_ros.parameter_descriptions import Parameter, ParameterValue
 
 
 def generate_launch_description():
@@ -130,12 +130,22 @@ def generate_launch_description():
             DeclareLaunchArgument(
                 "front_center_camera_topic",
                 default_value="/aima/hal/sensor/rgb_head_front_center/rgb_image_rect",
-                description="Rectified front-center image shown in the operator panel.",
+                description="Rectified front-center image compressed for the operator panel.",
             ),
             DeclareLaunchArgument(
                 "throttled_camera_topic",
                 default_value="/x2/rgb_image_throttled",
-                description="Throttled AprilTag input image shown in the operator panel.",
+                description="Throttled AprilTag input image compressed for the operator panel.",
+            ),
+            DeclareLaunchArgument(
+                "front_center_preview_raw_topic",
+                default_value="/x2/operator_panel/front_center_preview_raw",
+                description="Internal rate-limited front-center raw image topic.",
+            ),
+            DeclareLaunchArgument(
+                "throttled_preview_raw_topic",
+                default_value="/x2/operator_panel/throttled_preview_raw",
+                description="Internal rate-limited AprilTag-input raw image topic.",
             ),
             DeclareLaunchArgument(
                 "camera_display_rate_hz",
@@ -152,6 +162,93 @@ def generate_launch_description():
             DeclareLaunchArgument("login_window_sec", default_value="60.0"),
             DeclareLaunchArgument("operation_history_limit", default_value="100"),
             DeclareLaunchArgument("use_sim_time", default_value="false"),
+            Node(
+                package="topic_tools",
+                executable="throttle",
+                name="throttle_front_center_panel_camera",
+                arguments=[
+                    "messages",
+                    LaunchConfiguration("front_center_camera_topic"),
+                    LaunchConfiguration("camera_display_rate_hz"),
+                    LaunchConfiguration("front_center_preview_raw_topic"),
+                ],
+                # topic_tools matches the source camera's QoS (normally
+                # best-effort).  image_transport's raw subscriber is reliable,
+                # so republish the rate-limited image reliably at this boundary.
+                parameters=[
+                    Parameter(
+                        name=[
+                            "qos_overrides.",
+                            LaunchConfiguration("front_center_preview_raw_topic"),
+                            ".publisher.reliability",
+                        ],
+                        value="reliable",
+                    )
+                ],
+                output="screen",
+            ),
+            Node(
+                package="topic_tools",
+                executable="throttle",
+                name="throttle_detector_input_panel_camera",
+                arguments=[
+                    "messages",
+                    LaunchConfiguration("throttled_camera_topic"),
+                    LaunchConfiguration("camera_display_rate_hz"),
+                    LaunchConfiguration("throttled_preview_raw_topic"),
+                ],
+                parameters=[
+                    Parameter(
+                        name=[
+                            "qos_overrides.",
+                            LaunchConfiguration("throttled_preview_raw_topic"),
+                            ".publisher.reliability",
+                        ],
+                        value="reliable",
+                    )
+                ],
+                output="screen",
+            ),
+            Node(
+                package="image_transport",
+                executable="republish",
+                name="compress_front_center_panel_camera",
+                arguments=[
+                    "raw",
+                    "compressed",
+                    "--ros-args",
+                    "--remap",
+                    ["in:=", LaunchConfiguration("front_center_preview_raw_topic")],
+                    "--remap",
+                    "out/compressed:=/x2/operator_panel/front_center_preview/compressed",
+                ],
+                parameters=[{
+                    "compressed.jpeg_quality": ParameterValue(
+                        LaunchConfiguration("camera_jpeg_quality"), value_type=int
+                    ),
+                }],
+                output="screen",
+            ),
+            Node(
+                package="image_transport",
+                executable="republish",
+                name="compress_detector_input_panel_camera",
+                arguments=[
+                    "raw",
+                    "compressed",
+                    "--ros-args",
+                    "--remap",
+                    ["in:=", LaunchConfiguration("throttled_preview_raw_topic")],
+                    "--remap",
+                    "out/compressed:=/x2/operator_panel/throttled_preview/compressed",
+                ],
+                parameters=[{
+                    "compressed.jpeg_quality": ParameterValue(
+                        LaunchConfiguration("camera_jpeg_quality"), value_type=int
+                    ),
+                }],
+                output="screen",
+            ),
             Node(
                 package="x2_operator_panel",
                 executable="operator_panel",
@@ -241,17 +338,8 @@ def generate_launch_description():
                         "status_publish_period_sec": LaunchConfiguration(
                             "status_publish_period_sec"
                         ),
-                        "front_center_camera_topic": LaunchConfiguration(
-                            "front_center_camera_topic"
-                        ),
-                        "throttled_camera_topic": LaunchConfiguration(
-                            "throttled_camera_topic"
-                        ),
                         "camera_display_rate_hz": LaunchConfiguration(
                             "camera_display_rate_hz"
-                        ),
-                        "camera_jpeg_quality": LaunchConfiguration(
-                            "camera_jpeg_quality"
                         ),
                         "login_per_source_limit": LaunchConfiguration(
                             "login_per_source_limit"

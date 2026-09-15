@@ -76,6 +76,12 @@ panel running on another machine. Run the panel on the robot with the camera
 publishers, or rate-limit the source image pipeline, when that DDS link must
 also be reduced.
 
+The launch file rate-limits each raw source, then uses ROS 2's C++
+`image_transport` compressor to create JPEG previews. The Python panel only
+relays those `CompressedImage` bytes: it does not import OpenCV, NumPy, or
+Pillow. This keeps the panel compatible with Jetson ROS 2 images whose Python
+OpenCV was built against a different NumPy ABI.
+
 The default address is `http://127.0.0.1:8080`. The server keeps this loopback
 default so credentials and session cookies do not cross a LAN over cleartext
 HTTP.

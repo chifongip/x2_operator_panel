@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 from builtin_interfaces.msg import Time
 from agibot_x2_manipulation_msgs.action import MoveCarryPose
-from sensor_msgs.msg import Image
+from sensor_msgs.msg import CompressedImage
 from x2_operator_panel.ros_gateway import (
     Operation,
     OperatorPanelNode,
@@ -69,29 +69,18 @@ class RosGatewayTest(unittest.TestCase):
         self.assertEqual(qos.reliability, ReliabilityPolicy.BEST_EFFORT)
         self.assertEqual(qos.durability, DurabilityPolicy.VOLATILE)
 
-    def test_camera_preview_encodes_jpeg_at_the_configured_rate(self):
+    def test_camera_preview_caches_jpeg_from_the_transport_bridge(self):
         node = object.__new__(OperatorPanelNode)
         node._lock = threading.RLock()
-        node.camera_display_rate_hz = 1.0
-        node.camera_jpeg_quality = 70
         node._camera_frames = {}
-        node._camera_last_encoded_monotonic = {}
         node._camera_frame_versions = {}
-        image = Image()
-        image.width = 1
-        image.height = 1
-        image.encoding = "bgr8"
-        image.step = 3
-        image.data = bytes([0, 0, 255])
+        image = CompressedImage()
+        image.format = "jpeg"
+        image.data = b"\xff\xd8preview\xff\xd9"
 
-        with patch(
-            "x2_operator_panel.ros_gateway.time.monotonic",
-            side_effect=[10.0, 10.5, 11.1],
-        ):
-            node._on_camera_image("front_center", image)
-            first = node.camera_frame("front_center")
-            node._on_camera_image("front_center", image)
-            node._on_camera_image("front_center", image)
+        node._on_camera_image("front_center", image)
+        first = node.camera_frame("front_center")
+        node._on_camera_image("front_center", image)
 
         latest = node.camera_frame("front_center")
         self.assertIsNotNone(first)
