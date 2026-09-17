@@ -8,6 +8,7 @@
   <license>BSD-3-Clause</license>
 
   <exec_depend>agibot_x2_manipulation_msgs</exec_depend>
+  <exec_depend>agibot_x2_manipulation</exec_depend>
   <exec_depend>ament_index_python</exec_depend>
   <exec_depend>action_msgs</exec_depend>
   <exec_depend>diagnostic_msgs</exec_depend>

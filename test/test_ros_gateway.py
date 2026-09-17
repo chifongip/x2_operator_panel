@@ -11,6 +11,7 @@ from unittest.mock import patch
 from builtin_interfaces.msg import Time
 from agibot_x2_manipulation_msgs.action import MoveCarryPose
 from agibot_x2_manipulation_msgs.msg import BoxState, BoxStateArray
+from agibot_x2_manipulation_msgs.srv import ReloadBoxProfiles
 from sensor_msgs.msg import Image
 from x2_operator_panel.ros_gateway import (
     Operation,
@@ -851,6 +852,45 @@ class RosGatewayTest(unittest.TestCase):
         self.assertEqual(result["operation_ids"], [])
         self.assertEqual(result["non_cancelable_operation_ids"], ["recover"])
         self.assertEqual(operation.status, "SUBMITTING")
+
+    def test_box_profile_reload_calls_the_coordinator_with_the_configured_file(self):
+        node = object.__new__(OperatorPanelNode)
+        node._lock = threading.RLock()
+        node._operations = {}
+        node._operation_history = deque(maxlen=10)
+        node._audit_sink = None
+        node._manipulation_state = {"state": "EMPTY"}
+        node.service_timeout_sec = 5.0
+        node.box_profiles_file = "/tmp/box_profiles.yaml"
+        node._profile_reload_client = FakeServiceClient(
+            SimpleNamespace(
+                success=True,
+                message="box-profile catalog reloaded",
+                profile_version=3,
+            )
+        )
+
+        response = node._reload_box_profiles({"confirmed": True})
+
+        request = node._profile_reload_client.calls[0]
+        self.assertIsInstance(request, ReloadBoxProfiles.Request)
+        self.assertEqual(request.profiles_file, "/tmp/box_profiles.yaml")
+        self.assertFalse(request.dry_run)
+        operation = node._operations[response["operation"]["id"]]
+        self.assertEqual(operation.status, "SUCCEEDED")
+        self.assertEqual(operation.result["profile_version"], 3)
+
+    def test_box_profile_reload_requires_an_empty_manipulation_state(self):
+        node = object.__new__(OperatorPanelNode)
+        node._lock = threading.RLock()
+        node._operations = {}
+        node._manipulation_state = {"state": "HOLDING"}
+        node._profile_reload_client = FakeServiceClient()
+
+        with self.assertRaisesRegex(PanelCommandError, "state EMPTY"):
+            node._reload_box_profiles({"confirmed": True})
+
+        self.assertEqual(node._profile_reload_client.calls, [])
 
     def test_cancel_dispatch_failure_does_not_claim_cancellation(self):
         node = object.__new__(OperatorPanelNode)

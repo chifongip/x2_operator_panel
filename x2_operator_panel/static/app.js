@@ -433,6 +433,13 @@
       button.disabled = !carryPoseReady;
       button.title = carryPoseReady ? "Plan or move the held box to this carry pose" : carryPoseDetail;
     });
+    const profileReload = status.box_profiles_reload || {};
+    const reloadProfilesButton = byId("reload-box-profiles");
+    reloadProfilesButton.disabled = !profileReload.ready;
+    reloadProfilesButton.title = profileReload.detail || "Box-profile reload unavailable";
+    byId("box-profiles-file").textContent = profileReload.profiles_file || "No catalog configured";
+    byId("box-profiles-file").title = profileReload.profiles_file || "";
+    byId("box-profiles-reload-status").textContent = profileReload.detail || "Waiting for reload service";
     byId("navigate-server").textContent = status.servers.navigate ? "Ready" : "Unavailable";
     byId("fine-align-server").textContent = status.servers.fine_align ? "Ready" : "Unavailable";
     byId("undock-server").textContent = status.servers.undock ? "Ready" : "Unavailable";
@@ -737,6 +744,21 @@
     if (!window.confirm(`Confirm manipulation state: ${requestedState}?`)) return;
     try { await api("/api/recover-state", { method: "POST", body: JSON.stringify({ requested_state: requestedState, confirmed: true }) }); setError(""); } catch (error) { setError(error.message); }
   }
+  async function reloadBoxProfiles() {
+    const catalog = state.status?.box_profiles_reload?.profiles_file;
+    if (!catalog) {
+      setError("No box-profile catalog is configured");
+      return;
+    }
+    if (!window.confirm(`Reload box profiles from ${catalog}?`)) return;
+    try {
+      await api("/api/box-profiles/reload", {
+        method: "POST",
+        body: JSON.stringify({ confirmed: true }),
+      });
+      setError("");
+    } catch (error) { setError(error.message); }
+  }
   async function unlockExecution() {
     if (!window.confirm("Temporarily unlock one physical motion command?")) return;
     try { await api("/api/unlock/execution", { method: "POST", body: JSON.stringify({ confirmed: true }) }); setError(""); } catch (error) { setError(error.message); }
@@ -775,6 +797,7 @@
   byId("reset-manipulation").addEventListener("click", () => submitManipulation("reset", { confirm_empty: true }));
   byId("recover-empty").addEventListener("click", () => recoverState("empty"));
   byId("recover-holding").addEventListener("click", () => recoverState("holding"));
+  byId("reload-box-profiles").addEventListener("click", reloadBoxProfiles);
   byId("unlock-execution").addEventListener("click", unlockExecution);
   byId("cancel-active").addEventListener("click", cancelActive);
   byId("cancel-docking-motion").addEventListener("click", cancelDockingMotion);

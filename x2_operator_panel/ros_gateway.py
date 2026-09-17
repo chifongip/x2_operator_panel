@@ -24,7 +24,10 @@ from agibot_x2_manipulation_msgs.action import (
     ResetManipulation,
 )
 from agibot_x2_manipulation_msgs.msg import BoxStateArray, ManipulationState
-from agibot_x2_manipulation_msgs.srv import RecoverManipulationState
+from agibot_x2_manipulation_msgs.srv import (
+    RecoverManipulationState,
+    ReloadBoxProfiles,
+)
 from ament_index_python.packages import get_package_share_directory
 from diagnostic_msgs.msg import DiagnosticArray
 from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped
@@ -286,12 +289,21 @@ class OperatorPanelNode(Node):
         super().__init__("x2_operator_panel")
         navigation_share = Path(get_package_share_directory("x2_navigation"))
         package_share = Path(get_package_share_directory("x2_operator_panel"))
+        manipulation_share = Path(
+            get_package_share_directory("agibot_x2_manipulation")
+        )
         self.map_yaml = self.declare_parameter(
             "map_yaml", str(navigation_share / "map" / "2026-08-18-Lab_voxel_0_05m.yaml")
         ).value
         self.presets_file = self.declare_parameter(
             "navigation_presets_file", str(package_share / "config" / "navigation_presets.yaml")
         ).value
+        self.box_profiles_file = self.declare_parameter(
+            "box_profiles_file",
+            str(manipulation_share / "config" / "box_profiles.yaml"),
+        ).value
+        if not self.box_profiles_file or not Path(self.box_profiles_file).is_absolute():
+            raise ValueError("box_profiles_file must be an absolute path")
         self.bind_address = self.declare_parameter("bind_address", "127.0.0.1").value
         self.allow_lan_access = bool(
             self.declare_parameter("allow_lan_access", False).value
@@ -570,6 +582,9 @@ class OperatorPanelNode(Node):
         self._recovery_client = self.create_client(
             RecoverManipulationState, "/recover_manipulation_state"
         )
+        self._profile_reload_client = self.create_client(
+            ReloadBoxProfiles, "/reload_box_profiles"
+        )
         self._initial_pose_publisher = self.create_publisher(
             PoseWithCovarianceStamped, "/initialpose", 10
         )
@@ -681,6 +696,24 @@ class OperatorPanelNode(Node):
         with self._lock:
             operations = [operation.as_dict() for operation in self._operations.values()]
             operations.sort(key=lambda item: item["requested_at"], reverse=True)
+            active_operation = any(
+                operation.status in _ACTIVE_STATUSES
+                for operation in self._operations.values()
+            )
+            profile_reload_service_ready = self._profile_reload_client.service_is_ready()
+            profile_reload_ready = (
+                profile_reload_service_ready
+                and not active_operation
+                and self._manipulation_state["state"] == "EMPTY"
+            )
+            if not profile_reload_service_ready:
+                profile_reload_detail = "Box-profile reload service is unavailable"
+            elif active_operation:
+                profile_reload_detail = "Wait for the active panel operation to finish"
+            elif self._manipulation_state["state"] != "EMPTY":
+                profile_reload_detail = "Reload requires manipulation state EMPTY"
+            else:
+                profile_reload_detail = "Ready to reload the configured profile catalog"
             visible_boxes = self._fresh_visible_boxes_locked()
             return {
                 "servers": {
@@ -688,6 +721,12 @@ class OperatorPanelNode(Node):
                     for name, client in self._action_clients.items()
                 },
                 "recovery_service_ready": self._recovery_client.service_is_ready(),
+                "box_profiles_reload": {
+                    "service_ready": profile_reload_service_ready,
+                    "ready": profile_reload_ready,
+                    "profiles_file": self.box_profiles_file,
+                    "detail": profile_reload_detail,
+                },
                 "manipulation_state": dict(self._manipulation_state),
                 "box_pose": dict(self._box_pose) if self._box_pose is not None else None,
                 "box_map_pose": self._box_pose_in_map_locked(),
@@ -761,6 +800,8 @@ class OperatorPanelNode(Node):
                     result = self._cancel_docking_motion()
                 elif command.name == "recover_state":
                     result = self._recover_state(command.payload)
+                elif command.name == "reload_box_profiles":
+                    result = self._reload_box_profiles(command.payload)
                 elif command.name == "set_initial_pose":
                     result = self._set_initial_pose(command.payload)
                 elif command.name == "clear_costmaps":
@@ -1547,6 +1588,57 @@ class OperatorPanelNode(Node):
         try:
             result = completed.result()
             details = {"success": bool(result.success), "message": result.message}
+            status = "SUCCEEDED" if result.success else "FAILED"
+        except Exception as error:
+            status = "ERROR"
+            details = {"message": str(error)}
+        self._finish_operation(operation_id, status, details)
+
+    def _reload_box_profiles(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if self._active_operations():
+            raise PanelCommandError("Wait for the active operation to reach a terminal state")
+        if payload.get("confirmed") is not True:
+            raise PanelCommandError("Box-profile reload requires confirmation")
+        with self._lock:
+            manipulation_state = self._manipulation_state["state"]
+        if manipulation_state != "EMPTY":
+            raise PanelCommandError("Box-profile reload requires manipulation state EMPTY")
+        if not self._profile_reload_client.service_is_ready():
+            raise PanelCommandError("Box-profile reload service is unavailable")
+
+        operation = Operation(
+            identifier=str(uuid4()),
+            kind="reload_box_profiles",
+            requested_at=time.time(),
+            plan_only=None,
+            cancelable=False,
+            service_deadline=time.monotonic() + self.service_timeout_sec,
+        )
+        self._register_operation(operation)
+        request = ReloadBoxProfiles.Request()
+        request.profiles_file = self.box_profiles_file
+        request.dry_run = False
+        try:
+            future = self._profile_reload_client.call_async(request)
+        except Exception as error:
+            self._finish_operation(operation.identifier, "ERROR", {"message": str(error)})
+            raise PanelCommandError(f"Failed to call box-profile reload: {error}") from error
+        self._audit("reload_box_profiles", "submitted", self.box_profiles_file)
+        future.add_done_callback(
+            lambda response: self._on_box_profile_reload_result(
+                operation.identifier, response
+            )
+        )
+        return {"operation": operation.as_dict()}
+
+    def _on_box_profile_reload_result(self, operation_id: str, completed: Any) -> None:
+        try:
+            result = completed.result()
+            details = {
+                "success": bool(result.success),
+                "message": result.message,
+                "profile_version": int(result.profile_version),
+            }
             status = "SUCCEEDED" if result.success else "FAILED"
         except Exception as error:
             status = "ERROR"

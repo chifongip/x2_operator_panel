@@ -205,6 +205,20 @@ reported manipulation state is `HOLDING`; both use the same plan-only toggle,
 execution unlock, and physical-motion confirmation as pick/place. Carry B is a
 calibrated payload pose, not a base-navigation command.
 
+**Reload profiles** calls `/reload_box_profiles` with the launch-configured
+`box_profiles_file`. The configured catalog must be an absolute path and must
+match the file supplied to the manipulation launch. The button is enabled only
+when the service is available, no panel operation is active, and manipulation
+is `EMPTY`; the manipulation server enforces the same condition atomically.
+Edit the catalog, then reload and wait for a fresh box state before a
+`plan_only` pick/place verification. To use a non-default catalog, pass it to
+both launches:
+
+```bash
+ros2 launch x2_operator_panel operator_panel.launch.py \
+  box_profiles_file:=/absolute/path/to/box_profiles.yaml
+```
+
 The map supports two confirmed commands. Select **Initial pose** or
 **Navigation goal**, then click and drag on the map to set the map-frame
 position and heading. Initial pose publishes `geometry_msgs/msg/PoseWithCovarianceStamped`

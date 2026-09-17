@@ -688,6 +688,8 @@ def _make_request_handler(application: PanelApplication) -> type[BaseHTTPRequest
                     response = application.node.request("cancel_docking_motion", {})
                 elif path == "/api/recover-state":
                     response = application.node.request("recover_state", payload)
+                elif path == "/api/box-profiles/reload":
+                    response = application.node.request("reload_box_profiles", payload)
                 elif path == "/api/initial-pose":
                     response = application.node.request("set_initial_pose", payload)
                 elif path == "/api/costmaps/clear":

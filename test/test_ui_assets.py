@@ -100,6 +100,32 @@ class UiAssetsTest(unittest.TestCase):
         self.assertIn("const carryPoseReady", script)
         self.assertIn("button.disabled = !carryPoseReady", script)
 
+    def test_box_profile_reload_control_uses_the_public_coordinator(self):
+        package_root = Path(__file__).parents[1]
+        page = (package_root / "x2_operator_panel" / "static" / "index.html").read_text(
+            encoding="utf-8"
+        )
+        script = (package_root / "x2_operator_panel" / "static" / "app.js").read_text(
+            encoding="utf-8"
+        )
+        server = (package_root / "x2_operator_panel" / "panel_server.py").read_text(
+            encoding="utf-8"
+        )
+        gateway = (package_root / "x2_operator_panel" / "ros_gateway.py").read_text(
+            encoding="utf-8"
+        )
+        launch_file = (package_root / "launch" / "operator_panel.launch.py").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn('id="reload-box-profiles"', page)
+        self.assertIn('id="box-profiles-file"', page)
+        self.assertIn("function reloadBoxProfiles", script)
+        self.assertIn('"/api/box-profiles/reload"', script)
+        self.assertIn('request("reload_box_profiles", payload)', server)
+        self.assertIn('ReloadBoxProfiles, "/reload_box_profiles"', gateway)
+        self.assertIn('"box_profiles_file"', launch_file)
+
     def test_available_pose_always_draws_a_robot_marker(self):
         package_root = Path(__file__).parents[1]
         script = (package_root / "x2_operator_panel" / "static" / "app.js").read_text(

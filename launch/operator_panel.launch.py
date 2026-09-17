@@ -11,6 +11,7 @@ from launch_ros.parameter_descriptions import ParameterValue
 def generate_launch_description():
     panel_share = Path(get_package_share_directory("x2_operator_panel"))
     navigation_share = Path(get_package_share_directory("x2_navigation"))
+    manipulation_share = Path(get_package_share_directory("agibot_x2_manipulation"))
     return LaunchDescription(
         [
             DeclareLaunchArgument(
@@ -70,6 +71,11 @@ def generate_launch_description():
                 "navigation_presets_file",
                 default_value=str(panel_share / "config" / "navigation_presets.yaml"),
                 description="Surveyed, map-frame navigation presets available to operators.",
+            ),
+            DeclareLaunchArgument(
+                "box_profiles_file",
+                default_value=str(manipulation_share / "config" / "box_profiles.yaml"),
+                description="Absolute box-profile catalog reloaded by the operator panel.",
             ),
             DeclareLaunchArgument("session_ttl_sec", default_value="1800.0"),
             DeclareLaunchArgument("execution_unlock_sec", default_value="30.0"),
@@ -181,6 +187,7 @@ def generate_launch_description():
                         "navigation_presets_file": LaunchConfiguration(
                             "navigation_presets_file"
                         ),
+                        "box_profiles_file": LaunchConfiguration("box_profiles_file"),
                         "session_ttl_sec": LaunchConfiguration("session_ttl_sec"),
                         "execution_unlock_sec": LaunchConfiguration("execution_unlock_sec"),
                         "box_pose_freshness_sec": LaunchConfiguration(
