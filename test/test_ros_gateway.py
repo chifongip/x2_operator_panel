@@ -17,6 +17,7 @@ from x2_operator_panel.ros_gateway import (
     Operation,
     OperatorPanelNode,
     PanelCommandError,
+    _diagnostic_level_as_int,
     _display_telemetry_qos,
 )
 from rclpy.qos import DurabilityPolicy, ReliabilityPolicy
@@ -64,6 +65,31 @@ class FakeServiceClient:
 
 
 class RosGatewayTest(unittest.TestCase):
+    def test_diagnostic_level_accepts_ros_uint8_bytes_and_integers(self):
+        self.assertEqual(_diagnostic_level_as_int(b"\x00"), 0)
+        self.assertEqual(_diagnostic_level_as_int(bytearray((2,))), 2)
+        self.assertEqual(_diagnostic_level_as_int(1), 1)
+
+    def test_diagnostics_callback_keeps_uint8_byte_levels(self):
+        node = object.__new__(OperatorPanelNode)
+        node._lock = threading.RLock()
+        node._diagnostics = []
+        message = SimpleNamespace(
+            status=[
+                SimpleNamespace(
+                    name="pick_place/closed_chain_planning",
+                    level=b"\x00",
+                    message="path accepted",
+                    values=[SimpleNamespace(key="route_id", value="direct")],
+                )
+            ]
+        )
+
+        node._on_diagnostics(message)
+
+        self.assertEqual(node._diagnostics[0]["level"], 0)
+        self.assertEqual(node._diagnostics[0]["values"], {"route_id": "direct"})
+
     def test_display_telemetry_qos_keeps_only_the_latest_lossy_sample(self):
         qos = _display_telemetry_qos()
 

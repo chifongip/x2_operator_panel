@@ -96,7 +96,16 @@ class NavigationPreset:
             "id": self.identifier,
             "label": self.label,
             "pose": {"x": self.x, "y": self.y, "yaw": self.yaw},
-        }
+}
+
+
+def _diagnostic_level_as_int(level: Any) -> int:
+    """Normalize ROS uint8 diagnostic levels across Humble Python bindings."""
+    if isinstance(level, (bytes, bytearray, memoryview)):
+        if len(level) != 1:
+            raise ValueError("a diagnostic level byte value must contain exactly one byte")
+        return int(level[0])
+    return int(level)
 
 
 @dataclass
@@ -2095,7 +2104,7 @@ class OperatorPanelNode(Node):
             diagnostics.append(
                 {
                     "name": status.name,
-                    "level": int(status.level),
+                    "level": _diagnostic_level_as_int(status.level),
                     "message": status.message,
                     "values": {item.key: item.value for item in status.values},
                 }
