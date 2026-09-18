@@ -433,6 +433,11 @@
       button.disabled = !carryPoseReady;
       button.title = carryPoseReady ? "Plan or move the held box to this carry pose" : carryPoseDetail;
     });
+    const posture = status.locomanipulation_posture || {};
+    const postureButton = byId("set-posture");
+    postureButton.disabled = !posture.ready;
+    postureButton.title = posture.detail || "Locomanipulation posture service unavailable";
+    byId("posture-status").textContent = posture.detail || "Waiting for posture service";
     const profileReload = status.box_profiles_reload || {};
     const reloadProfilesButton = byId("reload-box-profiles");
     reloadProfilesButton.disabled = !profileReload.ready;
@@ -759,6 +764,40 @@
       setError("");
     } catch (error) { setError(error.message); }
   }
+  function postureTarget() {
+    const height = Number(byId("posture-height").value);
+    const waistYaw = Number(byId("posture-waist-yaw").value);
+    if (!Number.isFinite(height) || height < 0.30 || height > 0.64) {
+      throw new Error("Posture height must be within 0.30 to 0.64 m");
+    }
+    if (!Number.isFinite(waistYaw) || waistYaw < -1.5708 || waistYaw > 1.5708) {
+      throw new Error("Posture waist yaw must be within -1.5708 to 1.5708 rad");
+    }
+    return {
+      height,
+      waist_yaw: waistYaw,
+      wait_for_settle: byId("posture-wait-for-settle").checked,
+    };
+  }
+  async function setLocomanipulationPosture() {
+    try {
+      const target = postureTarget();
+      if (!(state.status?.execution_unlock_remaining_sec > 0)) {
+        throw new Error("Temporarily unlock one physical motion command first");
+      }
+      const waitDetail = target.wait_for_settle
+        ? " Wait for the direct lower-body feedback window?"
+        : " Do not wait for the direct lower-body feedback window?";
+      if (!window.confirm(
+        `Set posture to height ${target.height.toFixed(3)} m and waist yaw ${target.waist_yaw.toFixed(3)} rad?${waitDetail}`
+      )) return;
+      await api("/api/posture", {
+        method: "POST",
+        body: JSON.stringify({ ...target, confirmed: true }),
+      });
+      setError("");
+    } catch (error) { setError(error.message); }
+  }
   async function unlockExecution() {
     if (!window.confirm("Temporarily unlock one physical motion command?")) return;
     try { await api("/api/unlock/execution", { method: "POST", body: JSON.stringify({ confirmed: true }) }); setError(""); } catch (error) { setError(error.message); }
@@ -798,6 +837,10 @@
   byId("recover-empty").addEventListener("click", () => recoverState("empty"));
   byId("recover-holding").addEventListener("click", () => recoverState("holding"));
   byId("reload-box-profiles").addEventListener("click", reloadBoxProfiles);
+  byId("posture-form").addEventListener("submit", (event) => {
+    event.preventDefault();
+    setLocomanipulationPosture();
+  });
   byId("unlock-execution").addEventListener("click", unlockExecution);
   byId("cancel-active").addEventListener("click", cancelActive);
   byId("cancel-docking-motion").addEventListener("click", cancelDockingMotion);

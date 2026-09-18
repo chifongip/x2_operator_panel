@@ -23,10 +23,15 @@ from agibot_x2_manipulation_msgs.action import (
     Place,
     ResetManipulation,
 )
-from agibot_x2_manipulation_msgs.msg import BoxStateArray, ManipulationState
+from agibot_x2_manipulation_msgs.msg import (
+    BoxStateArray,
+    LocomanipulationPostureStatus,
+    ManipulationState,
+)
 from agibot_x2_manipulation_msgs.srv import (
     RecoverManipulationState,
     ReloadBoxProfiles,
+    SetLocomanipulationPosture,
 )
 from ament_index_python.packages import get_package_share_directory
 from diagnostic_msgs.msg import DiagnosticArray
@@ -419,6 +424,12 @@ class OperatorPanelNode(Node):
         self.service_timeout_sec = float(
             self.declare_parameter("service_timeout_sec", 5.0).value
         )
+        self.posture_service_timeout_sec = float(
+            self.declare_parameter("posture_service_timeout_sec", 15.0).value
+        )
+        self.posture_status_freshness_sec = float(
+            self.declare_parameter("posture_status_freshness_sec", 3.0).value
+        )
         self.navigation_lifecycle_poll_period_sec = float(
             self.declare_parameter("navigation_lifecycle_poll_period_sec", 5.0).value
         )
@@ -454,6 +465,8 @@ class OperatorPanelNode(Node):
             "initial_pose_yaw_tolerance_rad": self.initial_pose_yaw_tolerance_rad,
             "goal_admission_timeout_sec": self.goal_admission_timeout_sec,
             "service_timeout_sec": self.service_timeout_sec,
+            "posture_service_timeout_sec": self.posture_service_timeout_sec,
+            "posture_status_freshness_sec": self.posture_status_freshness_sec,
             "shutdown_cancel_grace_sec": self.shutdown_cancel_grace_sec,
             "operation_history_limit": operation_history_limit,
         }
@@ -486,6 +499,13 @@ class OperatorPanelNode(Node):
         self._camera_frame_versions: dict[str, int] = {}
         self._camera_last_encoded_monotonic: dict[str, float] = {}
         self._manipulation_state = {"state": "UNKNOWN", "detail": "No state received"}
+        self._posture_status: dict[str, Any] = {
+            "available": False,
+            "execution_enabled": False,
+            "target_active": False,
+            "detail": "Waiting for posture server status",
+        }
+        self._posture_status_received_monotonic: float | None = None
         self._box_pose: dict[str, Any] | None = None
         self._box_pose_received_monotonic: float | None = None
         self._visible_boxes: dict[str, dict[str, Any]] = {}
@@ -594,6 +614,9 @@ class OperatorPanelNode(Node):
         self._profile_reload_client = self.create_client(
             ReloadBoxProfiles, "/reload_box_profiles"
         )
+        self._posture_client = self.create_client(
+            SetLocomanipulationPosture, "/set_locomanipulation_posture"
+        )
         self._initial_pose_publisher = self.create_publisher(
             PoseWithCovarianceStamped, "/initialpose", 10
         )
@@ -605,6 +628,12 @@ class OperatorPanelNode(Node):
         telemetry_qos = _display_telemetry_qos()
         self.create_subscription(
             ManipulationState, "/manipulation_state", self._on_manipulation_state, state_qos
+        )
+        self.create_subscription(
+            LocomanipulationPostureStatus,
+            "/locomanipulation_posture_status",
+            self._on_locomanipulation_posture_status,
+            state_qos,
         )
         self.create_subscription(
             PoseWithCovarianceStamped, "/box_pose", self._on_box_pose, telemetry_qos
@@ -723,6 +752,42 @@ class OperatorPanelNode(Node):
                 profile_reload_detail = "Reload requires manipulation state EMPTY"
             else:
                 profile_reload_detail = "Ready to reload the configured profile catalog"
+            posture_service_ready = self._posture_client.service_is_ready()
+            posture_status = dict(self._posture_status)
+            posture_status_fresh = (
+                self._posture_status_received_monotonic is not None
+                and time.monotonic() - self._posture_status_received_monotonic
+                <= self.posture_status_freshness_sec
+            )
+            posture_status["fresh"] = posture_status_fresh
+            posture_ready = (
+                posture_service_ready
+                and posture_status_fresh
+                and posture_status["execution_enabled"]
+                and not active_operation
+                and self._manipulation_state["state"] in {"EMPTY", "HOLDING"}
+            )
+            if not posture_service_ready:
+                posture_detail = "Locomanipulation posture service is unavailable"
+            elif not posture_status_fresh:
+                posture_detail = "Waiting for a current locomanipulation posture server status"
+            elif not posture_status["execution_enabled"]:
+                posture_detail = posture_status["detail"]
+            elif active_operation:
+                posture_detail = "Wait for the active panel operation to finish"
+            elif self._manipulation_state["state"] not in {"EMPTY", "HOLDING"}:
+                posture_detail = "Posture requires manipulation state EMPTY or HOLDING"
+            else:
+                posture_detail = (
+                    "Ready; unlock and confirm to send a physical posture target"
+                    if not posture_status["target_active"]
+                    else (
+                        "Posture publisher is active at "
+                        f"height {posture_status['target_height']:.3f} m, waist yaw "
+                        f"{posture_status['target_waist_yaw']:.3f} rad; unlock and confirm "
+                        "to replace its target"
+                    )
+                )
             visible_boxes = self._fresh_visible_boxes_locked()
             return {
                 "servers": {
@@ -735,6 +800,12 @@ class OperatorPanelNode(Node):
                     "ready": profile_reload_ready,
                     "profiles_file": self.box_profiles_file,
                     "detail": profile_reload_detail,
+                },
+                "locomanipulation_posture": {
+                    "service_ready": posture_service_ready,
+                    "ready": posture_ready,
+                    "detail": posture_detail,
+                    "status": posture_status,
                 },
                 "manipulation_state": dict(self._manipulation_state),
                 "box_pose": dict(self._box_pose) if self._box_pose is not None else None,
@@ -811,6 +882,8 @@ class OperatorPanelNode(Node):
                     result = self._recover_state(command.payload)
                 elif command.name == "reload_box_profiles":
                     result = self._reload_box_profiles(command.payload)
+                elif command.name == "set_locomanipulation_posture":
+                    result = self._set_locomanipulation_posture(command.payload)
                 elif command.name == "set_initial_pose":
                     result = self._set_initial_pose(command.payload)
                 elif command.name == "clear_costmaps":
@@ -1654,6 +1727,96 @@ class OperatorPanelNode(Node):
             details = {"message": str(error)}
         self._finish_operation(operation_id, status, details)
 
+    def _set_locomanipulation_posture(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if self._active_operations():
+            raise PanelCommandError("Wait for the active operation to reach a terminal state")
+        if payload.get("confirmed") is not True:
+            raise PanelCommandError("Locomanipulation posture requires confirmation")
+        height = _finite_number(payload.get("height"), "posture height")
+        waist_yaw = _finite_number(payload.get("waist_yaw"), "posture waist_yaw")
+        if not 0.30 <= height <= 0.64:
+            raise PanelCommandError("Posture height must be within [0.30, 0.64] m")
+        if not -1.5708 <= waist_yaw <= 1.5708:
+            raise PanelCommandError("Posture waist_yaw must be within [-1.5708, 1.5708] rad")
+        wait_for_settle = self._optional_boolean(payload, "wait_for_settle", True)
+        with self._lock:
+            manipulation_state = self._manipulation_state["state"]
+            if manipulation_state not in {"EMPTY", "HOLDING"}:
+                raise PanelCommandError(
+                    "Locomanipulation posture requires manipulation state EMPTY or HOLDING"
+                )
+            status_fresh = (
+                self._posture_status_received_monotonic is not None
+                and time.monotonic() - self._posture_status_received_monotonic
+                <= self.posture_status_freshness_sec
+            )
+            if not status_fresh:
+                raise PanelCommandError("Locomanipulation posture server status is unavailable")
+            if not self._posture_status["execution_enabled"]:
+                raise PanelCommandError(self._posture_status["detail"])
+            feedback_window_timeout_sec = float(
+                self._posture_status["feedback_window_timeout_sec"]
+            )
+            if time.monotonic() >= self._execution_unlocked_until:
+                raise PanelCommandError("Physical execution unlock has expired")
+        if not self._posture_client.service_is_ready():
+            raise PanelCommandError("Locomanipulation posture service is unavailable")
+
+        operation = Operation(
+            identifier=str(uuid4()),
+            kind="set_locomanipulation_posture",
+            requested_at=time.time(),
+            plan_only=False,
+            cancelable=False,
+            service_deadline=time.monotonic()
+            + max(self.posture_service_timeout_sec, feedback_window_timeout_sec + 1.0),
+        )
+        self._register_operation(operation)
+        request = SetLocomanipulationPosture.Request()
+        request.height = height
+        request.waist_yaw = waist_yaw
+        request.wait_for_settle = wait_for_settle
+        with self._lock:
+            if time.monotonic() >= self._execution_unlocked_until:
+                self._finish_operation(
+                    operation.identifier,
+                    "ERROR",
+                    {"message": "Physical execution unlock has expired"},
+                )
+                raise PanelCommandError("Physical execution unlock has expired")
+            self._execution_unlocked_until = 0.0
+        try:
+            future = self._posture_client.call_async(request)
+        except Exception as error:
+            self._finish_operation(operation.identifier, "ERROR", {"message": str(error)})
+            raise PanelCommandError(
+                f"Failed to call locomanipulation posture service: {error}"
+            ) from error
+        self._audit(
+            "set_locomanipulation_posture",
+            "submitted",
+            f"height={height:.3f} m; waist_yaw={waist_yaw:.3f} rad; "
+            f"wait_for_settle={wait_for_settle}",
+        )
+        future.add_done_callback(
+            lambda response: self._on_locomanipulation_posture_result(
+                operation.identifier, response
+            )
+        )
+        return {"operation": operation.as_dict()}
+
+    def _on_locomanipulation_posture_result(
+        self, operation_id: str, completed: Any
+    ) -> None:
+        try:
+            result = completed.result()
+            details = {"success": bool(result.success), "message": result.message}
+            status = "SUCCEEDED" if result.success else "FAILED"
+        except Exception as error:
+            status = "ERROR"
+            details = {"message": str(error)}
+        self._finish_operation(operation_id, status, details)
+
     def _expire_pending_operations(self) -> None:
         now = time.monotonic()
         with self._lock:
@@ -1722,6 +1885,25 @@ class OperatorPanelNode(Node):
                 "state": _MANIPULATION_STATE_NAMES.get(message.state, "UNKNOWN"),
                 "detail": message.detail,
             }
+
+    def _on_locomanipulation_posture_status(
+        self, message: LocomanipulationPostureStatus
+    ) -> None:
+        with self._lock:
+            self._posture_status = {
+                "available": True,
+                "enabled": bool(message.enabled),
+                "execution_enabled": bool(message.execution_enabled),
+                "target_active": bool(message.target_active),
+                "target_height": float(message.target_height),
+                "target_waist_yaw": float(message.target_waist_yaw),
+                "feedback_window_timeout_sec": float(
+                    message.feedback_window_timeout_sec
+                ),
+                "endpoint": message.endpoint,
+                "detail": message.detail,
+            }
+            self._posture_status_received_monotonic = time.monotonic()
 
     def _on_box_pose(self, message: PoseWithCovarianceStamped) -> None:
         with self._lock:

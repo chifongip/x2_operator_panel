@@ -205,6 +205,21 @@ reported manipulation state is `HOLDING`; both use the same plan-only toggle,
 execution unlock, and physical-motion confirmation as pick/place. Carry B is a
 calibrated payload pose, not a base-navigation command.
 
+The **Locomanipulation posture** control sends `height` and `waist_yaw` to
+`/set_locomanipulation_posture`. It is available in confirmed `EMPTY` and
+`HOLDING` states, so an operator can set a carrying posture after pick and a
+release posture after place. Like every physical panel motion, it consumes one
+timed execution unlock and requires a per-command confirmation. Keep **Wait
+for direct feedback window** selected for workflow transitions; this confirms
+fresh leg and waist feedback after publication, not that the one-way RoboJuDo
+ZMQ policy has reached the requested target. The control stays disabled until
+the manipulation server publishes a current status showing that posture
+execution is enabled; when it is active, the panel displays the locally
+published target. Its request timeout is automatically extended to cover the
+server's advertised feedback-window timeout. The operator must use a
+collision-reviewed posture sequence before undocking, navigating, or moving a
+held object.
+
 **Reload profiles** calls `/reload_box_profiles` with the launch-configured
 `box_profiles_file`. The configured catalog must be an absolute path and must
 match the file supplied to the manipulation launch. The button is enabled only

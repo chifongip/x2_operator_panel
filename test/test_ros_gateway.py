@@ -11,7 +11,10 @@ from unittest.mock import patch
 from builtin_interfaces.msg import Time
 from agibot_x2_manipulation_msgs.action import MoveCarryPose
 from agibot_x2_manipulation_msgs.msg import BoxState, BoxStateArray
-from agibot_x2_manipulation_msgs.srv import ReloadBoxProfiles
+from agibot_x2_manipulation_msgs.srv import (
+    ReloadBoxProfiles,
+    SetLocomanipulationPosture,
+)
 from sensor_msgs.msg import Image
 from x2_operator_panel.ros_gateway import (
     Operation,
@@ -917,6 +920,87 @@ class RosGatewayTest(unittest.TestCase):
             node._reload_box_profiles({"confirmed": True})
 
         self.assertEqual(node._profile_reload_client.calls, [])
+
+    def test_posture_control_calls_the_public_service_while_holding(self):
+        node = object.__new__(OperatorPanelNode)
+        node._lock = threading.RLock()
+        node._operations = {}
+        node._operation_history = deque(maxlen=10)
+        node._audit_sink = None
+        node._manipulation_state = {"state": "HOLDING"}
+        node._execution_unlocked_until = time.monotonic() + 30.0
+        node.posture_service_timeout_sec = 15.0
+        node.posture_status_freshness_sec = 3.0
+        node._posture_status_received_monotonic = time.monotonic()
+        node._posture_status = {
+            "execution_enabled": True,
+            "feedback_window_timeout_sec": 20.0,
+            "detail": "Posture publisher is released",
+        }
+        node._posture_client = FakeServiceClient(
+            SimpleNamespace(success=True, message="posture target accepted")
+        )
+
+        response = node._set_locomanipulation_posture(
+            {
+                "height": 0.52,
+                "waist_yaw": -0.20,
+                "wait_for_settle": True,
+                "confirmed": True,
+            }
+        )
+
+        request = node._posture_client.calls[0]
+        self.assertIsInstance(request, SetLocomanipulationPosture.Request)
+        self.assertAlmostEqual(request.height, 0.52)
+        self.assertAlmostEqual(request.waist_yaw, -0.20)
+        self.assertTrue(request.wait_for_settle)
+        operation = node._operations[response["operation"]["id"]]
+        self.assertEqual(operation.status, "SUCCEEDED")
+        self.assertEqual(operation.result["message"], "posture target accepted")
+        self.assertEqual(node._execution_unlocked_until, 0.0)
+
+    def test_posture_control_requires_current_enabled_server_status(self):
+        node = object.__new__(OperatorPanelNode)
+        node._lock = threading.RLock()
+        node._operations = {}
+        node._manipulation_state = {"state": "EMPTY"}
+        node._execution_unlocked_until = time.monotonic() + 30.0
+        node.posture_status_freshness_sec = 3.0
+        node._posture_status_received_monotonic = time.monotonic()
+        node._posture_status = {
+            "execution_enabled": False,
+            "detail": "Posture execution is disabled: allow_execution is false",
+        }
+        node._posture_client = FakeServiceClient()
+
+        with self.assertRaisesRegex(PanelCommandError, "allow_execution"):
+            node._set_locomanipulation_posture(
+                {"height": 0.52, "waist_yaw": 0.0, "confirmed": True}
+            )
+
+        self.assertEqual(node._posture_client.calls, [])
+
+    def test_posture_control_rejects_unknown_state_and_invalid_targets(self):
+        node = object.__new__(OperatorPanelNode)
+        node._lock = threading.RLock()
+        node._operations = {}
+        node._manipulation_state = {"state": "UNKNOWN"}
+        node._execution_unlocked_until = time.monotonic() + 30.0
+        node._posture_client = FakeServiceClient()
+
+        with self.assertRaisesRegex(PanelCommandError, "EMPTY or HOLDING"):
+            node._set_locomanipulation_posture(
+                {"height": 0.52, "waist_yaw": 0.0, "confirmed": True}
+            )
+        self.assertEqual(node._posture_client.calls, [])
+
+        node._manipulation_state = {"state": "EMPTY"}
+        with self.assertRaisesRegex(PanelCommandError, "height"):
+            node._set_locomanipulation_posture(
+                {"height": 0.65, "waist_yaw": 0.0, "confirmed": True}
+            )
+        self.assertEqual(node._posture_client.calls, [])
 
     def test_cancel_dispatch_failure_does_not_claim_cancellation(self):
         node = object.__new__(OperatorPanelNode)

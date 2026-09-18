@@ -122,6 +122,19 @@ def generate_launch_description():
             DeclareLaunchArgument("goal_admission_timeout_sec", default_value="5.0"),
             DeclareLaunchArgument("service_timeout_sec", default_value="5.0"),
             DeclareLaunchArgument(
+                "posture_service_timeout_sec",
+                default_value="15.0",
+                description=(
+                    "Maximum wait for the posture service, including its configured "
+                    "direct lower-body feedback window."
+                ),
+            ),
+            DeclareLaunchArgument(
+                "posture_status_freshness_sec",
+                default_value="3.0",
+                description="Maximum age of the manipulation server posture-status heartbeat.",
+            ),
+            DeclareLaunchArgument(
                 "navigation_lifecycle_poll_period_sec", default_value="5.0"
             ),
             DeclareLaunchArgument("shutdown_cancel_grace_sec", default_value="5.0"),
@@ -236,6 +249,12 @@ def generate_launch_description():
                             "goal_admission_timeout_sec"
                         ),
                         "service_timeout_sec": LaunchConfiguration("service_timeout_sec"),
+                        "posture_service_timeout_sec": LaunchConfiguration(
+                            "posture_service_timeout_sec"
+                        ),
+                        "posture_status_freshness_sec": LaunchConfiguration(
+                            "posture_status_freshness_sec"
+                        ),
                         "navigation_lifecycle_poll_period_sec": LaunchConfiguration(
                             "navigation_lifecycle_poll_period_sec"
                         ),

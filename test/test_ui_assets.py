@@ -126,6 +126,41 @@ class UiAssetsTest(unittest.TestCase):
         self.assertIn('ReloadBoxProfiles, "/reload_box_profiles"', gateway)
         self.assertIn('"box_profiles_file"', launch_file)
 
+    def test_locomanipulation_posture_control_uses_the_public_service(self):
+        package_root = Path(__file__).parents[1]
+        page = (package_root / "x2_operator_panel" / "static" / "index.html").read_text(
+            encoding="utf-8"
+        )
+        script = (package_root / "x2_operator_panel" / "static" / "app.js").read_text(
+            encoding="utf-8"
+        )
+        server = (package_root / "x2_operator_panel" / "panel_server.py").read_text(
+            encoding="utf-8"
+        )
+        gateway = (package_root / "x2_operator_panel" / "ros_gateway.py").read_text(
+            encoding="utf-8"
+        )
+        launch_file = (package_root / "launch" / "operator_panel.launch.py").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn('id="posture-form"', page)
+        self.assertIn('id="posture-height"', page)
+        self.assertIn('id="posture-waist-yaw"', page)
+        self.assertIn('id="posture-wait-for-settle"', page)
+        self.assertIn('id="set-posture"', page)
+        self.assertIn("function setLocomanipulationPosture", script)
+        self.assertIn('"/api/posture"', script)
+        self.assertIn('"/api/posture"', server)
+        self.assertIn('"set_locomanipulation_posture"', server)
+        self.assertIn(
+            'SetLocomanipulationPosture, "/set_locomanipulation_posture"', gateway
+        )
+        self.assertIn('"posture_service_timeout_sec"', launch_file)
+        self.assertIn('"posture_status_freshness_sec"', launch_file)
+        self.assertIn('LocomanipulationPostureStatus', gateway)
+        self.assertIn('"/locomanipulation_posture_status"', gateway)
+
     def test_available_pose_always_draws_a_robot_marker(self):
         package_root = Path(__file__).parents[1]
         script = (package_root / "x2_operator_panel" / "static" / "app.js").read_text(
