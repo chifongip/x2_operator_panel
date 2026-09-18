@@ -12,6 +12,7 @@ from builtin_interfaces.msg import Time
 from agibot_x2_manipulation_msgs.action import MoveCarryPose
 from agibot_x2_manipulation_msgs.msg import BoxState, BoxStateArray
 from agibot_x2_manipulation_msgs.srv import (
+    ClearLocomanipulationPostureTarget,
     ReloadBoxProfiles,
     SetLocomanipulationPosture,
 )
@@ -959,6 +960,52 @@ class RosGatewayTest(unittest.TestCase):
         self.assertEqual(operation.status, "SUCCEEDED")
         self.assertEqual(operation.result["message"], "posture target accepted")
         self.assertEqual(node._execution_unlocked_until, 0.0)
+
+    def test_posture_control_preserves_an_exact_zero_waist_yaw(self):
+        node = object.__new__(OperatorPanelNode)
+        node._lock = threading.RLock()
+        node._operations = {}
+        node._operation_history = deque(maxlen=10)
+        node._audit_sink = None
+        node._manipulation_state = {"state": "EMPTY"}
+        node._execution_unlocked_until = time.monotonic() + 30.0
+        node.posture_service_timeout_sec = 15.0
+        node.posture_status_freshness_sec = 3.0
+        node._posture_status_received_monotonic = time.monotonic()
+        node._posture_status = {
+            "execution_enabled": True,
+            "feedback_window_timeout_sec": 10.0,
+            "detail": "Posture publisher is active",
+        }
+        node._posture_client = FakeServiceClient(
+            SimpleNamespace(success=True, message="posture target accepted")
+        )
+
+        node._set_locomanipulation_posture(
+            {"height": 0.64, "waist_yaw": 0.0, "confirmed": True}
+        )
+
+        request = node._posture_client.calls[0]
+        self.assertEqual(request.waist_yaw, 0.0)
+
+    def test_release_posture_control_calls_the_clear_service(self):
+        node = object.__new__(OperatorPanelNode)
+        node._lock = threading.RLock()
+        node._operations = {}
+        node._operation_history = deque(maxlen=10)
+        node._audit_sink = None
+        node.service_timeout_sec = 5.0
+        node._posture_release_client = FakeServiceClient(
+            SimpleNamespace(success=True, message="posture publisher released")
+        )
+
+        response = node._release_locomanipulation_posture({"confirmed": True})
+
+        request = node._posture_release_client.calls[0]
+        self.assertIsInstance(request, ClearLocomanipulationPostureTarget.Request)
+        operation = node._operations[response["operation"]["id"]]
+        self.assertEqual(operation.status, "SUCCEEDED")
+        self.assertEqual(operation.result["message"], "posture publisher released")
 
     def test_posture_control_requires_current_enabled_server_status(self):
         node = object.__new__(OperatorPanelNode)

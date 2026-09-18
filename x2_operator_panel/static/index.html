@@ -166,10 +166,14 @@
             </div>
             <fieldset class="posture-fields">
               <label>Height (m)<input id="posture-height" type="number" min="0.30" max="0.64" value="0.64" step="0.01" required></label>
-              <label>Waist yaw (rad)<input id="posture-waist-yaw" type="number" min="-1.5708" max="1.5708" value="0" step="0.01" required></label>
+              <label>Waist yaw (rad)<input id="posture-waist-yaw" type="number" min="-1.5708" max="1.5708" value="0.0" step="any" required></label>
               <label class="plan-toggle"><input id="posture-wait-for-settle" type="checkbox" checked>Wait for direct feedback window</label>
             </fieldset>
-            <button id="set-posture" type="submit" disabled>Set posture</button>
+            <div class="posture-actions">
+              <button id="set-posture" type="submit" disabled>Set posture</button>
+              <button id="reset-posture" class="secondary" type="button" disabled>Reset posture</button>
+              <button id="release-posture" class="secondary" type="button" disabled>Release posture control</button>
+            </div>
           </form>
           <form id="place-form" class="pose-form">
             <div class="place-target-heading">

@@ -220,6 +220,14 @@ server's advertised feedback-window timeout. The operator must use a
 collision-reviewed posture sequence before undocking, navigating, or moving a
 held object.
 
+The waist-yaw field accepts exact decimal values, including `0.0`. **Reset
+posture** sends the RoboJuDo policy default target (`height=0.64 m`,
+`waist_yaw=0.0 rad`) and therefore requires the same execution unlock and
+confirmation as any other physical posture command. **Release posture control**
+only releases this panel publisher; it does not move the robot or restore the
+default posture, because RoboJuDo retains the last accepted posture until
+another source overrides it.
+
 **Reload profiles** calls `/reload_box_profiles` with the launch-configured
 `box_profiles_file`. The configured catalog must be an absolute path and must
 match the file supplied to the manipulation launch. The button is enabled only

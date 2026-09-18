@@ -29,6 +29,7 @@ from agibot_x2_manipulation_msgs.msg import (
     ManipulationState,
 )
 from agibot_x2_manipulation_msgs.srv import (
+    ClearLocomanipulationPostureTarget,
     RecoverManipulationState,
     ReloadBoxProfiles,
     SetLocomanipulationPosture,
@@ -617,6 +618,10 @@ class OperatorPanelNode(Node):
         self._posture_client = self.create_client(
             SetLocomanipulationPosture, "/set_locomanipulation_posture"
         )
+        self._posture_release_client = self.create_client(
+            ClearLocomanipulationPostureTarget,
+            "/clear_locomanipulation_posture_target",
+        )
         self._initial_pose_publisher = self.create_publisher(
             PoseWithCovarianceStamped, "/initialpose", 10
         )
@@ -753,6 +758,7 @@ class OperatorPanelNode(Node):
             else:
                 profile_reload_detail = "Ready to reload the configured profile catalog"
             posture_service_ready = self._posture_client.service_is_ready()
+            posture_release_service_ready = self._posture_release_client.service_is_ready()
             posture_status = dict(self._posture_status)
             posture_status_fresh = (
                 self._posture_status_received_monotonic is not None
@@ -766,6 +772,12 @@ class OperatorPanelNode(Node):
                 and posture_status["execution_enabled"]
                 and not active_operation
                 and self._manipulation_state["state"] in {"EMPTY", "HOLDING"}
+            )
+            posture_release_ready = (
+                posture_release_service_ready
+                and posture_status_fresh
+                and posture_status["target_active"]
+                and not active_operation
             )
             if not posture_service_ready:
                 posture_detail = "Locomanipulation posture service is unavailable"
@@ -788,6 +800,18 @@ class OperatorPanelNode(Node):
                         "to replace its target"
                     )
                 )
+            if not posture_release_service_ready:
+                posture_release_detail = "Locomanipulation posture release service is unavailable"
+            elif not posture_status_fresh:
+                posture_release_detail = "Waiting for a current locomanipulation posture server status"
+            elif active_operation:
+                posture_release_detail = "Wait for the active panel operation to finish"
+            elif not posture_status["target_active"]:
+                posture_release_detail = "Posture publisher is already released"
+            else:
+                posture_release_detail = (
+                    "Release this publisher; RoboJuDo retains its last accepted posture"
+                )
             visible_boxes = self._fresh_visible_boxes_locked()
             return {
                 "servers": {
@@ -805,6 +829,9 @@ class OperatorPanelNode(Node):
                     "service_ready": posture_service_ready,
                     "ready": posture_ready,
                     "detail": posture_detail,
+                    "release_service_ready": posture_release_service_ready,
+                    "release_ready": posture_release_ready,
+                    "release_detail": posture_release_detail,
                     "status": posture_status,
                 },
                 "manipulation_state": dict(self._manipulation_state),
@@ -884,6 +911,8 @@ class OperatorPanelNode(Node):
                     result = self._reload_box_profiles(command.payload)
                 elif command.name == "set_locomanipulation_posture":
                     result = self._set_locomanipulation_posture(command.payload)
+                elif command.name == "release_locomanipulation_posture":
+                    result = self._release_locomanipulation_posture(command.payload)
                 elif command.name == "set_initial_pose":
                     result = self._set_initial_pose(command.payload)
                 elif command.name == "clear_costmaps":
@@ -1816,6 +1845,42 @@ class OperatorPanelNode(Node):
             status = "ERROR"
             details = {"message": str(error)}
         self._finish_operation(operation_id, status, details)
+
+    def _release_locomanipulation_posture(
+        self, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        if self._active_operations():
+            raise PanelCommandError("Wait for the active operation to reach a terminal state")
+        if payload.get("confirmed") is not True:
+            raise PanelCommandError("Releasing locomanipulation posture control requires confirmation")
+        if not self._posture_release_client.service_is_ready():
+            raise PanelCommandError("Locomanipulation posture release service is unavailable")
+
+        operation = Operation(
+            identifier=str(uuid4()),
+            kind="release_locomanipulation_posture",
+            requested_at=time.time(),
+            plan_only=False,
+            cancelable=False,
+            service_deadline=time.monotonic() + self.service_timeout_sec,
+        )
+        self._register_operation(operation)
+        try:
+            future = self._posture_release_client.call_async(
+                ClearLocomanipulationPostureTarget.Request()
+            )
+        except Exception as error:
+            self._finish_operation(operation.identifier, "ERROR", {"message": str(error)})
+            raise PanelCommandError(
+                f"Failed to release locomanipulation posture control: {error}"
+            ) from error
+        self._audit("release_locomanipulation_posture", "submitted", "publisher authority release")
+        future.add_done_callback(
+            lambda response: self._on_locomanipulation_posture_result(
+                operation.identifier, response
+            )
+        )
+        return {"operation": operation.as_dict()}
 
     def _expire_pending_operations(self) -> None:
         now = time.monotonic()

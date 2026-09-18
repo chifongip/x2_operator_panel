@@ -437,6 +437,12 @@
     const postureButton = byId("set-posture");
     postureButton.disabled = !posture.ready;
     postureButton.title = posture.detail || "Locomanipulation posture service unavailable";
+    const resetPostureButton = byId("reset-posture");
+    resetPostureButton.disabled = !posture.ready;
+    resetPostureButton.title = posture.detail || "Locomanipulation posture service unavailable";
+    const releasePostureButton = byId("release-posture");
+    releasePostureButton.disabled = !posture.release_ready;
+    releasePostureButton.title = posture.release_detail || "Locomanipulation posture release unavailable";
     byId("posture-status").textContent = posture.detail || "Waiting for posture service";
     const profileReload = status.box_profiles_reload || {};
     const reloadProfilesButton = byId("reload-box-profiles");
@@ -779,21 +785,49 @@
       wait_for_settle: byId("posture-wait-for-settle").checked,
     };
   }
+  async function submitLocomanipulationPosture(target, actionLabel) {
+    if (!(state.status?.execution_unlock_remaining_sec > 0)) {
+      throw new Error("Temporarily unlock one physical motion command first");
+    }
+    const waitDetail = target.wait_for_settle
+      ? " Wait for the direct lower-body feedback window?"
+      : " Do not wait for the direct lower-body feedback window?";
+    if (!window.confirm(
+      `${actionLabel}: height ${target.height.toFixed(3)} m and waist yaw ${target.waist_yaw.toFixed(4)} rad?${waitDetail}`
+    )) return false;
+    await api("/api/posture", {
+      method: "POST",
+      body: JSON.stringify({ ...target, confirmed: true }),
+    });
+    setError("");
+    return true;
+  }
   async function setLocomanipulationPosture() {
     try {
-      const target = postureTarget();
-      if (!(state.status?.execution_unlock_remaining_sec > 0)) {
-        throw new Error("Temporarily unlock one physical motion command first");
+      await submitLocomanipulationPosture(postureTarget(), "Set posture");
+    } catch (error) { setError(error.message); }
+  }
+  async function resetLocomanipulationPosture() {
+    try {
+      const submitted = await submitLocomanipulationPosture({
+        height: 0.64,
+        waist_yaw: 0.0,
+        wait_for_settle: byId("posture-wait-for-settle").checked,
+      }, "Reset posture to the policy default");
+      if (submitted) {
+        byId("posture-height").value = "0.64";
+        byId("posture-waist-yaw").value = "0.0";
       }
-      const waitDetail = target.wait_for_settle
-        ? " Wait for the direct lower-body feedback window?"
-        : " Do not wait for the direct lower-body feedback window?";
-      if (!window.confirm(
-        `Set posture to height ${target.height.toFixed(3)} m and waist yaw ${target.waist_yaw.toFixed(3)} rad?${waitDetail}`
-      )) return;
-      await api("/api/posture", {
+    } catch (error) { setError(error.message); }
+  }
+  async function releaseLocomanipulationPosture() {
+    if (!window.confirm(
+      "Release this publisher's posture control? This does not move the robot or restore a pose; RoboJuDo retains its last accepted posture until another source overrides it."
+    )) return;
+    try {
+      await api("/api/posture/release", {
         method: "POST",
-        body: JSON.stringify({ ...target, confirmed: true }),
+        body: JSON.stringify({ confirmed: true }),
       });
       setError("");
     } catch (error) { setError(error.message); }
@@ -841,6 +875,8 @@
     event.preventDefault();
     setLocomanipulationPosture();
   });
+  byId("reset-posture").addEventListener("click", resetLocomanipulationPosture);
+  byId("release-posture").addEventListener("click", releaseLocomanipulationPosture);
   byId("unlock-execution").addEventListener("click", unlockExecution);
   byId("cancel-active").addEventListener("click", cancelActive);
   byId("cancel-docking-motion").addEventListener("click", cancelDockingMotion);

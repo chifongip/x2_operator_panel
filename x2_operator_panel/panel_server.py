@@ -694,6 +694,10 @@ def _make_request_handler(application: PanelApplication) -> type[BaseHTTPRequest
                     response = application.node.request(
                         "set_locomanipulation_posture", payload
                     )
+                elif path == "/api/posture/release":
+                    response = application.node.request(
+                        "release_locomanipulation_posture", payload
+                    )
                 elif path == "/api/initial-pose":
                     response = application.node.request("set_initial_pose", payload)
                 elif path == "/api/costmaps/clear":
