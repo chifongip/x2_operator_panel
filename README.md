@@ -205,6 +205,19 @@ reported manipulation state is `HOLDING`; both use the same plan-only toggle,
 execution unlock, and physical-motion confirmation as pick/place. Carry B is a
 calibrated payload pose, not a base-navigation command.
 
+The **Dock → Pick → Undock** control becomes **Dock → Place → Undock** while
+the manipulation state is `HOLDING`. First submit a navigation goal from the
+panel and wait for it to succeed. Turn off **Plan only**, select a fresh box for
+pickup, then use the guided control for each of its three stages. Dock uses
+physical `/fine_align`; the middle stage uses `/pick_box` or `/place_box` (with
+the same optional manual place target as the separate Place control); Undock
+uses `/undock`. Each stage needs a fresh one-shot execution unlock and its own
+confirmation. The next stage is enabled only after the preceding ROS action
+succeeds. A failed or canceled stage stops the sequence. After pickup, navigate
+to the drop-off goal and wait for success before starting the place sequence.
+The guided sequence is held in the browser tab; reloading the page clears its
+progress, while the ROS operations remain visible in the operation history.
+
 The **Locomanipulation posture** control sends `height` and `waist_yaw` to
 `/set_locomanipulation_posture`. It is available in confirmed `EMPTY` and
 `HOLDING` states, so an operator can set a carrying posture after pick and a
