@@ -717,8 +717,13 @@
       setError("");
     } catch (error) { setError(error.message); }
   }
-  const guidedSteps = ["fine_align", "manipulate", "undock"];
+  const guidedSteps = ["fine_align", "set_height", "manipulate", "default_height", "undock"];
   const activeStatuses = ["SUBMITTING", "ACTIVE", "CANCEL_REQUESTED"];
+
+  function guidedStepLabel(step, label) {
+    return ({ fine_align: "Dock", set_height: "Set Height", manipulate: label,
+      default_height: "Default Height", undock: "Undock" })[step];
+  }
 
   function latestNavigation() {
     return [...(state.status?.operations || [])].reverse().find((operation) => operation.kind === "navigate");
@@ -731,7 +736,7 @@
     if (!operation || activeStatuses.includes(operation.status)) return;
     workflow.operationId = null;
     if (operation.status !== "SUCCEEDED" || operation.result?.success === false) {
-      workflow.message = `${workflow.label} stopped at ${guidedSteps[workflow.step]}: ${operation.result?.message || operation.detail || operation.status}`;
+      workflow.message = `${workflow.label} stopped at ${guidedStepLabel(guidedSteps[workflow.step], workflow.label)}: ${operation.result?.message || operation.detail || operation.status}`;
       workflow.failed = true;
       return;
     }
@@ -760,17 +765,21 @@
       message.textContent = workflow.message;
     } else if (workflow) {
       const step = guidedSteps[workflow.step];
-      button.textContent = step === "fine_align" ? "Dock" : step === "undock" ? "Undock" : workflow.label;
+      button.textContent = guidedStepLabel(step, workflow.label);
+      const postureStep = ["set_height", "default_height"].includes(step);
       button.disabled = Boolean(workflow.operationId) || active || state.guidedSubmitting || byId("plan-only").checked ||
+        (postureStep && !state.status?.locomanipulation_posture?.ready) ||
         (step === "manipulate" && workflow.kind === "pick" && !state.selectedBoxId);
       message.textContent = workflow.operationId
         ? `Waiting for ${button.textContent} to finish.`
         : byId("plan-only").checked ? "Turn off Plan only to continue the physical sequence."
           : step === "manipulate" && workflow.kind === "pick" && !state.selectedBoxId
             ? "Select a fresh visible box before picking."
-          : `Step ${workflow.step + 1} of 3: unlock one physical command, then press ${button.textContent}.`;
+          : postureStep && !state.status?.locomanipulation_posture?.ready
+            ? (state.status?.locomanipulation_posture?.detail || "Waiting for posture service.")
+          : `Step ${workflow.step + 1} of ${guidedSteps.length}: unlock one physical command, then press ${button.textContent}.`;
     } else {
-      button.textContent = `Dock → ${label} → Undock`;
+      button.textContent = `Dock → Set Height → ${label} → Default Height → Undock`;
       button.disabled = !navigationReady || active || state.guidedSubmitting || !["EMPTY", "HOLDING"].includes(manipulationState) ||
         byId("plan-only").checked;
       message.textContent = byId("plan-only").checked
@@ -804,8 +813,8 @@
         throw new Error("Wait for the active operation to finish");
       }
       const expectedState = workflow.kind === "pick"
-        ? (workflow.step < 2 ? "EMPTY" : "HOLDING")
-        : (workflow.step < 2 ? "HOLDING" : "EMPTY");
+        ? (workflow.step <= guidedSteps.indexOf("manipulate") ? "EMPTY" : "HOLDING")
+        : (workflow.step <= guidedSteps.indexOf("manipulate") ? "HOLDING" : "EMPTY");
       if (state.status?.manipulation_state?.state !== expectedState) {
         throw new Error(`Expected manipulation state ${expectedState} before this step`);
       }
@@ -816,13 +825,21 @@
       if (step === "manipulate" && workflow.kind === "pick" && !state.selectedBoxId) {
         throw new Error("Select a fresh visible box before picking");
       }
+      const postureStep = ["set_height", "default_height"].includes(step);
+      if (postureStep && !state.status?.locomanipulation_posture?.ready) {
+        throw new Error(state.status?.locomanipulation_posture?.detail || "Posture service is unavailable");
+      }
+      const posture = step === "set_height" ? { ...postureTarget(), wait_for_settle: true }
+        : step === "default_height" ? { height: 0.64, waist_yaw: 0.0, wait_for_settle: true } : null;
       const description = step === "fine_align" ? "Dock by fine-aligning with the table"
         : step === "undock" ? "Undock using the configured profile"
+          : postureStep ? `${guidedStepLabel(step, workflow.label)}: height ${posture.height.toFixed(3)} m and waist yaw ${posture.waist_yaw.toFixed(4)} rad; wait for the direct feedback window`
           : `${workflow.label} the selected box`;
-      if (!window.confirm(`${description}? Step ${workflow.step + 1} of 3.`)) return;
-      const confirmNav2Idle = step === "manipulate" ? false : confirmNav2IdleWithoutStatus();
-      if (step !== "manipulate" && !state.status?.navigation?.goal_status?.available && !confirmNav2Idle) return;
-      const payload = step === "fine_align"
+      if (!window.confirm(`${description}? Step ${workflow.step + 1} of ${guidedSteps.length}.`)) return;
+      const dockingStep = ["fine_align", "undock"].includes(step);
+      const confirmNav2Idle = dockingStep ? confirmNav2IdleWithoutStatus() : false;
+      if (dockingStep && !state.status?.navigation?.goal_status?.available && !confirmNav2Idle) return;
+      const payload = postureStep ? { ...posture, confirmed: true } : step === "fine_align"
         ? { kind: "fine_align", execute: true, confirmed: true, confirm_nav2_idle: confirmNav2Idle }
         : step === "undock"
           ? { kind: "undock", confirmed: true, confirm_nav2_idle: confirmNav2Idle }
@@ -831,7 +848,9 @@
               ...(workflow.kind === "place" && manualPlacePoseEnabled() ? { place_pose: placePose() } : {}) };
       state.guidedSubmitting = true;
       renderGuidedWorkflow();
-      const response = await api("/api/actions", { method: "POST", body: JSON.stringify(payload) });
+      const response = await api(postureStep ? "/api/posture" : "/api/actions", {
+        method: "POST", body: JSON.stringify(payload),
+      });
       workflow.operationId = response.operation.id;
       state.guidedWorkflow = workflow;
       setError("");

@@ -205,15 +205,24 @@ reported manipulation state is `HOLDING`; both use the same plan-only toggle,
 execution unlock, and physical-motion confirmation as pick/place. Carry B is a
 calibrated payload pose, not a base-navigation command.
 
-The **Dock → Pick → Undock** control becomes **Dock → Place → Undock** while
+The **Dock → Set Height → Pick → Default Height → Undock** control uses **Place** while
 the manipulation state is `HOLDING`. First submit a navigation goal from the
 panel and wait for it to succeed. Turn off **Plan only**, select a fresh box for
-pickup, then use the guided control for each of its three stages. Dock uses
+pickup, then use the guided control for each of its five stages. Dock uses
 physical `/fine_align`; the middle stage uses `/pick_box` or `/place_box` (with
 the same optional manual place target as the separate Place control); Undock
-uses `/undock`. Each stage needs a fresh one-shot execution unlock and its own
+uses `/undock`. **Set Height** uses the operator's current **Height** and
+**Waist yaw** fields, which should be set for the object being handled; object
+profiles do not automatically choose a posture. **Default Height** restores the
+policy default (`height=0.64 m`, `waist_yaw=0.0 rad`) after manipulation and before
+undocking. Both posture stages call `/set_locomanipulation_posture` with
+`wait_for_settle=true` and wait for a successful service result. This confirms
+the direct feedback window, not that the one-way ZMQ policy has reached the
+target. The guided stages leave the operator's input fields unchanged.
+Each stage needs a fresh one-shot execution unlock and its own
 confirmation. The next stage is enabled only after the preceding ROS action
-succeeds. A failed or canceled stage stops the sequence. After pickup, navigate
+succeeds. A failed or canceled stage stops the sequence, including a failed
+height reset, which prevents guided undocking. After pickup, navigate
 to the drop-off goal and wait for success before starting the place sequence.
 The guided sequence is held in the browser tab; reloading the page clears its
 progress, while the ROS operations remain visible in the operation history.
