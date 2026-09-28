@@ -208,7 +208,9 @@ calibrated payload pose, not a base-navigation command.
 The **Dock → Set Height → Pick → Default Height → Undock** control uses **Place** while
 the manipulation state is `HOLDING`. First submit a navigation goal from the
 panel and wait for it to succeed. Turn off **Plan only**, select a fresh box for
-pickup, then use the guided control for each of its five stages. Dock uses
+pickup, then press the combo control and confirm the complete physical sequence.
+All five stages run automatically, advancing only after the preceding command
+succeeds. Dock uses
 physical `/fine_align`; the middle stage uses `/pick_box` or `/place_box` (with
 the same optional manual place target as the separate Place control); Undock
 uses `/undock`. **Set Height** uses the operator's current **Height** and
@@ -219,13 +221,21 @@ undocking. Both posture stages call `/set_locomanipulation_posture` with
 `wait_for_settle=true` and wait for a successful service result. This confirms
 the direct feedback window, not that the one-way ZMQ policy has reached the
 target. The guided stages leave the operator's input fields unchanged.
-Each stage needs a fresh one-shot execution unlock and its own
-confirmation. The next stage is enabled only after the preceding ROS action
-succeeds. A failed or canceled stage stops the sequence, including a failed
-height reset, which prevents guided undocking. After pickup, navigate
+The initial confirmation authorizes all five steps. The panel requests a fresh
+one-shot execution unlock immediately before each step; no additional button
+presses, unlocks, or confirmations are needed. Box selection, posture target,
+and optional manual place pose are captured at startup. Later field edits do
+not change the running sequence. A failed or canceled stage stops the sequence,
+including a failed height reset, which prevents guided undocking. After pickup, navigate
 to the drop-off goal and wait for success before starting the place sequence.
-The guided sequence is held in the browser tab; reloading the page clears its
-progress, while the ROS operations remain visible in the operation history.
+**Stop sequence** prevents further steps and requests cancellation of the active
+action. A posture service already in progress cannot be canceled; it finishes
+without starting the following step. A paused Pick/Place action holds the
+sequence; **Continue task** resumes that action, and success resumes the
+remaining steps automatically. The guided sequence is held in the browser tab;
+keep it open while running. Reloading or signing out prevents further automatic
+steps, while an already submitted ROS command remains visible in operation
+history and may still complete.
 
 The **Locomanipulation posture** control sends `height` and `waist_yaw` to
 `/set_locomanipulation_posture`. It is available in confirmed `EMPTY` and

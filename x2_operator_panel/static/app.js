@@ -64,6 +64,7 @@
     return merged;
   }
   function returnToLogin(message) {
+    if (state.guidedWorkflow) state.guidedWorkflow.cancelRequested = true;
     state.authenticated = false;
     stopCameraStreams();
     if (state.socket) {
@@ -732,32 +733,66 @@
     return (state.status?.operations || []).find((operation) => operation.kind === "navigate");
   }
 
+  function failGuidedWorkflow(workflow, message) {
+    workflow.failed = true;
+    workflow.message = message;
+  }
+
   function updateGuidedWorkflow() {
     const workflow = state.guidedWorkflow;
-    if (!workflow?.operationId) return;
-    const operation = state.status?.operations?.find((item) => item.id === workflow.operationId);
-    if (!operation) {
-      if (workflow.operationSeen) {
-        workflow.operationId = null;
-        workflow.failed = true;
-        workflow.message = `${workflow.label} stopped: operation history was lost. Verify the robot state before starting again.`;
+    if (!workflow || workflow.failed || workflow.completed) return;
+    if (workflow.operationId) {
+      const operation = state.status?.operations?.find((item) => item.id === workflow.operationId);
+      if (!operation) {
+        if (workflow.operationSeen) {
+          workflow.operationId = null;
+          failGuidedWorkflow(workflow, `${workflow.label} stopped: operation history was lost. Verify the robot state before starting again.`);
+        }
+        return;
       }
-      return;
+      workflow.operationSeen = true;
+      if (activeStatuses.includes(operation.status)) return;
+      workflow.operationId = null;
+      if (operation.status !== "SUCCEEDED" || operation.result?.success === false) {
+        failGuidedWorkflow(workflow, `${workflow.label} stopped at ${guidedStepLabel(guidedSteps[workflow.step], workflow.label)}: ${operation.result?.message || operation.detail || operation.status}`);
+        return;
+      }
+      workflow.step += 1;
+      if (workflow.step === guidedSteps.length) {
+        state.lastGuidedNavigationId = workflow.navigationId;
+        workflow.message = `${workflow.label} completed. Navigate to the next destination before starting another sequence.`;
+        workflow.completed = true;
+      }
     }
-    workflow.operationSeen = true;
-    if (activeStatuses.includes(operation.status)) return;
-    workflow.operationId = null;
-    if (operation.status !== "SUCCEEDED" || operation.result?.success === false) {
-      workflow.message = `${workflow.label} stopped at ${guidedStepLabel(guidedSteps[workflow.step], workflow.label)}: ${operation.result?.message || operation.detail || operation.status}`;
-      workflow.failed = true;
-      return;
+    scheduleGuidedStep();
+  }
+
+  function scheduleGuidedStep() {
+    const workflow = state.guidedWorkflow;
+    if (!workflow || workflow.failed || workflow.completed || workflow.cancelRequested ||
+        workflow.operationId || state.guidedSubmitting || workflow.scheduled) return;
+    workflow.scheduled = true;
+    Promise.resolve().then(() => {
+      workflow.scheduled = false;
+      if (state.guidedWorkflow === workflow) return runGuidedStep();
+    });
+  }
+
+  function guidedWaitReason(workflow) {
+    const step = guidedSteps[workflow.step];
+    if ((state.status?.operations || []).some((operation) => activeStatuses.includes(operation.status))) {
+      return "Waiting for the active operation to finish.";
     }
-    workflow.step += 1;
-    if (workflow.step === guidedSteps.length) {
-      state.lastGuidedNavigationId = workflow.navigationId;
-      workflow.message = `${workflow.label} completed. Navigate to the next destination before starting another sequence.`;
-      workflow.completed = true;
+    const expectedState = workflow.kind === "pick"
+      ? (workflow.step <= guidedSteps.indexOf("manipulate") ? "EMPTY" : "HOLDING")
+      : (workflow.step <= guidedSteps.indexOf("manipulate") ? "HOLDING" : "EMPTY");
+    if (state.status?.manipulation_state?.state !== expectedState) {
+      return `Waiting for manipulation state ${expectedState}.`;
     }
+    if (["set_height", "default_height"].includes(step) && !state.status?.locomanipulation_posture?.ready) {
+      return state.status?.locomanipulation_posture?.detail || "Waiting for posture service.";
+    }
+    return "";
   }
 
   function renderGuidedWorkflow() {
@@ -765,117 +800,120 @@
     const message = byId("guided-workflow-status");
     const workflow = state.guidedWorkflow;
     const manipulationState = state.status?.manipulation_state?.state;
-    const kind = manipulationState === "HOLDING" ? "place" : "pick";
-    const label = kind === "pick" ? "Pick" : "Place";
+    const label = manipulationState === "HOLDING" ? "Place" : "Pick";
     const navigation = latestNavigation();
-    const navigationReady = navigation?.status === "SUCCEEDED" &&
-      navigation.id !== state.lastGuidedNavigationId;
+    const navigationReady = navigation?.status === "SUCCEEDED" && navigation.id !== state.lastGuidedNavigationId;
     const active = (state.status?.operations || []).some((operation) => activeStatuses.includes(operation.status));
-    if (workflow?.failed || workflow?.completed) {
-      button.textContent = `${workflow.label}: start again`;
-      button.disabled = active || state.guidedSubmitting;
-      message.textContent = workflow.message;
-    } else if (workflow) {
-      const step = guidedSteps[workflow.step];
-      button.textContent = guidedStepLabel(step, workflow.label);
-      const postureStep = ["set_height", "default_height"].includes(step);
-      button.disabled = Boolean(workflow.operationId) || active || state.guidedSubmitting || byId("plan-only").checked ||
-        (postureStep && !state.status?.locomanipulation_posture?.ready) ||
-        (step === "manipulate" && workflow.kind === "pick" && !state.selectedBoxId);
-      message.textContent = workflow.operationId
-        ? `Waiting for ${button.textContent} to finish.`
-        : byId("plan-only").checked ? "Turn off Plan only to continue the physical sequence."
-          : step === "manipulate" && workflow.kind === "pick" && !state.selectedBoxId
-            ? "Select a fresh visible box before picking."
-          : postureStep && !state.status?.locomanipulation_posture?.ready
-            ? (state.status?.locomanipulation_posture?.detail || "Waiting for posture service.")
-          : `Step ${workflow.step + 1} of ${guidedSteps.length}: unlock one physical command, then press ${button.textContent}.`;
+    const running = workflow && !workflow.failed && !workflow.completed;
+    byId("stop-guided-workflow").disabled = !running || workflow.cancelRequested;
+    if (running) {
+      const stepLabel = guidedStepLabel(guidedSteps[workflow.step], workflow.label);
+      button.textContent = `Running ${workflow.label}: ${stepLabel}`;
+      button.disabled = true;
+      message.textContent = workflow.cancelRequested ? "Stopping sequence; no further steps will start."
+        : workflow.operationId ? `Waiting for ${stepLabel} to finish.`
+          : guidedWaitReason(workflow) || `Starting ${stepLabel} automatically (${workflow.step + 1}/${guidedSteps.length}).`;
     } else {
       button.textContent = `Dock → Set Height → ${label} → Default Height → Undock`;
-      button.disabled = !navigationReady || active || state.guidedSubmitting || !["EMPTY", "HOLDING"].includes(manipulationState) ||
-        byId("plan-only").checked;
-      message.textContent = byId("plan-only").checked
+      button.disabled = !navigationReady || active || state.guidedSubmitting || !["EMPTY", "HOLDING"].includes(manipulationState) || byId("plan-only").checked;
+      message.textContent = workflow?.message || (byId("plan-only").checked
         ? "Turn off Plan only to run the physical sequence."
         : !navigationReady ? "Navigate to a destination and wait for success first."
-          : `Ready for ${label.toLowerCase()}. Each step needs its own unlock and confirmation.`;
+          : `Ready for ${label.toLowerCase()}. One confirmation runs all five steps automatically.`);
     }
   }
 
   async function advanceGuidedWorkflow() {
-    if (state.guidedSubmitting) return;
+    if (state.guidedSubmitting || (state.guidedWorkflow && !state.guidedWorkflow.failed && !state.guidedWorkflow.completed)) return;
     try {
-      let workflow = state.guidedWorkflow;
-      if (workflow?.operationId) return;
-      if (workflow?.failed || workflow?.completed) {
-        state.guidedWorkflow = null;
-        renderGuidedWorkflow();
-        return;
-      }
-      if (!workflow) {
-        const navigation = latestNavigation();
-        if (navigation?.status !== "SUCCEEDED" || navigation.id === state.lastGuidedNavigationId) {
-          throw new Error("Navigate to the destination and wait for success first");
-        }
-        const kind = state.status?.manipulation_state?.state === "HOLDING" ? "place" : "pick";
-        workflow = { kind, label: kind === "pick" ? "Pick" : "Place", step: 0,
-          navigationId: navigation.id, operationId: null };
+      const navigation = latestNavigation();
+      if (navigation?.status !== "SUCCEEDED" || navigation.id === state.lastGuidedNavigationId) {
+        throw new Error("Navigate to the destination and wait for success first");
       }
       if (byId("plan-only").checked) throw new Error("Turn off Plan only for this physical sequence");
       if ((state.status?.operations || []).some((operation) => activeStatuses.includes(operation.status))) {
         throw new Error("Wait for the active operation to finish");
       }
-      const expectedState = workflow.kind === "pick"
-        ? (workflow.step <= guidedSteps.indexOf("manipulate") ? "EMPTY" : "HOLDING")
-        : (workflow.step <= guidedSteps.indexOf("manipulate") ? "HOLDING" : "EMPTY");
-      if (state.status?.manipulation_state?.state !== expectedState) {
-        throw new Error(`Expected manipulation state ${expectedState} before this step`);
-      }
-      if ((state.status?.execution_unlock_remaining_sec || 0) <= 0) {
-        throw new Error("Temporarily unlock one physical motion command first");
-      }
-      const step = guidedSteps[workflow.step];
-      if (step === "manipulate" && workflow.kind === "pick" && !state.selectedBoxId) {
-        throw new Error("Select a fresh visible box before picking");
-      }
-      const postureStep = ["set_height", "default_height"].includes(step);
-      if (postureStep && !state.status?.locomanipulation_posture?.ready) {
-        throw new Error(state.status?.locomanipulation_posture?.detail || "Posture service is unavailable");
-      }
-      const posture = step === "set_height" ? { ...postureTarget(), wait_for_settle: true }
-        : step === "default_height" ? { height: 0.64, waist_yaw: 0.0, wait_for_settle: true } : null;
-      const description = step === "fine_align" ? "Dock by fine-aligning with the table"
-        : step === "undock" ? "Undock using the configured profile"
-          : postureStep ? `${guidedStepLabel(step, workflow.label)}: height ${posture.height.toFixed(3)} m and waist yaw ${posture.waist_yaw.toFixed(4)} rad; wait for the direct feedback window`
-          : `${workflow.label} the selected box`;
-      if (!window.confirm(`${description}? Step ${workflow.step + 1} of ${guidedSteps.length}.`)) return;
-      const dockingStep = ["fine_align", "undock"].includes(step);
-      const confirmNav2Idle = dockingStep ? confirmNav2IdleWithoutStatus() : false;
-      if (dockingStep && !state.status?.navigation?.goal_status?.available && !confirmNav2Idle) return;
-      const payload = postureStep ? { ...posture, confirmed: true } : step === "fine_align"
-        ? { kind: "fine_align", execute: true, confirmed: true, confirm_nav2_idle: confirmNav2Idle }
-        : step === "undock"
-          ? { kind: "undock", confirmed: true, confirm_nav2_idle: confirmNav2Idle }
-          : { kind: workflow.kind, plan_only: false, confirmed: true,
-              ...(workflow.kind === "pick" ? { instance_id: state.selectedBoxId } : {}),
-              ...(workflow.kind === "place" && manualPlacePoseEnabled() ? { place_pose: placePose() } : {}) };
-      state.guidedSubmitting = true;
+      const manipulationState = state.status?.manipulation_state?.state;
+      if (!["EMPTY", "HOLDING"].includes(manipulationState)) throw new Error("Verify the manipulation state before starting");
+      const kind = manipulationState === "HOLDING" ? "place" : "pick";
+      if (kind === "pick" && !state.selectedBoxId) throw new Error("Select a fresh visible box before picking");
+      const posture = { ...postureTarget(), wait_for_settle: true };
+      const placeTarget = kind === "place" && manualPlacePoseEnabled() ? placePose() : null;
+      const label = kind === "pick" ? "Pick" : "Place";
+      const missingNavStatus = !state.status?.navigation?.goal_status?.available;
+      if (!window.confirm(`Run the complete physical sequence: Dock → Set Height (${posture.height.toFixed(3)} m, waist yaw ${posture.waist_yaw.toFixed(4)} rad) → ${label} → Default Height → Undock? All five steps will run automatically.${missingNavStatus ? " Nav2 status is unavailable: confirm Nav2 is idle before starting." : ""}`)) return;
+      state.guidedWorkflow = { kind, label, posture, placeTarget, instanceId: state.selectedBoxId,
+        step: 0, navigationId: navigation.id, operationId: null, confirmNav2Idle: missingNavStatus };
+      setError("");
+      await runGuidedStep();
+    } catch (error) { setError(error.message); }
+    finally { renderGuidedWorkflow(); }
+  }
+
+  async function runGuidedStep() {
+    const workflow = state.guidedWorkflow;
+    if (!workflow || workflow.failed || workflow.completed || workflow.cancelRequested || workflow.operationId || state.guidedSubmitting) return;
+    if (state.authenticated === false) return;
+    if (latestNavigation()?.id !== workflow.navigationId) {
+      failGuidedWorkflow(workflow, "Sequence stopped because the navigation destination changed.");
       renderGuidedWorkflow();
+      return;
+    }
+    if (guidedWaitReason(workflow)) return;
+    const step = guidedSteps[workflow.step];
+    const postureStep = ["set_height", "default_height"].includes(step);
+    const posture = step === "set_height" ? workflow.posture : { height: 0.64, waist_yaw: 0.0, wait_for_settle: true };
+    const payload = postureStep ? { ...posture, confirmed: true }
+      : step === "fine_align" ? { kind: "fine_align", execute: true, confirmed: true, confirm_nav2_idle: workflow.confirmNav2Idle }
+      : step === "undock" ? { kind: "undock", confirmed: true, confirm_nav2_idle: workflow.confirmNav2Idle }
+      : { kind: workflow.kind, plan_only: false, confirmed: true,
+          ...(workflow.kind === "pick" ? { instance_id: workflow.instanceId } : {}),
+          ...(workflow.placeTarget ? { place_pose: workflow.placeTarget } : {}) };
+    state.guidedSubmitting = true;
+    renderGuidedWorkflow();
+    try {
+      // The initial confirmation authorizes this sequence. Renew the existing
+      // one-shot unlock immediately before each command, so long actions do not
+      // require manual unlocks or leave a long-lived physical-motion unlock.
+      await api("/api/unlock/execution", { method: "POST", body: JSON.stringify({ confirmed: true }) });
+      if (workflow.cancelRequested || state.guidedWorkflow !== workflow || state.authenticated === false) return;
+      if (latestNavigation()?.id !== workflow.navigationId) throw new Error("Navigation destination changed");
+      if (guidedWaitReason(workflow)) return;
       const response = await api(postureStep ? "/api/posture" : "/api/actions", {
         method: "POST", body: JSON.stringify(payload),
       });
       workflow.operationId = response.operation.id;
       workflow.operationSeen = false;
-      state.guidedWorkflow = workflow;
-      // WebSocket completion may arrive before this HTTP response. Reconcile
-      // against the current snapshot now; another status update is not guaranteed.
-      updateGuidedWorkflow();
-      setError("");
-      renderGuidedWorkflow();
-    } catch (error) { setError(error.message); }
-    finally {
+      if (workflow.cancelRequested) {
+        await api("/api/cancel", { method: "POST", body: "{}" });
+      } else {
+        // A status push may complete the command before its HTTP response.
+        updateGuidedWorkflow();
+      }
+    } catch (error) {
+      failGuidedWorkflow(workflow, `${workflow.label} stopped at ${guidedStepLabel(step, workflow.label)}: ${error.message}`);
+      setError(error.message);
+    } finally {
       state.guidedSubmitting = false;
+      if (workflow.cancelRequested) failGuidedWorkflow(workflow, `${workflow.label} sequence stopped. Verify the active command outcome before restarting.`);
       renderGuidedWorkflow();
+      scheduleGuidedStep();
     }
+  }
+
+  async function stopGuidedWorkflow() {
+    const workflow = state.guidedWorkflow;
+    if (!workflow || workflow.failed || workflow.completed || workflow.cancelRequested) return;
+    workflow.cancelRequested = true;
+    renderGuidedWorkflow();
+    try {
+      if (workflow.operationId) await api("/api/cancel", { method: "POST", body: "{}" });
+      if (!state.guidedSubmitting) failGuidedWorkflow(workflow, `${workflow.label} sequence stopped. Verify the active command outcome before restarting.`);
+    } catch (error) {
+      failGuidedWorkflow(workflow, `Sequence stopped; cancellation failed: ${error.message}`);
+      setError(error.message);
+    } finally { renderGuidedWorkflow(); }
   }
   async function navigate(preset) {
     if (!window.confirm(`Navigate to ${preset.label}?`)) return;
@@ -954,6 +992,11 @@
   async function cancelManipulation() {
     const task = state.status?.manipulation_task;
     if (!task?.task_id || !["running", "retrying", "paused"].includes(task.status)) return;
+    const workflow = state.guidedWorkflow;
+    if (workflow && !workflow.failed && !workflow.completed && guidedSteps[workflow.step] === "manipulate") {
+      await stopGuidedWorkflow();
+      return;
+    }
     const taskId = task.task_id;
     const isCurrent = () => state.status?.manipulation_task?.task_id === taskId &&
       ["running", "retrying", "paused"].includes(state.status?.manipulation_task?.status);
@@ -1051,10 +1094,19 @@
   }
   async function cancelActive() {
     if (!window.confirm("Request cancellation for all active panel goals?")) return;
+    if (state.guidedWorkflow && !state.guidedWorkflow.failed && !state.guidedWorkflow.completed) {
+      await stopGuidedWorkflow();
+      return;
+    }
     try { await api("/api/cancel", { method: "POST", body: "{}" }); setError(""); } catch (error) { setError(error.message); }
   }
   async function cancelDockingMotion() {
     if (!window.confirm("Cancel the active docking motion?")) return;
+    const workflow = state.guidedWorkflow;
+    if (workflow && !workflow.failed && !workflow.completed && ["fine_align", "undock"].includes(guidedSteps[workflow.step])) {
+      await stopGuidedWorkflow();
+      return;
+    }
     try {
       await api("/api/docking/cancel", { method: "POST", body: "{}" });
       setError("");
@@ -1080,6 +1132,7 @@
   syncManualPlacePoseFields();
   byId("place-form").addEventListener("submit", (event) => { event.preventDefault(); submitManipulation("place"); });
   byId("dock-manipulate-undock").addEventListener("click", advanceGuidedWorkflow);
+  byId("stop-guided-workflow").addEventListener("click", stopGuidedWorkflow);
   byId("plan-only").addEventListener("change", renderGuidedWorkflow);
   byId("move-carry-a").addEventListener("click", () => submitManipulation("move_carry_pose", { target_pose: 0 }));
   byId("move-carry-b").addEventListener("click", () => submitManipulation("move_carry_pose", { target_pose: 1 }));
