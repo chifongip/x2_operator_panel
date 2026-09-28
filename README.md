@@ -206,8 +206,11 @@ execution unlock, and physical-motion confirmation as pick/place. Carry B is a
 calibrated payload pose, not a base-navigation command.
 
 The **Dock → Set Height → Pick → Default Height → Undock** control uses **Place** while
-the manipulation state is `HOLDING`. First submit a navigation goal from the
-panel and wait for it to succeed. Turn off **Plan only**, select a fresh box for
+the manipulation state is `HOLDING`. It runs independently from navigation;
+no previous successful navigation goal is required, and a completed sequence
+can be followed by another sequence from the current location. Active motion,
+including active Nav2 navigation, must finish before starting. Turn off
+**Plan only**, select a fresh box for
 pickup, then press the combo control and confirm the complete physical sequence.
 All five stages run automatically, advancing only after the preceding command
 succeeds. Dock uses
@@ -226,8 +229,8 @@ one-shot execution unlock immediately before each step; no additional button
 presses, unlocks, or confirmations are needed. Box selection, posture target,
 and optional manual place pose are captured at startup. Later field edits do
 not change the running sequence. A failed or canceled stage stops the sequence,
-including a failed height reset, which prevents guided undocking. After pickup, navigate
-to the drop-off goal and wait for success before starting the place sequence.
+including a failed height reset, which prevents guided undocking. Use navigation
+separately when moving between pickup and drop-off locations.
 **Stop sequence** prevents further steps and requests cancellation of the active
 action. A posture service already in progress cannot be canceled; it finishes
 without starting the following step. A paused Pick/Place action holds the

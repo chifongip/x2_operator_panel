@@ -11,7 +11,7 @@ function fixture(kind, fast = false, completionStatus = "SUCCEEDED") {
   const calls = [], fields = {}, confirmations = [];
   const state = {
     authenticated: true, guidedWorkflow: null, guidedSubmitting: false,
-    lastGuidedNavigationId: null, selectedBoxId: "box-1",
+    selectedBoxId: "box-1",
     status: {
       operations: [{ id: "navigation-1", kind: "navigate", status: "SUCCEEDED" }],
       manipulation_state: { state: kind === "pick" ? "EMPTY" : "HOLDING" },
@@ -80,9 +80,9 @@ async function fullSequence(kind, fast = false) {
   assert.deepEqual(f.commands()[3].payload,
     { height: 0.64, waist_yaw: 0.0, wait_for_settle: true, confirmed: true });
   assert.equal(f.state.guidedWorkflow.completed, true);
-  assert.equal(f.state.lastGuidedNavigationId, "navigation-1");
-  await f.context.advanceGuidedWorkflow();
-  assert.equal(f.commands().length, 5, "A new navigation goal is needed for another sequence");
+  f.context.renderGuidedWorkflow();
+  assert.equal(f.fields["dock-manipulate-undock"].disabled, false,
+    "Completion must allow a new sequence without another navigation goal");
 }
 
 (async () => {
@@ -90,6 +90,26 @@ async function fullSequence(kind, fast = false) {
     await fullSequence(kind);
     await fullSequence(kind, true);
   }
+  for (const kind of ["pick", "place"]) {
+    for (const navigationStatus of [null, "FAILED", "CANCELED"]) {
+      const standalone = fixture(kind, true);
+      standalone.state.status.operations = navigationStatus
+        ? [{ id: "old-navigation", kind: "navigate", status: navigationStatus }] : [];
+      standalone.context.renderGuidedWorkflow();
+      assert.equal(standalone.fields["dock-manipulate-undock"].disabled, false);
+      await standalone.context.advanceGuidedWorkflow();
+      await flush();
+      assert.equal(standalone.commands().length, 5, "Navigation history must not gate the sequence");
+      assert.equal(standalone.state.guidedWorkflow.completed, true);
+    }
+  }
+  const repeat = fixture("pick");
+  repeat.state.status.operations = [];
+  await repeat.context.advanceGuidedWorkflow();
+  for (let step = 0; step < 5; step++) await repeat.finish();
+  await repeat.context.advanceGuidedWorkflow();
+  assert.equal(repeat.commands().length, 6, "A new sequence can start at the same location");
+  assert.equal(repeat.state.guidedWorkflow.kind, "place");
   for (const status of ["ABORTED", "CANCELED", "FAILED", "OUTCOME_UNKNOWN"]) {
     const failure = fixture("pick", true, status);
     await failure.context.advanceGuidedWorkflow();
@@ -186,6 +206,14 @@ async function fullSequence(kind, fast = false) {
   newest.state.status.operations.unshift({ id: "navigation-2", kind: "navigate", status: "ACTIVE" });
   await newest.context.advanceGuidedWorkflow();
   assert.equal(newest.calls.length, 0);
+
+  const externalNavigation = fixture("pick");
+  externalNavigation.state.status.operations = [];
+  externalNavigation.state.status.navigation.goal_status.active = true;
+  externalNavigation.context.renderGuidedWorkflow();
+  assert.equal(externalNavigation.fields["dock-manipulate-undock"].disabled, true);
+  await externalNavigation.context.advanceGuidedWorkflow();
+  assert.equal(externalNavigation.calls.length, 0, "Active external navigation still blocks overlapping motion");
 
   const declined = fixture("pick");
   declined.context.window.confirm = () => false;
