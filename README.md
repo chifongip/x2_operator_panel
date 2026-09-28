@@ -406,3 +406,34 @@ source install/setup.bash
 colcon test --packages-select x2_operator_panel --event-handlers console_direct+
 colcon test-result --verbose
 ```
+
+### Retrying and continuing manipulation tasks
+
+The **Current task** section displays the server's phase, retry count, last
+completed phase, object disposition, and detailed planning warning. Recoverable
+failures retry automatically while the original action remains active. If the
+server pauses after exhausting retries, **Continue task** requests replanning of
+the unfinished phase. **Cancel task** uses ROS action cancellation for the exact
+task UUID, including tasks started outside this panel.
+
+Continue preserves the original goal and completed attachment/release phases.
+It does not consume a new execution unlock or submit another manipulation goal.
+The button is enabled only for a resumable pause with the Continue service
+available, and is disabled while its request is pending. A service-response
+timeout displays a warning without aborting the retained action. New action
+submissions remain blocked while the manipulation task is running, retrying, or
+paused.
+
+ROS interfaces:
+
+- `/manipulation_task_status`: `agibot_x2_manipulation_msgs/msg/ManipulationTaskStatus`
+- `/continue_manipulation`: `agibot_x2_manipulation_msgs/srv/ContinueManipulation`
+
+Authenticated HTTP endpoints:
+
+- `POST /api/manipulation/continue`: `{"task_id": "<action UUID hex>", "pause_id": 1}`
+- `POST /api/manipulation/cancel`: `{"task_id": "<action UUID hex>"}`
+
+After a manipulation-server restart, Continue is unavailable; verify the
+physical object state using the existing recovery controls. Restart the panel
+and manipulation server after rebuilding the new ROS interfaces.

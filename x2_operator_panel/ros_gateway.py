@@ -27,13 +27,16 @@ from agibot_x2_manipulation_msgs.msg import (
     BoxStateArray,
     LocomanipulationPostureStatus,
     ManipulationState,
+    ManipulationTaskStatus,
 )
 from agibot_x2_manipulation_msgs.srv import (
     ClearLocomanipulationPostureTarget,
+    ContinueManipulation,
     RecoverManipulationState,
     ReloadBoxProfiles,
     SetLocomanipulationPosture,
 )
+from action_msgs.srv import CancelGoal
 from ament_index_python.packages import get_package_share_directory
 from diagnostic_msgs.msg import DiagnosticArray
 from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped
@@ -500,6 +503,11 @@ class OperatorPanelNode(Node):
         self._camera_frame_versions: dict[str, int] = {}
         self._camera_last_encoded_monotonic: dict[str, float] = {}
         self._manipulation_state = {"state": "UNKNOWN", "detail": "No state received"}
+        self._manipulation_task = {"status": "idle", "can_continue": False}
+        self._continue_pending = False
+        self._continue_request_id = None
+        self._continue_deadline = None
+        self._continue_error = ""
         self._posture_status: dict[str, Any] = {
             "available": False,
             "execution_enabled": False,
@@ -609,6 +617,14 @@ class OperatorPanelNode(Node):
                 "/local_costmap/clear_entirely_local_costmap",
             ),
         }
+        self._continue_client = self.create_client(ContinueManipulation, "/continue_manipulation")
+        self._task_cancel_clients = {
+            kind: self.create_client(CancelGoal, f"/{name}/_action/cancel_goal")
+            for kind, name in {
+                "pick": "pick_box", "place": "place_box", "pick_place": "pick_place",
+                "move_carry_pose": "move_carry_pose", "reset": "reset_manipulation",
+            }.items()
+        }
         self._recovery_client = self.create_client(
             RecoverManipulationState, "/recover_manipulation_state"
         )
@@ -631,6 +647,9 @@ class OperatorPanelNode(Node):
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
         )
         telemetry_qos = _display_telemetry_qos()
+        self.create_subscription(
+            ManipulationTaskStatus, "/manipulation_task_status", self._on_manipulation_task, state_qos
+        )
         self.create_subscription(
             ManipulationState, "/manipulation_state", self._on_manipulation_state, state_qos
         )
@@ -835,6 +854,13 @@ class OperatorPanelNode(Node):
                     "status": posture_status,
                 },
                 "manipulation_state": dict(self._manipulation_state),
+                "manipulation_task": {
+                    **getattr(self, "_manipulation_task", {"status": "idle"}),
+                    "continue_service_ready": (getattr(self, "_continue_client", None) is not None
+                                               and self._continue_client.service_is_ready()),
+                    "continue_pending": getattr(self, "_continue_pending", False),
+                    "continue_error": getattr(self, "_continue_error", ""),
+                },
                 "box_pose": dict(self._box_pose) if self._box_pose is not None else None,
                 "box_map_pose": self._box_pose_in_map_locked(),
                 "visible_boxes": {
@@ -891,6 +917,7 @@ class OperatorPanelNode(Node):
             try:
                 if self._shutting_down and command.name not in {
                     "cancel_active",
+                    "cancel_manipulation",
                     "cancel_fine_align",
                     "cancel_docking_motion",
                 }:
@@ -905,6 +932,10 @@ class OperatorPanelNode(Node):
                     result = self._cancel_docking_motion()
                 elif command.name == "cancel_docking_motion":
                     result = self._cancel_docking_motion()
+                elif command.name == "continue_manipulation":
+                    result = self._continue_manipulation(command.payload)
+                elif command.name == "cancel_manipulation":
+                    result = self._cancel_manipulation(command.payload)
                 elif command.name == "recover_state":
                     result = self._recover_state(command.payload)
                 elif command.name == "reload_box_profiles":
@@ -1068,6 +1099,8 @@ class OperatorPanelNode(Node):
         return {"initial_pose": self._initial_pose_status_locked()}
 
     def _submit(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if getattr(self, "_manipulation_task", {}).get("status") in {"running", "retrying", "paused"}:
+            raise PanelCommandError("Finish or cancel the active manipulation task first")
         if self._shutting_down:
             raise PanelCommandError("The operator panel is shutting down")
         kind = payload.get("kind")
@@ -1659,6 +1692,105 @@ class OperatorPanelNode(Node):
             elif operation is not None and operation.status == "ACTIVE":
                 operation.detail = detail
 
+    def _on_manipulation_task(self, message: ManipulationTaskStatus) -> None:
+        task = {
+            name: getattr(message, name)
+            for name in (
+                "task_id", "action", "status", "phase", "last_completed_phase",
+                "object_disposition", "failure", "pause_id", "attempt", "maximum_attempts",
+                "can_continue",
+            )
+        }
+        with self._lock:
+            if task["task_id"] != self._manipulation_task.get("task_id"):
+                self._continue_pending = False
+                self._continue_request_id = None
+                self._continue_deadline = None
+                self._continue_error = ""
+            self._manipulation_task = task
+            # The ROS action stays ACTIVE while retrying or paused; cancellation and
+            # operation admission continue to use the existing action lifecycle.
+            for operation in self._operations.values():
+                if operation.goal_uuid == task["task_id"] and operation.status == "ACTIVE":
+                    operation.stage = f"{task['status']}/{task['phase']}"
+                    operation.detail = task["failure"] or f"Object: {task['object_disposition']}"
+                    operation.feedback["manipulation_task"] = dict(task)
+
+    def _continue_manipulation(self, payload: dict[str, Any]) -> dict[str, Any]:
+        with self._lock:
+            task = dict(self._manipulation_task)
+            if (not task.get("can_continue") or task.get("status") != "paused"
+                    or payload.get("task_id") != task.get("task_id")
+                    or payload.get("pause_id") != task.get("pause_id")):
+                raise PanelCommandError("The task is no longer paused at this checkpoint")
+            if self._continue_pending:
+                raise PanelCommandError("Continue is already pending")
+            if not self._continue_client.service_is_ready():
+                raise PanelCommandError("Continue service is unavailable")
+            self._continue_pending = True
+            request_id = (task["task_id"], task["pause_id"])
+            self._continue_request_id = request_id
+            self._continue_deadline = time.monotonic() + self.service_timeout_sec
+            self._continue_error = ""
+        request = ContinueManipulation.Request()
+        request.task_id = task["task_id"]
+        request.pause_id = task["pause_id"]
+        try:
+            future = self._continue_client.call_async(request)
+            future.add_done_callback(lambda completed: self._on_continue_result(request_id, completed))
+        except Exception as error:
+            with self._lock:
+                self._continue_pending = False
+                self._continue_deadline = None
+                self._continue_error = str(error)
+            raise PanelCommandError(f"Failed to request Continue: {error}") from error
+        self._audit("continue_manipulation", "submitted", task["task_id"])
+        return {"accepted": True, "task_id": task["task_id"]}
+
+    def _on_continue_result(self, request_id: tuple[str, int], completed: Any) -> None:
+        try:
+            response = completed.result()
+            error = "" if response.success else response.message
+        except Exception as exception:
+            error = str(exception)
+        with self._lock:
+            if self._continue_request_id != request_id:
+                return
+            self._continue_request_id = None
+            self._continue_pending = False
+            self._continue_deadline = None
+            self._continue_error = error
+        self._audit("continue_manipulation", "failed" if error else "accepted", error)
+
+    def _cancel_manipulation(self, payload: dict[str, Any]) -> dict[str, Any]:
+        with self._lock:
+            task = dict(self._manipulation_task)
+        if (task.get("status") not in {"running", "retrying", "paused"}
+                or payload.get("task_id") != task.get("task_id")):
+            raise PanelCommandError("No matching active manipulation task")
+        client = self._task_cancel_clients.get(task.get("action"))
+        if client is None or not client.service_is_ready():
+            raise PanelCommandError("Task cancellation service is unavailable")
+        request = CancelGoal.Request()
+        try:
+            request.goal_info.goal_id.uuid = list(bytes.fromhex(task["task_id"]))
+        except ValueError as error:
+            raise PanelCommandError("Invalid manipulation task ID") from error
+        future = client.call_async(request)
+        future.add_done_callback(self._on_task_cancel_result)
+        self._audit("cancel_manipulation", "submitted", task["task_id"])
+        return {"accepted": True, "task_id": task["task_id"]}
+
+    def _on_task_cancel_result(self, completed: Any) -> None:
+        try:
+            response = completed.result()
+            error = "" if response.goals_canceling else "Server did not accept task cancellation"
+        except Exception as exception:
+            error = str(exception)
+        with self._lock:
+            self._continue_error = error
+        self._audit("cancel_manipulation", "failed" if error else "accepted", error)
+
     def _recover_state(self, payload: dict[str, Any]) -> dict[str, Any]:
         if self._active_operations():
             raise PanelCommandError("Wait for the active operation to reach a terminal state")
@@ -1885,6 +2017,12 @@ class OperatorPanelNode(Node):
     def _expire_pending_operations(self) -> None:
         now = time.monotonic()
         with self._lock:
+            if (getattr(self, "_continue_deadline", None) is not None
+                    and now >= self._continue_deadline):
+                self._continue_deadline = None
+                self._continue_request_id = None
+                self._continue_pending = False
+                self._continue_error = "Continue response timed out; check the current task status"
             operations = list(self._operations.values())
         for operation in operations:
             if (

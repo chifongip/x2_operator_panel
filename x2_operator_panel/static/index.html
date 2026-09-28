@@ -194,6 +194,15 @@
             </fieldset>
             <button id="place-button" type="submit">Place box</button>
           </form>
+          <section class="manipulation-task" aria-live="polite">
+            <h3>Current task</h3>
+            <p id="manipulation-task-summary">No active task</p>
+            <p id="manipulation-task-warning" role="status"></p>
+            <div class="command-row">
+              <button id="continue-manipulation" type="button" disabled>Continue task</button>
+              <button id="cancel-manipulation" class="danger" type="button" disabled>Cancel task</button>
+            </div>
+          </section>
           <div class="command-row recovery-row">
             <button id="recover-empty" class="secondary" type="button">Confirm empty</button>
             <button id="recover-holding" class="secondary" type="button">Confirm holding</button>

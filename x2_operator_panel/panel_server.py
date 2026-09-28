@@ -686,6 +686,10 @@ def _make_request_handler(application: PanelApplication) -> type[BaseHTTPRequest
                     response = application.node.request("cancel_docking_motion", {})
                 elif path == "/api/docking/cancel":
                     response = application.node.request("cancel_docking_motion", {})
+                elif path == "/api/manipulation/continue":
+                    response = application.node.request("continue_manipulation", payload)
+                elif path == "/api/manipulation/cancel":
+                    response = application.node.request("cancel_manipulation", payload)
                 elif path == "/api/recover-state":
                     response = application.node.request("recover_state", payload)
                 elif path == "/api/box-profiles/reload":

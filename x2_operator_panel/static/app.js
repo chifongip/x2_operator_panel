@@ -414,6 +414,7 @@
     const boxPose = status.box_map_pose;
     byId("connection-status").textContent = "ROS gateway connected";
     byId("manipulation-state").textContent = status.manipulation_state.state;
+    renderManipulationTask(status.manipulation_task || {});
     byId("localization-state").textContent = pose.fresh ? "Map pose current" : (pose.detail || "Unavailable");
     byId("box-pose-state").textContent = boxPose?.available ? (boxPose.fresh ? "Map position current" : boxPose.detail) : (boxPose?.detail || "Unavailable");
     const visibleBoxes = status.visible_boxes;
@@ -900,6 +901,36 @@
       setError("");
     } catch (error) { setError(error.message); }
   }
+  function renderManipulationTask(task) {
+    const taskActive = ["running", "retrying", "paused"].includes(task.status);
+    byId("manipulation-task-summary").textContent = task.task_id
+      ? `${task.status}: ${task.phase || task.action}; attempt ${task.attempt || 0}/${task.maximum_attempts || 0}; object ${task.object_disposition || "unknown"}; completed ${task.last_completed_phase || "none"}`
+      : "No active task";
+    byId("manipulation-task-warning").textContent = task.continue_error || task.failure || "";
+    byId("continue-manipulation").disabled = !(task.status === "paused" && task.can_continue && task.continue_service_ready && !task.continue_pending);
+    byId("cancel-manipulation").disabled = !taskActive;
+  }
+  async function continueManipulation() {
+    const task = state.status?.manipulation_task;
+    if (!task?.can_continue || task.continue_pending) return;
+    byId("continue-manipulation").disabled = true;
+    try {
+      await api("/api/manipulation/continue", {
+        method: "POST", body: JSON.stringify({ task_id: task.task_id, pause_id: task.pause_id }),
+      });
+      setError("");
+    } catch (error) { setError(error.message); }
+  }
+  async function cancelManipulation() {
+    const task = state.status?.manipulation_task;
+    if (!task?.task_id) return;
+    try {
+      await api("/api/manipulation/cancel", {
+        method: "POST", body: JSON.stringify({ task_id: task.task_id }),
+      });
+      setError("");
+    } catch (error) { setError(error.message); }
+  }
   async function recoverState(requestedState) {
     if (!window.confirm(`Confirm manipulation state: ${requestedState}?`)) return;
     try { await api("/api/recover-state", { method: "POST", body: JSON.stringify({ requested_state: requestedState, confirmed: true }) }); setError(""); } catch (error) { setError(error.message); }
@@ -1020,6 +1051,8 @@
   byId("move-carry-a").addEventListener("click", () => submitManipulation("move_carry_pose", { target_pose: 0 }));
   byId("move-carry-b").addEventListener("click", () => submitManipulation("move_carry_pose", { target_pose: 1 }));
   byId("reset-manipulation").addEventListener("click", () => submitManipulation("reset", { confirm_empty: true }));
+  byId("continue-manipulation").addEventListener("click", continueManipulation);
+  byId("cancel-manipulation").addEventListener("click", cancelManipulation);
   byId("recover-empty").addEventListener("click", () => recoverState("empty"));
   byId("recover-holding").addEventListener("click", () => recoverState("holding"));
   byId("reload-box-profiles").addEventListener("click", reloadBoxProfiles);

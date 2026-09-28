@@ -1148,3 +1148,128 @@ class RosGatewayTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ContinueManipulationTest(unittest.TestCase):
+    def node(self, service_result=None):
+        node = object.__new__(OperatorPanelNode)
+        node._lock = threading.RLock()
+        node._operations = {}
+        node._audit_sink = None
+        node._manipulation_task = {
+            "task_id": bytes(range(16)).hex(), "pause_id": 2,
+            "status": "paused", "can_continue": True, "action": "pick",
+        }
+        node._continue_pending = False
+        node._continue_request_id = None
+        node._continue_deadline = None
+        node._continue_error = ""
+        node.service_timeout_sec = 5.0
+        node._continue_client = FakeServiceClient(
+            result=service_result or SimpleNamespace(success=True, message="accepted")
+        )
+        return node
+
+    def payload(self, node):
+        return {key: node._manipulation_task[key] for key in ("task_id", "pause_id")}
+
+    def test_continue_signals_retained_action_without_registering_another_operation(self):
+        node = self.node()
+        result = node._continue_manipulation(self.payload(node))
+        self.assertTrue(result["accepted"])
+        self.assertEqual(node._operations, {})
+        request = node._continue_client.calls[0]
+        self.assertEqual(request.task_id, node._manipulation_task["task_id"])
+        self.assertEqual(request.pause_id, 2)
+        self.assertFalse(node._continue_pending)
+
+    def test_stale_continue_does_not_call_service(self):
+        node = self.node()
+        for field, value in (("task_id", "other"), ("pause_id", 1)):
+            with self.subTest(field=field):
+                with self.assertRaisesRegex(PanelCommandError, "checkpoint"):
+                    node._continue_manipulation({**self.payload(node), field: value})
+        self.assertEqual(node._continue_client.calls, [])
+
+    def test_duplicate_continue_is_blocked_while_response_is_pending(self):
+        node = self.node()
+        response = Future()
+        node._continue_client.call_async = lambda request: response
+        node._continue_manipulation(self.payload(node))
+        with self.assertRaisesRegex(PanelCommandError, "already pending"):
+            node._continue_manipulation(self.payload(node))
+        response.set_result(SimpleNamespace(success=True, message="accepted"))
+        self.assertFalse(node._continue_pending)
+
+    def test_service_failure_is_visible_without_finishing_the_active_action(self):
+        node = self.node(SimpleNamespace(success=False, message="stale pause"))
+        operation = Operation("operation", "pick", time.time(), status="ACTIVE")
+        node._operations[operation.identifier] = operation
+        node._continue_manipulation(self.payload(node))
+        self.assertEqual(node._continue_error, "stale pause")
+        self.assertEqual(operation.status, "ACTIVE")
+
+    def test_pause_status_keeps_action_active_and_cancelable(self):
+        node = self.node()
+        operation = Operation("operation", "pick", time.time(), status="ACTIVE")
+        operation.goal_uuid = node._manipulation_task["task_id"]
+        node._operations[operation.identifier] = operation
+        message = SimpleNamespace(
+            **node._manipulation_task, phase="carry", last_completed_phase="attach",
+            object_disposition="attached", failure="no route", attempt=3, maximum_attempts=3,
+        )
+        node._on_manipulation_task(message)
+        self.assertEqual(operation.status, "ACTIVE")
+        self.assertEqual(operation.stage, "paused/carry")
+        self.assertTrue(operation.cancelable)
+        self.assertEqual(operation.detail, "no route")
+
+    def test_continue_timeout_does_not_abort_or_release_action(self):
+        node = self.node()
+        operation = Operation("operation", "pick", time.time(), status="ACTIVE")
+        node._operations[operation.identifier] = operation
+        node._continue_pending = True
+        node._continue_deadline = time.monotonic() - 1.0
+        node._expire_pending_operations()
+        self.assertFalse(node._continue_pending)
+        self.assertIn("timed out", node._continue_error)
+        self.assertEqual(operation.status, "ACTIVE")
+
+    def test_late_service_response_does_not_overwrite_new_continue_request(self):
+        node = self.node()
+        node._continue_request_id = ("new_task", 4)
+        node._continue_pending = True
+        response = Future()
+        response.set_result(SimpleNamespace(success=False, message="old response"))
+        node._on_continue_result(("old_task", 2), response)
+        self.assertTrue(node._continue_pending)
+        self.assertEqual(node._continue_error, "")
+
+    def test_cancel_can_target_an_action_started_outside_panel(self):
+        node = self.node()
+        client = FakeServiceClient(result=SimpleNamespace(goals_canceling=[object()]))
+        node._task_cancel_clients = {"pick": client}
+        node._cancel_manipulation({"task_id": node._manipulation_task["task_id"]})
+        self.assertEqual(bytes(client.calls[0].goal_info.goal_id.uuid), bytes(range(16)))
+        self.assertEqual(node._continue_error, "")
+
+    def test_new_actions_are_blocked_while_external_task_is_paused(self):
+        node = self.node()
+        with self.assertRaisesRegex(PanelCommandError, "cancel the active"):
+            node._submit({"kind": "pick", "plan_only": True})
+
+
+    def test_new_task_status_clears_stale_continue_request_and_warning(self):
+        node = self.node()
+        node._continue_pending = True
+        node._continue_request_id = ("old-task", 2)
+        node._continue_error = "old warning"
+        message = SimpleNamespace(
+            task_id="", action="", status="idle", phase="", last_completed_phase="",
+            object_disposition="not_attached", failure="", pause_id=0, attempt=0,
+            maximum_attempts=0, can_continue=False,
+        )
+        node._on_manipulation_task(message)
+        self.assertFalse(node._continue_pending)
+        self.assertIsNone(node._continue_request_id)
+        self.assertEqual(node._continue_error, "")

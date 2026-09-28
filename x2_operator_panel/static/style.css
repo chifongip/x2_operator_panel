@@ -81,3 +81,6 @@ h3 { grid-column: 1 / -1; font-size: .82rem; font-weight: 650; }
 
 @media (max-width: 980px) { .layout { grid-template-columns: 1fr; padding: 10px; }.camera-grid, .commands-section { grid-template-columns: 1fr; }.command-group { border-right: 0; border-bottom: 1px solid #d8e0e1; }.command-group:last-child { border-bottom: 0; }.operations-section, .audit-section { grid-column: 1; }.place-pose-fields { grid-template-columns: repeat(3, minmax(90px, 1fr)); }.posture-control { grid-template-columns: 1fr; align-items: stretch; }.topbar { align-items: flex-start; flex-direction: column; }.top-actions { justify-content: flex-start; } }
 @media (max-width: 600px) { .topbar { padding: 12px; }.layout { padding: 8px; }.place-pose-fields, .posture-fields { grid-template-columns: repeat(2, minmax(90px, 1fr)); }.map-viewport { max-height: 55vh; }.map-legend { gap: 9px; flex-wrap: wrap; }.map-command-bar { align-items: flex-start; }.map-command-actions { width: 100%; }.map-command-actions .plan-toggle { margin-right: auto; }.camera-grid { padding: 8px; }.camera-frame { min-height: 145px; } }
+
+.manipulation-task { margin-top: 1rem; padding: 0.8rem; border: 1px solid #cbd5e1; border-radius: 8px; }
+#manipulation-task-warning { color: #b45309; overflow-wrap: anywhere; }
