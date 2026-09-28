@@ -69,6 +69,19 @@ class FakeServiceClient:
 
 
 class RosGatewayTest(unittest.TestCase):
+    def test_operation_snapshot_does_not_change_with_live_feedback(self):
+        operation = Operation("dock", "fine_align", time.time())
+        operation.feedback = {"current_error": {"x": 0.1}}
+        operation.result = {"success": True}
+        operation.target_pose = {"x": 1.0}
+        snapshot = operation.as_dict()
+        operation.feedback["current_error"]["x"] = 0.0
+        operation.result["success"] = False
+        operation.target_pose["x"] = 2.0
+        self.assertEqual(snapshot["feedback"]["current_error"]["x"], 0.1)
+        self.assertTrue(snapshot["result"]["success"])
+        self.assertEqual(snapshot["target_pose"]["x"], 1.0)
+
     def test_diagnostic_level_accepts_ros_uint8_bytes_and_integers(self):
         self.assertEqual(_diagnostic_level_as_int(b"\x00"), 0)
         self.assertEqual(_diagnostic_level_as_int(bytearray((2,))), 2)
@@ -1151,6 +1164,48 @@ if __name__ == "__main__":
 
 
 class ContinueManipulationTest(unittest.TestCase):
+    def test_late_response_cannot_clear_retry_at_same_pause(self):
+        node = self.node()
+        responses = [Future(), Future()]
+        node._continue_client.call_async = lambda request: responses.pop(0)
+        first, second = responses
+        node._continue_manipulation(self.payload(node))
+        node._continue_deadline = time.monotonic() - 1.0
+        node._expire_pending_operations()
+        node._continue_manipulation(self.payload(node))
+        first.set_result(SimpleNamespace(success=False, message="old failure"))
+        self.assertTrue(node._continue_pending)
+        self.assertEqual(node._continue_error, "")
+        second.set_result(SimpleNamespace(success=True, message="accepted"))
+        self.assertFalse(node._continue_pending)
+
+    def test_new_pause_and_resume_clear_previous_pending_request(self):
+        for status, pause_id in (("paused", 3), ("retrying", 2)):
+            with self.subTest(status=status):
+                node = self.node()
+                node._continue_client.call_async = lambda request: Future()
+                node._continue_manipulation(self.payload(node))
+                message = SimpleNamespace(
+                    **{**node._manipulation_task, "status": status, "pause_id": pause_id},
+                    phase="carry", last_completed_phase="attach",
+                    object_disposition="attached", failure="", attempt=1,
+                    maximum_attempts=3,
+                )
+                node._on_manipulation_task(message)
+                self.assertFalse(node._continue_pending)
+                self.assertIsNone(node._continue_request_id)
+
+    def test_late_cancel_error_does_not_warn_on_new_or_finished_task(self):
+        for task_id, status in (("new-task", "paused"), (bytes(range(16)).hex(), "completed")):
+            with self.subTest(task_id=task_id, status=status):
+                node = self.node()
+                original_id = node._manipulation_task["task_id"]
+                node._manipulation_task.update(task_id=task_id, status=status)
+                response = Future()
+                response.set_result(SimpleNamespace(goals_canceling=[]))
+                node._on_task_cancel_result(original_id, response)
+                self.assertEqual(node._continue_error, "")
+
     def node(self, service_result=None):
         node = object.__new__(OperatorPanelNode)
         node._lock = threading.RLock()

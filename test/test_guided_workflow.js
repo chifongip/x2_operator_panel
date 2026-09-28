@@ -6,7 +6,7 @@ const vm = require("node:vm");
 const source = fs.readFileSync(process.argv[2], "utf8");
 const workflowSource = source.slice(source.indexOf("  const guidedSteps ="), source.indexOf("  async function navigate("));
 
-function fixture(kind) {
+function fixture(kind, completeBeforeResponse = false, completionStatus = "SUCCEEDED") {
   const calls = [];
   const fields = {};
   const state = {
@@ -34,6 +34,15 @@ function fixture(kind) {
       const operation = { id: `operation-${calls.length}`, kind: payload.kind || "set_locomanipulation_posture", status: "ACTIVE" };
       state.status.operations.push(operation);
       state.status.execution_unlock_remaining_sec = 0;
+      if (completeBeforeResponse) {
+        operation.status = completionStatus;
+        operation.result = { success: completionStatus === "SUCCEEDED" };
+        if (operation.kind === kind && completionStatus === "SUCCEEDED") {
+          state.status.manipulation_state.state = kind === "pick" ? "HOLDING" : "EMPTY";
+        }
+        // A status push is processed while the HTTP request is still pending.
+        context.updateGuidedWorkflow();
+      }
       return { operation };
     },
   });
@@ -79,6 +88,53 @@ async function checkFullSequence(kind) {
 (async () => {
   await checkFullSequence("pick");
   await checkFullSequence("place");
+
+  const fastDock = fixture("pick", true);
+  await fastDock.context.advanceGuidedWorkflow();
+  assert.equal(fastDock.state.guidedWorkflow.step, 1,
+    "Dock success received before the HTTP response must enable Set Height");
+  assert.equal(fastDock.state.guidedWorkflow.operationId, null);
+  assert.equal(fastDock.fields["dock-manipulate-undock"].textContent, "Set Height");
+  assert.doesNotMatch(fastDock.fields["guided-workflow-status"].textContent, /Waiting for Dock/);
+  fastDock.context.updateGuidedWorkflow();
+  assert.equal(fastDock.state.guidedWorkflow.step, 1, "Completion must be consumed only once");
+
+  for (const kind of ["pick", "place"]) {
+    const fastSequence = fixture(kind, true);
+    for (let step = 0; step < 5; step++) {
+      fastSequence.state.status.execution_unlock_remaining_sec = 30;
+      await fastSequence.context.advanceGuidedWorkflow();
+      assert.equal(fastSequence.state.guidedWorkflow.step, step + 1,
+        "Every stage must consume completion received before its HTTP response");
+      fastSequence.context.updateGuidedWorkflow();
+      assert.equal(fastSequence.state.guidedWorkflow.step, step + 1);
+    }
+    assert.equal(fastSequence.state.guidedWorkflow.completed, true);
+  }
+
+  const newestNavigation = fixture("pick");
+  newestNavigation.state.status.operations.unshift({ id: "navigation-2", kind: "navigate", status: "ACTIVE" });
+  await newestNavigation.context.advanceGuidedWorkflow();
+  assert.equal(newestNavigation.calls.length, 0, "Old navigation success must not authorize a new sequence");
+  newestNavigation.state.status.operations[0].status = "SUCCEEDED";
+  await newestNavigation.context.advanceGuidedWorkflow();
+  assert.equal(newestNavigation.state.guidedWorkflow.navigationId, "navigation-2");
+
+  for (const status of ["ABORTED", "CANCELED", "FAILED", "OUTCOME_UNKNOWN"]) {
+    const fastFailure = fixture("pick", true, status);
+    await fastFailure.context.advanceGuidedWorkflow();
+    assert.equal(fastFailure.state.guidedWorkflow.failed, true);
+    assert.equal(fastFailure.state.guidedWorkflow.operationId, null);
+    assert.equal(fastFailure.state.guidedWorkflow.step, 0);
+  }
+
+  const lostHistory = fixture("pick");
+  await lostHistory.context.advanceGuidedWorkflow();
+  lostHistory.state.status.operations = [];
+  lostHistory.context.updateGuidedWorkflow();
+  assert.equal(lostHistory.state.guidedWorkflow.failed, true,
+    "A previously observed operation lost on reconnect must not wait forever");
+  assert.match(lostHistory.state.guidedWorkflow.message, /history was lost/);
 
   const failure = fixture("pick");
   for (let step = 0; step < 4; step++) {

@@ -15,6 +15,7 @@
     guidedWorkflow: null,
     guidedSubmitting: false,
     lastGuidedNavigationId: null,
+    continueRequest: null,
   };
   const cameraStreams = [
     { endpoint: "/api/cameras/front-center", imageId: "front-center-image", statusId: "front-center-camera-status", etag: null, objectUrl: null, inFlight: false },
@@ -727,14 +728,24 @@
   }
 
   function latestNavigation() {
-    return [...(state.status?.operations || [])].reverse().find((operation) => operation.kind === "navigate");
+    // The gateway publishes operation history newest first.
+    return (state.status?.operations || []).find((operation) => operation.kind === "navigate");
   }
 
   function updateGuidedWorkflow() {
     const workflow = state.guidedWorkflow;
     if (!workflow?.operationId) return;
     const operation = state.status?.operations?.find((item) => item.id === workflow.operationId);
-    if (!operation || activeStatuses.includes(operation.status)) return;
+    if (!operation) {
+      if (workflow.operationSeen) {
+        workflow.operationId = null;
+        workflow.failed = true;
+        workflow.message = `${workflow.label} stopped: operation history was lost. Verify the robot state before starting again.`;
+      }
+      return;
+    }
+    workflow.operationSeen = true;
+    if (activeStatuses.includes(operation.status)) return;
     workflow.operationId = null;
     if (operation.status !== "SUCCEEDED" || operation.result?.success === false) {
       workflow.message = `${workflow.label} stopped at ${guidedStepLabel(guidedSteps[workflow.step], workflow.label)}: ${operation.result?.message || operation.detail || operation.status}`;
@@ -853,7 +864,11 @@
         method: "POST", body: JSON.stringify(payload),
       });
       workflow.operationId = response.operation.id;
+      workflow.operationSeen = false;
       state.guidedWorkflow = workflow;
+      // WebSocket completion may arrive before this HTTP response. Reconcile
+      // against the current snapshot now; another status update is not guaranteed.
+      updateGuidedWorkflow();
       setError("");
       renderGuidedWorkflow();
     } catch (error) { setError(error.message); }
@@ -903,33 +918,51 @@
   }
   function renderManipulationTask(task) {
     const taskActive = ["running", "retrying", "paused"].includes(task.status);
+    if (state.continueRequest && (state.continueRequest.task_id !== task.task_id ||
+        state.continueRequest.pause_id !== task.pause_id || task.status !== "paused")) {
+      state.continueRequest = null;
+    }
     byId("manipulation-task-summary").textContent = task.task_id
       ? `${task.status}: ${task.phase || task.action}; attempt ${task.attempt || 0}/${task.maximum_attempts || 0}; object ${task.object_disposition || "unknown"}; completed ${task.last_completed_phase || "none"}`
       : "No active task";
     byId("manipulation-task-warning").textContent = task.continue_error || task.failure || "";
-    byId("continue-manipulation").disabled = !(task.status === "paused" && task.can_continue && task.continue_service_ready && !task.continue_pending);
+    const submitting = state.continueRequest?.task_id === task.task_id &&
+      state.continueRequest?.pause_id === task.pause_id;
+    byId("continue-manipulation").disabled = !(task.status === "paused" && task.can_continue && task.continue_service_ready && !task.continue_pending && !submitting);
     byId("cancel-manipulation").disabled = !taskActive;
   }
   async function continueManipulation() {
     const task = state.status?.manipulation_task;
-    if (!task?.can_continue || task.continue_pending) return;
-    byId("continue-manipulation").disabled = true;
+    if (task?.status !== "paused" || !task.can_continue || !task.continue_service_ready || task.continue_pending || state.continueRequest) return;
+    const request = { task_id: task.task_id, pause_id: task.pause_id };
+    const isCurrent = () => state.status?.manipulation_task?.task_id === request.task_id &&
+      state.status?.manipulation_task?.pause_id === request.pause_id &&
+      state.status?.manipulation_task?.status === "paused";
+    state.continueRequest = request;
+    renderManipulationTask(task);
     try {
       await api("/api/manipulation/continue", {
-        method: "POST", body: JSON.stringify({ task_id: task.task_id, pause_id: task.pause_id }),
+        method: "POST", body: JSON.stringify(request),
       });
-      setError("");
-    } catch (error) { setError(error.message); }
+      if (isCurrent()) setError("");
+    } catch (error) { if (isCurrent()) setError(error.message); }
+    finally {
+      if (state.continueRequest === request) state.continueRequest = null;
+      renderManipulationTask(state.status?.manipulation_task || {});
+    }
   }
   async function cancelManipulation() {
     const task = state.status?.manipulation_task;
-    if (!task?.task_id) return;
+    if (!task?.task_id || !["running", "retrying", "paused"].includes(task.status)) return;
+    const taskId = task.task_id;
+    const isCurrent = () => state.status?.manipulation_task?.task_id === taskId &&
+      ["running", "retrying", "paused"].includes(state.status?.manipulation_task?.status);
     try {
       await api("/api/manipulation/cancel", {
-        method: "POST", body: JSON.stringify({ task_id: task.task_id }),
+        method: "POST", body: JSON.stringify({ task_id: taskId }),
       });
-      setError("");
-    } catch (error) { setError(error.message); }
+      if (isCurrent()) setError("");
+    } catch (error) { if (isCurrent()) setError(error.message); }
   }
   async function recoverState(requestedState) {
     if (!window.confirm(`Confirm manipulation state: ${requestedState}?`)) return;

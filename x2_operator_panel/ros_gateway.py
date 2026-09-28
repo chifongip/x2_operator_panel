@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import deque
 from concurrent.futures import Future, TimeoutError as FutureTimeoutError
+from copy import deepcopy
 from dataclasses import dataclass, field
 from io import BytesIO
 from math import atan2, cos, hypot, isfinite, sin
@@ -144,13 +145,13 @@ class Operation:
             "requested_at": self.requested_at,
             "plan_only": self.plan_only,
             "preset_id": self.preset_id,
-            "target_pose": self.target_pose,
+            "target_pose": deepcopy(self.target_pose),
             "status": self.status,
             "goal_uuid": self.goal_uuid,
             "stage": self.stage,
             "progress": self.progress,
-            "feedback": self.feedback,
-            "result": self.result,
+            "feedback": deepcopy(self.feedback),
+            "result": deepcopy(self.result),
             "detail": self.detail,
             "cancelable": self.cancelable,
         }
@@ -1702,7 +1703,10 @@ class OperatorPanelNode(Node):
             )
         }
         with self._lock:
-            if task["task_id"] != self._manipulation_task.get("task_id"):
+            previous = self._manipulation_task
+            if (task["task_id"] != previous.get("task_id")
+                    or task["pause_id"] != previous.get("pause_id")
+                    or (task["status"] != "paused" and previous.get("status") == "paused")):
                 self._continue_pending = False
                 self._continue_request_id = None
                 self._continue_deadline = None
@@ -1728,7 +1732,9 @@ class OperatorPanelNode(Node):
             if not self._continue_client.service_is_ready():
                 raise PanelCommandError("Continue service is unavailable")
             self._continue_pending = True
-            request_id = (task["task_id"], task["pause_id"])
+            # A timeout permits another request at the same pause. Each dispatch
+            # needs its own identity so the old response cannot clear the new one.
+            request_id = (task["task_id"], task["pause_id"], str(uuid4()))
             self._continue_request_id = request_id
             self._continue_deadline = time.monotonic() + self.service_timeout_sec
             self._continue_error = ""
@@ -1740,14 +1746,16 @@ class OperatorPanelNode(Node):
             future.add_done_callback(lambda completed: self._on_continue_result(request_id, completed))
         except Exception as error:
             with self._lock:
-                self._continue_pending = False
-                self._continue_deadline = None
-                self._continue_error = str(error)
+                if self._continue_request_id == request_id:
+                    self._continue_request_id = None
+                    self._continue_pending = False
+                    self._continue_deadline = None
+                    self._continue_error = str(error)
             raise PanelCommandError(f"Failed to request Continue: {error}") from error
         self._audit("continue_manipulation", "submitted", task["task_id"])
         return {"accepted": True, "task_id": task["task_id"]}
 
-    def _on_continue_result(self, request_id: tuple[str, int], completed: Any) -> None:
+    def _on_continue_result(self, request_id: tuple[str, int, str], completed: Any) -> None:
         try:
             response = completed.result()
             error = "" if response.success else response.message
@@ -1777,17 +1785,22 @@ class OperatorPanelNode(Node):
         except ValueError as error:
             raise PanelCommandError("Invalid manipulation task ID") from error
         future = client.call_async(request)
-        future.add_done_callback(self._on_task_cancel_result)
+        future.add_done_callback(
+            lambda completed: self._on_task_cancel_result(task["task_id"], completed)
+        )
         self._audit("cancel_manipulation", "submitted", task["task_id"])
         return {"accepted": True, "task_id": task["task_id"]}
 
-    def _on_task_cancel_result(self, completed: Any) -> None:
+    def _on_task_cancel_result(self, task_id: str, completed: Any) -> None:
         try:
             response = completed.result()
             error = "" if response.goals_canceling else "Server did not accept task cancellation"
         except Exception as exception:
             error = str(exception)
         with self._lock:
+            if (self._manipulation_task.get("task_id") != task_id
+                    or self._manipulation_task.get("status") not in {"running", "retrying", "paused"}):
+                return
             self._continue_error = error
         self._audit("cancel_manipulation", "failed" if error else "accepted", error)
 
