@@ -25,11 +25,19 @@
         <p id="connection-status" class="muted">Connecting</p>
       </div>
       <div class="top-actions">
-        <span id="execution-state" class="state-badge">Plan only</span>
-        <button id="unlock-execution" class="secondary" type="button">Unlock physical motion</button>
+        <span id="execution-state" class="state-badge" aria-label="Physical execution unlock status">Waiting for status</span>
+        <button id="unlock-execution" class="unlock-control" type="button">Unlock physical motion</button>
         <button id="cancel-active" class="danger" type="button">Cancel active goals</button>
       </div>
     </header>
+
+    <div class="button-legend" role="note" aria-label="Button color meanings">
+      <span><i class="motion" aria-hidden="true"></i>Amber: unlock for physical motion</span>
+      <span><i class="navigation" aria-hidden="true"></i>Blue: navigate</span>
+      <span><i class="action" aria-hidden="true"></i>Teal: measure / continue task</span>
+      <span><i class="danger" aria-hidden="true"></i>Red: stop / cancel</span>
+      <span><i class="setup" aria-hidden="true"></i>Gray: setup / unavailable</span>
+    </div>
 
     <p id="panel-error" class="panel-error" role="alert"></p>
 
@@ -44,14 +52,14 @@
         </div>
         <div class="map-command-bar">
           <div class="map-mode" role="group" aria-label="Map command mode">
-            <button id="select-initial-pose" class="secondary active" type="button">Initial pose</button>
-            <button id="select-navigation-goal" class="secondary" type="button">Navigation goal</button>
+            <button id="select-initial-pose" class="secondary active" type="button" aria-pressed="true">Initial pose</button>
+            <button id="select-navigation-goal" class="secondary" type="button" aria-pressed="false">Navigation goal</button>
           </div>
           <p id="map-command-status" class="muted">No map command selected</p>
           <div class="map-command-actions">
             <label class="plan-toggle"><input id="show-scan" type="checkbox" checked>Laser scan</label>
             <button id="clear-map-command" class="secondary" type="button">Clear</button>
-            <button id="submit-map-command" type="button" disabled>Confirm selection</button>
+            <button id="submit-map-command" class="secondary" type="button" disabled>Confirm selection</button>
           </div>
         </div>
         <div class="map-viewport">
@@ -226,7 +234,7 @@
           <div id="preset-list" class="preset-list">No configured destinations</div>
           <div class="command-row">
             <button id="clear-costmaps" class="secondary" type="button" disabled>Clear Costmap</button>
-            <button id="check-fine-align" class="secondary" type="button">Check fine alignment</button>
+            <button id="check-fine-align" type="button">Check fine alignment</button>
             <button id="execute-fine-align" class="requires-unlock" type="button">Fine align</button>
             <button id="execute-undock" class="requires-unlock" type="button">Undock</button>
             <button id="cancel-docking-motion" class="danger" type="button" disabled>Cancel docking motion</button>

@@ -192,6 +192,34 @@ Use network access controls in addition to the panel password.
 
 ## Safety behavior
 
+Button colors indicate the action's role. A text legend appears below the
+panel header, and disabled controls use a muted gray appearance. Command labels
+and confirmations describe the action independently of its color.
+
+| Appearance | Meaning | Examples |
+| --- | --- | --- |
+| Solid amber | Requires an unlock for physical execution | Pick/Place, posture, Fine align, Undock, Start/Continue sequence |
+| Outlined amber | Enable the timed motion unlock | Unlock physical motion |
+| Blue | Submit navigation | Named destinations, confirmed map navigation goal |
+| Teal | Measure or continue an existing task | Check fine alignment, Continue task |
+| Red | Stop or cancel | Stop sequence, Cancel task, Cancel active goals |
+| Neutral outline | Setup and maintenance | Initial pose, Clear Costmap, Reload profiles, Confirm empty/holding |
+
+Map mode selection uses a filled neutral button and `aria-pressed` to identify
+the selected mode. Keyboard focus has a visible outline. Colors do not change
+execution permissions or ROS safety interlocks; plan-only manipulation still
+requires no physical unlock.
+
+The execution badge counts down the timed unlock locally between server status
+messages. The server remains authoritative and consumes the unlock when one
+physical command is submitted. The badge shows **Locked** when no unlock remains
+and **Plan only** is unchecked; it shows **Plan only** when that toggle is checked
+and no unlock remains. It displays **Status unavailable** on connection loss and
+waits for a fresh status snapshot before showing an unlocked state again.
+Unrelated status deltas do not renew the countdown. Start/Continue sequence gates
+use the same elapsed-time calculation, so an expired displayed unlock cannot
+leave those controls enabled while waiting for the next status push.
+
 Manipulation starts in plan-only mode. A physical manipulation request needs a
 timed unlock and a command-specific confirmation, and the existing action
 server must still accept the goal. `NavigateToPose` has no plan-only mode, so a

@@ -26,6 +26,7 @@ function fixture(kind, fast = false, completionStatus = "SUCCEEDED") {
     window: { confirm: (message) => { confirmations.push(message); return true; } },
     setError: (message) => { context.error = message; },
     applyStatus: (status) => { state.status = status; context.updateGuidedWorkflow(); },
+    executionUnlockRemaining: () => state.status.execution_unlock_remaining_sec,
     postureTarget: () => ({ height: 0.48, waist_yaw: 0.2 }),
     manualPlacePoseEnabled: () => false,
     api: async (path, options = {}) => {

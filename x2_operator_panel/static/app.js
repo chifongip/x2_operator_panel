@@ -15,6 +15,9 @@
     guidedWorkflow: null,
     guidedSubmitting: false,
     continueRequest: null,
+    executionUnlockDeadline: null,
+    executionUnlockKnown: false,
+    executionTimer: null,
   };
   const cameraStreams = [
     { endpoint: "/api/cameras/front-center", imageId: "front-center-image", statusId: "front-center-camera-status", etag: null, objectUrl: null, inFlight: false },
@@ -36,6 +39,10 @@
       returnToLogin("Your operator session expired. Sign in again.");
     }
     if (!response.ok) throw new Error(body?.error || `Request failed (${response.status})`);
+    if (["/api/actions", "/api/posture"].includes(path) &&
+        (body?.operation?.plan_only === false || body?.operation?.kind === "reset")) {
+      syncExecutionUnlock(0);
+    }
     return body;
   }
 
@@ -65,6 +72,7 @@
   function returnToLogin(message) {
     if (state.guidedWorkflow) state.guidedWorkflow.cancelRequested = true;
     state.authenticated = false;
+    invalidateExecutionUnlock();
     stopCameraStreams();
     if (state.socket) {
       state.socket.onclose = null;
@@ -391,8 +399,55 @@
     }
   }
 
-  function applyStatus(status) {
+  function executionUnlockRemaining() {
+    return state.executionUnlockKnown && state.executionUnlockDeadline !== null
+      ? Math.max(0, (state.executionUnlockDeadline - performance.now()) / 1000) : 0;
+  }
+
+  function renderExecutionState() {
+    const remaining = executionUnlockRemaining();
+    const badge = byId("execution-state");
+    badge.textContent = !state.executionUnlockKnown ? "Status unavailable"
+      : remaining > 0 ? `Unlocked ${Math.ceil(remaining)}s`
+        : byId("plan-only").checked ? "Plan only" : "Locked";
+    badge.classList.toggle("unlocked", remaining > 0);
+    badge.title = remaining > 0 ? "One physical command may consume this timed unlock."
+      : "Physical commands require an execution unlock.";
+  }
+
+  function syncExecutionUnlock(remaining) {
+    state.executionUnlockKnown = Number.isFinite(remaining) && remaining >= 0;
+    state.executionUnlockDeadline = state.executionUnlockKnown ? performance.now() + remaining * 1000 : null;
+    renderExecutionState();
+    renderGuidedWorkflow();
+    if (!(executionUnlockRemaining() > 0) && state.executionTimer !== null) {
+      window.clearInterval(state.executionTimer);
+      state.executionTimer = null;
+    }
+    if (state.authenticated && executionUnlockRemaining() > 0 && state.executionTimer === null) {
+      state.executionTimer = window.setInterval(() => {
+        renderExecutionState();
+        renderGuidedWorkflow();
+        if (executionUnlockRemaining() <= 0) {
+          window.clearInterval(state.executionTimer);
+          state.executionTimer = null;
+        }
+      }, 200);
+    }
+  }
+
+  function invalidateExecutionUnlock() {
+    if (state.executionTimer !== null) window.clearInterval(state.executionTimer);
+    state.executionTimer = null;
+    state.executionUnlockKnown = false;
+    state.executionUnlockDeadline = null;
+    renderExecutionState();
+    renderGuidedWorkflow();
+  }
+
+  function applyStatus(status, unlockChanged = true) {
     state.status = status;
+    if (unlockChanged) syncExecutionUnlock(status.execution_unlock_remaining_sec);
     updateGuidedWorkflow();
     addPoseToTrail(status.map_pose);
     renderStatus();
@@ -487,10 +542,7 @@
     byId("joint-states-state").textContent = moveit.joint_states?.fresh ? "Current" : (moveit.joint_states?.detail || "Waiting");
     byId("map-pose-status").textContent = pose.fresh ? "Live map-frame position" : (pose.detail || "Localization unavailable");
     byId("map-coordinates").textContent = pose.available ? `x ${pose.x.toFixed(2)}  y ${pose.y.toFixed(2)}  yaw ${pose.yaw.toFixed(2)}` : "--";
-    const unlock = status.execution_unlock_remaining_sec || 0;
-    const badge = byId("execution-state");
-    badge.textContent = unlock > 0 ? `Unlocked ${Math.ceil(unlock)}s` : "Plan only";
-    badge.classList.toggle("unlocked", unlock > 0);
+    renderExecutionState();
     renderDiagnostics(status.diagnostics);
     renderOperations(status.operations);
     renderAudit(status.audit);
@@ -542,6 +594,8 @@
     }
     byId("map-command-status").textContent = text;
     byId("submit-map-command").disabled = !selection;
+    byId("submit-map-command").classList.toggle("navigation", selection?.kind === "navigate");
+    byId("submit-map-command").classList.toggle("secondary", selection?.kind !== "navigate");
   }
 
   function renderDiagnostics(diagnostics) {
@@ -580,7 +634,7 @@
   function renderPresets() {
     const list = byId("preset-list"); list.textContent = "";
     if (!state.presets.length) { list.textContent = "No configured destinations"; return; }
-    state.presets.forEach((preset) => { const button = document.createElement("button"); button.type = "button"; button.textContent = preset.label; button.addEventListener("click", () => navigate(preset)); list.appendChild(button); });
+    state.presets.forEach((preset) => { const button = document.createElement("button"); button.type = "button"; button.className = "navigation"; button.textContent = preset.label; button.addEventListener("click", () => navigate(preset)); list.appendChild(button); });
   }
 
   function setMapMode(mode) {
@@ -588,6 +642,8 @@
     state.mapSelection = null;
     byId("select-initial-pose").classList.toggle("active", mode === "initial_pose");
     byId("select-navigation-goal").classList.toggle("active", mode === "navigate");
+    byId("select-initial-pose").setAttribute("aria-pressed", String(mode === "initial_pose"));
+    byId("select-navigation-goal").setAttribute("aria-pressed", String(mode === "navigate"));
     renderMapCommand();
     drawMap();
   }
@@ -684,12 +740,18 @@
       try {
         const message = JSON.parse(event.data);
         if (message.type === "status") applyStatus(message.payload);
-        if (message.type === "status_delta") applyStatus(mergeStatus(state.status, message.payload));
+        if (message.type === "status_delta") {
+          const delta = message.payload;
+          const unlockChanged = Object.hasOwn(delta.set || {}, "execution_unlock_remaining_sec") ||
+            (delta.remove || []).some((path) => path[0] === "execution_unlock_remaining_sec");
+          applyStatus(mergeStatus(state.status, delta), unlockChanged);
+        }
       } catch (_) { setError("Received an invalid status update"); }
     };
     socket.onclose = (event) => {
       if (state.socket !== socket) return;
       state.socket = null;
+      invalidateExecutionUnlock();
       if (event.code === 1008) {
         returnToLogin("Your operator session expired. Sign in again.");
       } else if (state.authenticated) {
@@ -815,7 +877,7 @@
     const active = state.status?.navigation?.goal_status?.active ||
       (state.status?.operations || []).some((operation) => activeStatuses.includes(operation.status));
     const running = workflow && !workflow.failed && !workflow.completed;
-    const unlocked = state.status?.execution_unlock_remaining_sec > 0;
+    const unlocked = executionUnlockRemaining() > 0;
     byId("stop-guided-workflow").disabled = !running || workflow.cancelRequested;
     const continueButton = byId("continue-guided-workflow");
     continueButton.disabled = !workflow?.failed || workflow.resumeBlocked || active || state.guidedSubmitting || byId("plan-only").checked || !unlocked;
@@ -847,7 +909,7 @@
     try {
       applyStatus(await api("/api/status"));
       if (state.authenticated === false) return;
-      if (!(state.status?.execution_unlock_remaining_sec > 0)) {
+      if (!(executionUnlockRemaining() > 0)) {
         throw new Error("Unlock physical motion before starting the combo sequence");
       }
       if (byId("plan-only").checked) throw new Error("Turn off Plan only for this physical sequence");
@@ -946,7 +1008,7 @@
     try {
       applyStatus(await api("/api/status"));
       if (state.guidedWorkflow !== workflow || state.authenticated === false) return;
-      if (!(state.status?.execution_unlock_remaining_sec > 0)) {
+      if (!(executionUnlockRemaining() > 0)) {
         throw new Error("Unlock physical motion before continuing the combo sequence");
       }
       if (byId("plan-only").checked) throw new Error("Turn off Plan only to continue the physical sequence");
@@ -1131,7 +1193,7 @@
     };
   }
   async function submitLocomanipulationPosture(target, actionLabel) {
-    if (!(state.status?.execution_unlock_remaining_sec > 0)) {
+    if (!(executionUnlockRemaining() > 0)) {
       throw new Error("Temporarily unlock one physical motion command first");
     }
     const waitDetail = target.wait_for_settle
@@ -1179,7 +1241,11 @@
   }
   async function unlockExecution() {
     if (!window.confirm("Temporarily unlock one physical motion command?")) return;
-    try { await api("/api/unlock/execution", { method: "POST", body: JSON.stringify({ confirmed: true }) }); setError(""); } catch (error) { setError(error.message); }
+    try {
+      await api("/api/unlock/execution", { method: "POST", body: JSON.stringify({ confirmed: true }) });
+      applyStatus(await api("/api/status"));
+      setError("");
+    } catch (error) { setError(error.message); }
   }
   async function cancelActive() {
     if (!window.confirm("Request cancellation for all active panel goals?")) return;
@@ -1224,7 +1290,7 @@
   byId("dock-manipulate-undock").addEventListener("click", advanceGuidedWorkflow);
   byId("stop-guided-workflow").addEventListener("click", stopGuidedWorkflow);
   byId("continue-guided-workflow").addEventListener("click", continueGuidedWorkflow);
-  byId("plan-only").addEventListener("change", renderGuidedWorkflow);
+  byId("plan-only").addEventListener("change", () => { renderExecutionState(); renderGuidedWorkflow(); });
   byId("move-carry-a").addEventListener("click", () => submitManipulation("move_carry_pose", { target_pose: 0 }));
   byId("move-carry-b").addEventListener("click", () => submitManipulation("move_carry_pose", { target_pose: 1 }));
   byId("reset-manipulation").addEventListener("click", () => submitManipulation("reset", { confirm_empty: true }));
