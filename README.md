@@ -210,7 +210,12 @@ the manipulation state is `HOLDING`. It runs independently from navigation;
 no previous successful navigation goal is required, and a completed sequence
 can be followed by another sequence from the current location. Active motion,
 including active Nav2 navigation, must finish before starting. Turn off
-**Plan only**, then press the combo control and confirm the complete physical sequence.
+**Plan only**, use **Unlock physical motion**, then press the combo control and
+confirm the complete physical sequence. Start and **Continue sequence** are
+disabled while the timed execution unlock is locked or expired. Amber buttons
+identify commands that require an unlock for physical execution, including the
+combo, Pick/Place, carry poses, manipulation reset, posture targets, Fine align,
+and Undock. Plan-only manipulation remains available without physical unlock.
 No visible object or box selection is required to start docking. Before Pick,
 the sequence waits for a fresh visible detection. A single detected box is
 selected automatically; when several boxes are visible, choose the intended
@@ -230,15 +235,18 @@ undocking. Both posture stages call `/set_locomanipulation_posture` with
 `wait_for_settle=true` and wait for a successful service result. This confirms
 the direct feedback window, not that the one-way ZMQ policy has reached the
 target. The guided stages leave the operator's input fields unchanged.
-The initial confirmation authorizes all five steps. The panel requests a fresh
-one-shot execution unlock immediately before each step; no additional button
-presses, unlocks, or confirmations are needed. The posture target and optional
+The manual unlock is consumed by the first physical command after Start or
+Continue. The sequence confirmation authorizes the remaining stages, for which
+the panel automatically renews the one-shot unlock immediately before each
+command. No additional unlocks are needed while that sequence is running.
+The posture target and optional
 manual place pose are captured at startup. Later posture or place field edits do
 not change the running sequence. Box selection is resolved before Pick after
 docking. A failed or canceled stage stops the sequence,
 including a failed height reset, which prevents guided undocking. Use navigation
 separately when moving between pickup and drop-off locations.
-**Continue sequence** refreshes the robot status, asks for confirmation, and
+**Continue sequence** requires a fresh manual unlock, refreshes the robot status,
+asks for confirmation, and
 retries the failed stage while preserving the completed stages and captured
 posture/place targets. After a stale-selection rejection at Pick, select a fresh
 box and continue; Dock and Set Height are not repeated. Continuing requires no

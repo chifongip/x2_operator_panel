@@ -16,7 +16,7 @@ function fixture(kind, fast = false, completionStatus = "SUCCEEDED") {
       operations: [{ id: "navigation-1", kind: "navigate", status: "SUCCEEDED" }],
       manipulation_state: { state: kind === "pick" ? "EMPTY" : "HOLDING" },
       navigation: { goal_status: { available: true, active: false } },
-      locomanipulation_posture: { ready: true }, execution_unlock_remaining_sec: 0,
+      locomanipulation_posture: { ready: true }, execution_unlock_remaining_sec: 30,
       visible_boxes: { fresh: true, boxes: [{ instance_id: "box-1" }] },
     },
   };
@@ -32,9 +32,14 @@ function fixture(kind, fast = false, completionStatus = "SUCCEEDED") {
       const payload = JSON.parse(options.body || "{}");
       calls.push({ path, payload });
       if (path === "/api/status") return state.status;
-      if (path === "/api/unlock/execution") return {};
+      if (path === "/api/unlock/execution") {
+        state.status.execution_unlock_remaining_sec = 30;
+        return {};
+      }
       if (path === "/api/cancel") return { operation_ids: ["active"] };
       const operation = { id: `operation-${calls.length}`, kind: payload.kind || "set_locomanipulation_posture", status: "ACTIVE" };
+      assert.ok(state.status.execution_unlock_remaining_sec > 0, "A physical command must have an unlock");
+      state.status.execution_unlock_remaining_sec = 0;
       state.status.operations.unshift(operation);
       if (fast) {
         finishOperation(operation, completionStatus, completionStatus === "SUCCEEDED");
@@ -77,15 +82,19 @@ async function fullSequence(kind, fast = false) {
   assert.equal(f.confirmations.length, 1, "The entire sequence needs one confirmation");
   assert.deepEqual(f.commands().map((call) => call.payload.kind || "posture"),
     ["fine_align", "posture", kind, "posture", "undock"]);
-  assert.equal(f.calls.filter((call) => call.path === "/api/unlock/execution").length, 5);
+  assert.equal(f.calls.filter((call) => call.path === "/api/unlock/execution").length, 4,
+    "Dock must use the manual unlock; only later stages renew automatically");
   assert.deepEqual(f.commands()[1].payload,
     { height: 0.48, waist_yaw: 0.2, wait_for_settle: true, confirmed: true });
   assert.deepEqual(f.commands()[3].payload,
     { height: 0.64, waist_yaw: 0.0, wait_for_settle: true, confirmed: true });
   assert.equal(f.state.guidedWorkflow.completed, true);
   f.context.renderGuidedWorkflow();
-  assert.equal(f.fields["dock-manipulate-undock"].disabled, false,
-    "Completion must allow a new sequence without another navigation goal");
+  assert.equal(f.fields["dock-manipulate-undock"].disabled, true,
+    "Completion must require a fresh manual unlock for another sequence");
+  f.state.status.execution_unlock_remaining_sec = 30;
+  f.context.renderGuidedWorkflow();
+  assert.equal(f.fields["dock-manipulate-undock"].disabled, false);
 }
 
 (async () => {
@@ -110,6 +119,7 @@ async function fullSequence(kind, fast = false) {
   repeat.state.status.operations = [];
   await repeat.context.advanceGuidedWorkflow();
   for (let step = 0; step < 5; step++) await repeat.finish();
+  repeat.state.status.execution_unlock_remaining_sec = 30;
   await repeat.context.advanceGuidedWorkflow();
   assert.equal(repeat.commands().length, 6, "A new sequence can start at the same location");
   assert.equal(repeat.state.guidedWorkflow.kind, "place");
@@ -126,6 +136,9 @@ async function fullSequence(kind, fast = false) {
   await heightFailure.finish("SUCCEEDED", false);
   assert.equal(heightFailure.state.guidedWorkflow.failed, true);
   assert.equal(heightFailure.commands().length, 4, "A failed height reset must prevent Undock");
+  await heightFailure.context.continueGuidedWorkflow();
+  assert.equal(heightFailure.commands().length, 4, "Locked Continue must not submit motion");
+  heightFailure.state.status.execution_unlock_remaining_sec = 30;
   await heightFailure.context.continueGuidedWorkflow();
   await flush();
   assert.equal(heightFailure.commands().length, 5);
@@ -226,6 +239,7 @@ async function fullSequence(kind, fast = false) {
   rejectPick = false;
   rejectedPick.state.selectedBoxId = "replacement-box";
   rejectedPick.state.status.visible_boxes.boxes = [{ instance_id: "replacement-box" }];
+  rejectedPick.state.status.execution_unlock_remaining_sec = 30;
   await rejectedPick.context.continueGuidedWorkflow();
   await flush();
   assert.deepEqual(rejectedPick.commands().map((call) => call.payload.kind || "posture"),
@@ -248,6 +262,7 @@ async function fullSequence(kind, fast = false) {
   await retryState.context.advanceGuidedWorkflow();
   await flush();
   retryState.state.status.manipulation_state.state = "UNKNOWN";
+  retryState.state.status.execution_unlock_remaining_sec = 30;
   await retryState.context.continueGuidedWorkflow();
   assert.equal(retryState.commands().length, 1);
   assert.match(retryState.context.error, /expected EMPTY/);
@@ -284,6 +299,7 @@ async function fullSequence(kind, fast = false) {
   await cancel.finish();
   assert.equal(cancel.commands().length, 1, "Stop must prevent all subsequent commands");
   assert.equal(cancel.calls.at(-1).path, "/api/cancel");
+  cancel.state.status.execution_unlock_remaining_sec = 30;
   await cancel.context.continueGuidedWorkflow();
   await flush();
   assert.equal(cancel.commands().length, 2);
@@ -316,7 +332,7 @@ async function fullSequence(kind, fast = false) {
   const newest = fixture("pick");
   newest.state.status.operations.unshift({ id: "navigation-2", kind: "navigate", status: "ACTIVE" });
   await newest.context.advanceGuidedWorkflow();
-  assert.equal(newest.calls.length, 0);
+  assert.equal(newest.commands().length, 0);
 
   const externalNavigation = fixture("pick");
   externalNavigation.state.status.operations = [];
@@ -324,17 +340,31 @@ async function fullSequence(kind, fast = false) {
   externalNavigation.context.renderGuidedWorkflow();
   assert.equal(externalNavigation.fields["dock-manipulate-undock"].disabled, true);
   await externalNavigation.context.advanceGuidedWorkflow();
-  assert.equal(externalNavigation.calls.length, 0, "Active external navigation still blocks overlapping motion");
+  assert.equal(externalNavigation.commands().length, 0, "Active external navigation still blocks overlapping motion");
 
   const declined = fixture("pick");
   declined.context.window.confirm = () => false;
   await declined.context.advanceGuidedWorkflow();
-  assert.equal(declined.calls.length, 0);
+  assert.equal(declined.commands().length, 0);
 
   const unlockError = fixture("pick");
-  unlockError.context.api = async () => { throw new Error("Unlock failed"); };
   await unlockError.context.advanceGuidedWorkflow();
-  await flush();
+  const unlockApi = unlockError.context.api;
+  unlockError.context.api = async (path, options) => {
+    if (path === "/api/unlock/execution") throw new Error("Unlock failed");
+    return unlockApi(path, options);
+  };
+  await unlockError.finish();
   assert.equal(unlockError.state.guidedWorkflow.failed, true);
-  assert.equal(unlockError.commands().length, 0);
+  assert.equal(unlockError.commands().length, 1);
+
+  const locked = fixture("pick");
+  locked.state.status.execution_unlock_remaining_sec = 0;
+  locked.context.renderGuidedWorkflow();
+  assert.equal(locked.fields["dock-manipulate-undock"].disabled, true);
+  await locked.context.advanceGuidedWorkflow();
+  assert.equal(locked.commands().length, 0);
+  assert.equal(locked.calls.filter((call) => call.path === "/api/unlock/execution").length, 0,
+    "A locked combo must not unlock itself at startup");
+  assert.match(locked.context.error, /Unlock physical motion/);
 })().catch((error) => { console.error(error); process.exitCode = 1; });

@@ -151,21 +151,22 @@
             <p id="visible-box-status" class="muted">Waiting for /box_states</p>
           </div>
           <div class="command-row">
-            <button data-command="pick" type="button">Pick box</button>
-            <button data-command="pick_place" type="button">Pick and place</button>
-            <button id="reset-manipulation" class="secondary" type="button">Reset manipulation</button>
+            <button data-command="pick" class="requires-unlock" type="button">Pick box</button>
+            <button data-command="pick_place" class="requires-unlock" type="button">Pick and place</button>
+            <button id="reset-manipulation" class="requires-unlock" type="button">Reset manipulation</button>
           </div>
           <div class="guided-workflow">
-            <button id="dock-manipulate-undock" type="button" disabled>Dock → Set Height → Pick → Default Height → Undock</button>
+            <button id="dock-manipulate-undock" class="requires-unlock" type="button" disabled>Dock → Set Height → Pick → Default Height → Undock</button>
             <button id="stop-guided-workflow" class="danger" type="button" disabled>Stop sequence</button>
-            <button id="continue-guided-workflow" class="secondary" type="button" disabled>Continue sequence</button>
+            <button id="continue-guided-workflow" class="requires-unlock" type="button" disabled>Continue sequence</button>
             <p id="guided-workflow-status" class="muted" role="status">Run the full Pick or Place sequence from the current location.</p>
+            <p class="muted">Amber buttons require an unlock for physical motion. Unlock before starting or continuing the combo; remaining stages run automatically after confirmation.</p>
             <p class="muted">Docking does not require a visible object. Before Pick, one detected object is selected automatically; choose from Visible box when several are detected.</p>
             <p class="muted">Set the object’s Height and Waist yaw below before the Set Height step. Default Height restores 0.64 m and 0.0 rad.</p>
           </div>
           <div class="command-row">
-            <button id="move-carry-a" class="secondary" type="button">Move to Carry A</button>
-            <button id="move-carry-b" class="secondary" type="button">Move to Carry B</button>
+            <button id="move-carry-a" class="requires-unlock" type="button">Move to Carry A</button>
+            <button id="move-carry-b" class="requires-unlock" type="button">Move to Carry B</button>
           </div>
           <form id="posture-form" class="posture-control">
             <div>
@@ -178,8 +179,8 @@
               <label class="plan-toggle"><input id="posture-wait-for-settle" type="checkbox" checked>Wait for direct feedback window</label>
             </fieldset>
             <div class="posture-actions">
-              <button id="set-posture" type="submit" disabled>Set posture</button>
-              <button id="reset-posture" class="secondary" type="button" disabled>Reset posture</button>
+              <button id="set-posture" class="requires-unlock" type="submit" disabled>Set posture</button>
+              <button id="reset-posture" class="requires-unlock" type="button" disabled>Reset posture</button>
               <button id="release-posture" class="secondary" type="button" disabled>Release posture control</button>
             </div>
           </form>
@@ -195,7 +196,7 @@
               <label>Z (m)<input id="place-z" type="number" value="0.29" step="0.01" required></label>
               <label>Yaw (rad)<input id="place-yaw" type="number" value="0" step="0.01" required></label>
             </fieldset>
-            <button id="place-button" type="submit">Place box</button>
+            <button id="place-button" class="requires-unlock" type="submit">Place box</button>
           </form>
           <section class="manipulation-task" aria-live="polite">
             <h3>Current task</h3>
@@ -226,8 +227,8 @@
           <div class="command-row">
             <button id="clear-costmaps" class="secondary" type="button" disabled>Clear Costmap</button>
             <button id="check-fine-align" class="secondary" type="button">Check fine alignment</button>
-            <button id="execute-fine-align" type="button">Fine align</button>
-            <button id="execute-undock" type="button">Undock</button>
+            <button id="execute-fine-align" class="requires-unlock" type="button">Fine align</button>
+            <button id="execute-undock" class="requires-unlock" type="button">Undock</button>
             <button id="cancel-docking-motion" class="danger" type="button" disabled>Cancel docking motion</button>
           </div>
         </section>

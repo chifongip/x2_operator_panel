@@ -815,9 +815,10 @@
     const active = state.status?.navigation?.goal_status?.active ||
       (state.status?.operations || []).some((operation) => activeStatuses.includes(operation.status));
     const running = workflow && !workflow.failed && !workflow.completed;
+    const unlocked = state.status?.execution_unlock_remaining_sec > 0;
     byId("stop-guided-workflow").disabled = !running || workflow.cancelRequested;
     const continueButton = byId("continue-guided-workflow");
-    continueButton.disabled = !workflow?.failed || workflow.resumeBlocked || active || state.guidedSubmitting || byId("plan-only").checked;
+    continueButton.disabled = !workflow?.failed || workflow.resumeBlocked || active || state.guidedSubmitting || byId("plan-only").checked || !unlocked;
     continueButton.title = workflow?.resumeBlocked ? "Command outcome is unknown; verify robot state before restarting."
       : "Resume at the failed stage after verifying robot state";
     if (running) {
@@ -829,17 +830,26 @@
           : guidedWaitReason(workflow) || `Starting ${stepLabel} automatically (${workflow.step + 1}/${guidedSteps.length}).`;
     } else {
       button.textContent = `Dock → Set Height → ${label} → Default Height → Undock`;
-      button.disabled = active || state.guidedSubmitting || !["EMPTY", "HOLDING"].includes(manipulationState) || byId("plan-only").checked;
+      button.disabled = active || state.guidedSubmitting || !["EMPTY", "HOLDING"].includes(manipulationState) || byId("plan-only").checked || !unlocked;
       message.textContent = workflow?.message || (byId("plan-only").checked
         ? "Turn off Plan only to run the physical sequence."
         : active ? "Wait for the active operation to finish."
+          : !unlocked ? "Unlock physical motion before starting the combo sequence."
           : `Ready for ${label.toLowerCase()}. One confirmation runs all five steps automatically.`);
     }
   }
 
   async function advanceGuidedWorkflow() {
     if (state.guidedSubmitting || (state.guidedWorkflow && !state.guidedWorkflow.failed && !state.guidedWorkflow.completed)) return;
+    state.guidedSubmitting = true;
+    renderGuidedWorkflow();
+    let starting = true;
     try {
+      applyStatus(await api("/api/status"));
+      if (state.authenticated === false) return;
+      if (!(state.status?.execution_unlock_remaining_sec > 0)) {
+        throw new Error("Unlock physical motion before starting the combo sequence");
+      }
       if (byId("plan-only").checked) throw new Error("Turn off Plan only for this physical sequence");
       if (state.status?.navigation?.goal_status?.active) throw new Error("Wait for active navigation to finish");
       if ((state.status?.operations || []).some((operation) => activeStatuses.includes(operation.status))) {
@@ -854,11 +864,13 @@
       const missingNavStatus = !state.status?.navigation?.goal_status?.available;
       if (!window.confirm(`Run the complete physical sequence: Dock → Set Height (${posture.height.toFixed(3)} m, waist yaw ${posture.waist_yaw.toFixed(4)} rad) → ${label} → Default Height → Undock? All five steps will run automatically.${missingNavStatus ? " Nav2 status is unavailable: confirm Nav2 is idle before starting." : ""}`)) return;
       state.guidedWorkflow = { kind, label, posture, placeTarget, instanceId: null,
-        step: 0, operationId: null, confirmNav2Idle: missingNavStatus };
+        step: 0, operationId: null, confirmNav2Idle: missingNavStatus, useManualUnlock: true };
       setError("");
+      starting = false;
+      state.guidedSubmitting = false;
       await runGuidedStep();
     } catch (error) { setError(error.message); }
-    finally { renderGuidedWorkflow(); }
+    finally { if (starting) state.guidedSubmitting = false; renderGuidedWorkflow(); }
   }
 
   async function runGuidedStep() {
@@ -883,10 +895,11 @@
     renderGuidedWorkflow();
     let submittingCommand = false;
     try {
-      // The initial confirmation authorizes this sequence. Renew the existing
-      // one-shot unlock immediately before each command, so long actions do not
-      // require manual unlocks or leave a long-lived physical-motion unlock.
-      await api("/api/unlock/execution", { method: "POST", body: JSON.stringify({ confirmed: true }) });
+      // Start/Continue uses the operator's one-shot unlock for its first command.
+      // The confirmation authorizes renewal for the remaining automatic stages.
+      if (!workflow.useManualUnlock) {
+        await api("/api/unlock/execution", { method: "POST", body: JSON.stringify({ confirmed: true }) });
+      }
       if (workflow.cancelRequested || state.guidedWorkflow !== workflow || state.authenticated === false) return;
       if (step === "manipulate" && workflow.kind === "pick") {
         // The browser snapshot can outlive the detection freshness window.
@@ -905,6 +918,7 @@
         method: "POST", body: JSON.stringify(payload),
       });
       workflow.operationId = response.operation.id;
+      workflow.useManualUnlock = false;
       workflow.operationSeen = false;
       if (workflow.cancelRequested) {
         await api("/api/cancel", { method: "POST", body: "{}" });
@@ -932,6 +946,9 @@
     try {
       applyStatus(await api("/api/status"));
       if (state.guidedWorkflow !== workflow || state.authenticated === false) return;
+      if (!(state.status?.execution_unlock_remaining_sec > 0)) {
+        throw new Error("Unlock physical motion before continuing the combo sequence");
+      }
       if (byId("plan-only").checked) throw new Error("Turn off Plan only to continue the physical sequence");
       if (state.status?.navigation?.goal_status?.active ||
           (state.status?.operations || []).some((operation) => activeStatuses.includes(operation.status))) {
@@ -962,6 +979,7 @@
       workflow.operationSeen = false;
       workflow.message = "";
       workflow.confirmNav2Idle = missingNavStatus;
+      workflow.useManualUnlock = true;
       workflow.completed = nextStep === guidedSteps.length;
       if (guidedSteps[nextStep] === "manipulate" && workflow.kind === "pick") workflow.instanceId = null;
       setError("");

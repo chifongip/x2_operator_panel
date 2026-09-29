@@ -17,6 +17,8 @@ button.secondary { background: #fff; color: #1e5350; border-color: #71918d; }
 button.secondary:hover { background: #eef7f5; }
 button.danger { background: #ad343e; border-color: #ad343e; }
 button.danger:hover { background: #86252e; }
+button.requires-unlock { background: #885500; border-color: #885500; color: #fff; }
+button.requires-unlock:hover { background: #684100; border-color: #684100; }
 input, select { width: 100%; min-height: 36px; padding: 6px 8px; border: 1px solid #a9b6bb; border-radius: 4px; background: #fff; color: #1e2933; }
 label { display: grid; gap: 4px; font-size: .8rem; color: #43545a; }
 h1, h2, h3, p { margin: 0; }
