@@ -210,8 +210,14 @@ the manipulation state is `HOLDING`. It runs independently from navigation;
 no previous successful navigation goal is required, and a completed sequence
 can be followed by another sequence from the current location. Active motion,
 including active Nav2 navigation, must finish before starting. Turn off
-**Plan only**, select a fresh box for
-pickup, then press the combo control and confirm the complete physical sequence.
+**Plan only**, then press the combo control and confirm the complete physical sequence.
+No visible object or box selection is required to start docking. Before Pick,
+the sequence waits for a fresh visible detection. A single detected box is
+selected automatically; when several boxes are visible, choose the intended
+physical object from the existing **Visible box** list. Selecting a box resumes
+the waiting sequence. The target instance ID is bound when Pick is ready and
+must still be fresh when the command is submitted; it is not replaced during
+an in-flight Pick. Place uses the held object and needs no visible pickup target.
 All five stages run automatically, advancing only after the preceding command
 succeeds. Dock uses
 physical `/fine_align`; the middle stage uses `/pick_box` or `/place_box` (with
@@ -226,9 +232,10 @@ the direct feedback window, not that the one-way ZMQ policy has reached the
 target. The guided stages leave the operator's input fields unchanged.
 The initial confirmation authorizes all five steps. The panel requests a fresh
 one-shot execution unlock immediately before each step; no additional button
-presses, unlocks, or confirmations are needed. Box selection, posture target,
-and optional manual place pose are captured at startup. Later field edits do
-not change the running sequence. A failed or canceled stage stops the sequence,
+presses, unlocks, or confirmations are needed. The posture target and optional
+manual place pose are captured at startup. Later posture or place field edits do
+not change the running sequence. Box selection is resolved before Pick after
+docking. A failed or canceled stage stops the sequence,
 including a failed height reset, which prevents guided undocking. Use navigation
 separately when moving between pickup and drop-off locations.
 **Stop sequence** prevents further steps and requests cancellation of the active

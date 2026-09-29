@@ -17,6 +17,7 @@ function fixture(kind, fast = false, completionStatus = "SUCCEEDED") {
       manipulation_state: { state: kind === "pick" ? "EMPTY" : "HOLDING" },
       navigation: { goal_status: { available: true, active: false } },
       locomanipulation_posture: { ready: true }, execution_unlock_remaining_sec: 0,
+      visible_boxes: { fresh: true, boxes: [{ instance_id: "box-1" }] },
     },
   };
   const context = vm.createContext({
@@ -150,10 +151,61 @@ async function fullSequence(kind, fast = false) {
   await captured.context.advanceGuidedWorkflow();
   captured.context.postureTarget = () => ({ height: 0.6, waist_yaw: 0 });
   captured.state.selectedBoxId = "different-box";
+  captured.state.status.visible_boxes.boxes = [{ instance_id: "different-box" }];
   await captured.finish();
   await captured.finish();
   assert.equal(captured.commands()[1].payload.height, 0.48);
-  assert.equal(captured.commands()[2].payload.instance_id, "box-1");
+  assert.equal(captured.commands()[2].payload.instance_id, "different-box",
+    "Box selection must be resolved after docking, when Pick becomes ready");
+
+  const unseen = fixture("pick");
+  unseen.state.selectedBoxId = null;
+  unseen.state.status.visible_boxes = { fresh: false, boxes: [] };
+  unseen.context.renderGuidedWorkflow();
+  assert.equal(unseen.fields["dock-manipulate-undock"].disabled, false);
+  await unseen.context.advanceGuidedWorkflow();
+  assert.equal(unseen.commands()[0].payload.kind, "fine_align");
+  await unseen.finish();
+  assert.equal(unseen.commands().length, 2, "Set Height must run without a visible object");
+  await unseen.finish();
+  assert.equal(unseen.commands().length, 2, "Pick must wait for a fresh object");
+  assert.match(unseen.context.guidedWaitReason(unseen.state.guidedWorkflow), /fresh object/);
+  const unlocksBeforeDetection = unseen.calls.filter((call) => call.path === "/api/unlock/execution").length;
+  unseen.state.status.visible_boxes = { fresh: true, boxes: [{ instance_id: "new-box" }] };
+  unseen.context.updateGuidedWorkflow();
+  await flush();
+  assert.equal(unseen.commands()[2].payload.instance_id, "new-box",
+    "A single object detected after docking must be selected automatically");
+  assert.equal(unseen.calls.filter((call) => call.path === "/api/unlock/execution").length,
+    unlocksBeforeDetection + 1, "Waiting for detection must not repeatedly unlock motion");
+
+  const multiple = fixture("pick");
+  multiple.state.selectedBoxId = null;
+  multiple.state.status.visible_boxes = { fresh: true,
+    boxes: [{ instance_id: "box-a" }, { instance_id: "box-b" }] };
+  await multiple.context.advanceGuidedWorkflow();
+  await multiple.finish();
+  await multiple.finish();
+  assert.equal(multiple.commands().length, 2);
+  assert.match(multiple.context.guidedWaitReason(multiple.state.guidedWorkflow), /Multiple objects/);
+  multiple.state.selectedBoxId = "box-b";
+  multiple.context.scheduleGuidedStep();
+  await flush();
+  assert.equal(multiple.commands()[2].payload.instance_id, "box-b");
+
+  const stale = fixture("pick");
+  await stale.context.advanceGuidedWorkflow();
+  await stale.finish();
+  stale.state.status.visible_boxes.fresh = false;
+  await stale.finish();
+  assert.equal(stale.commands().length, 2, "An expired detection cannot authorize Pick");
+
+  const invisiblePlace = fixture("place", true);
+  invisiblePlace.state.selectedBoxId = null;
+  invisiblePlace.state.status.visible_boxes = { fresh: false, boxes: [] };
+  await invisiblePlace.context.advanceGuidedWorkflow();
+  await flush();
+  assert.equal(invisiblePlace.commands().length, 5, "Place must not require a visible pickup object");
 
   const place = fixture("place");
   place.context.manualPlacePoseEnabled = () => true;

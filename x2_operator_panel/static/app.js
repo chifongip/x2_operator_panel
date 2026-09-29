@@ -771,6 +771,14 @@
     });
   }
 
+  function guidedPickId(workflow) {
+    const visible = state.status?.visible_boxes;
+    const boxes = visible?.fresh && Array.isArray(visible.boxes) ? visible.boxes : [];
+    const identifier = workflow.instanceId || state.selectedBoxId ||
+      (boxes.length === 1 ? boxes[0].instance_id : null);
+    return boxes.some((box) => box.instance_id === identifier) ? identifier : null;
+  }
+
   function guidedWaitReason(workflow) {
     const step = guidedSteps[workflow.step];
     if (state.status?.navigation?.goal_status?.active) return "Waiting for active navigation to finish.";
@@ -785,6 +793,13 @@
     }
     if (["set_height", "default_height"].includes(step) && !state.status?.locomanipulation_posture?.ready) {
       return state.status?.locomanipulation_posture?.detail || "Waiting for posture service.";
+    }
+    if (step === "manipulate" && workflow.kind === "pick" && !guidedPickId(workflow)) {
+      if (workflow.instanceId) return `Waiting for a fresh detection of ${workflow.instanceId}.`;
+      const visible = state.status?.visible_boxes;
+      return visible?.fresh && visible.boxes?.length > 1
+        ? "Multiple objects detected. Select the object to pick from Visible box."
+        : "Waiting for a fresh object detection before Pick. Docking does not require a visible object.";
     }
     return "";
   }
@@ -827,13 +842,12 @@
       const manipulationState = state.status?.manipulation_state?.state;
       if (!["EMPTY", "HOLDING"].includes(manipulationState)) throw new Error("Verify the manipulation state before starting");
       const kind = manipulationState === "HOLDING" ? "place" : "pick";
-      if (kind === "pick" && !state.selectedBoxId) throw new Error("Select a fresh visible box before picking");
       const posture = { ...postureTarget(), wait_for_settle: true };
       const placeTarget = kind === "place" && manualPlacePoseEnabled() ? placePose() : null;
       const label = kind === "pick" ? "Pick" : "Place";
       const missingNavStatus = !state.status?.navigation?.goal_status?.available;
       if (!window.confirm(`Run the complete physical sequence: Dock → Set Height (${posture.height.toFixed(3)} m, waist yaw ${posture.waist_yaw.toFixed(4)} rad) → ${label} → Default Height → Undock? All five steps will run automatically.${missingNavStatus ? " Nav2 status is unavailable: confirm Nav2 is idle before starting." : ""}`)) return;
-      state.guidedWorkflow = { kind, label, posture, placeTarget, instanceId: state.selectedBoxId,
+      state.guidedWorkflow = { kind, label, posture, placeTarget, instanceId: null,
         step: 0, operationId: null, confirmNav2Idle: missingNavStatus };
       setError("");
       await runGuidedStep();
@@ -847,6 +861,10 @@
     if (state.authenticated === false) return;
     if (guidedWaitReason(workflow)) return;
     const step = guidedSteps[workflow.step];
+    if (step === "manipulate" && workflow.kind === "pick" && !workflow.instanceId) {
+      // Bind the physical target when Pick is ready, after docking and height adjustment.
+      workflow.instanceId = guidedPickId(workflow);
+    }
     const postureStep = ["set_height", "default_height"].includes(step);
     const posture = step === "set_height" ? workflow.posture : { height: 0.64, waist_yaw: 0.0, wait_for_settle: true };
     const payload = postureStep ? { ...posture, confirmed: true }
@@ -1110,6 +1128,7 @@
     state.selectedBoxId = event.target.value || null;
     renderVisibleBoxes(state.status?.visible_boxes);
     renderGuidedWorkflow();
+    scheduleGuidedStep();
     drawMap();
   });
   byId("use-manual-place-pose").addEventListener("change", syncManualPlacePoseFields);
