@@ -25,11 +25,13 @@ function fixture(kind, fast = false, completionStatus = "SUCCEEDED") {
     byId: (id) => fields[id] ||= { checked: false },
     window: { confirm: (message) => { confirmations.push(message); return true; } },
     setError: (message) => { context.error = message; },
+    applyStatus: (status) => { state.status = status; context.updateGuidedWorkflow(); },
     postureTarget: () => ({ height: 0.48, waist_yaw: 0.2 }),
     manualPlacePoseEnabled: () => false,
-    api: async (path, options) => {
-      const payload = JSON.parse(options.body);
+    api: async (path, options = {}) => {
+      const payload = JSON.parse(options.body || "{}");
       calls.push({ path, payload });
+      if (path === "/api/status") return state.status;
       if (path === "/api/unlock/execution") return {};
       if (path === "/api/cancel") return { operation_ids: ["active"] };
       const operation = { id: `operation-${calls.length}`, kind: payload.kind || "set_locomanipulation_posture", status: "ACTIVE" };
@@ -124,6 +126,13 @@ async function fullSequence(kind, fast = false) {
   await heightFailure.finish("SUCCEEDED", false);
   assert.equal(heightFailure.state.guidedWorkflow.failed, true);
   assert.equal(heightFailure.commands().length, 4, "A failed height reset must prevent Undock");
+  await heightFailure.context.continueGuidedWorkflow();
+  await flush();
+  assert.equal(heightFailure.commands().length, 5);
+  assert.equal(heightFailure.commands()[4].path, "/api/posture",
+    "Continue must retry Default Height without repeating Dock or Pick");
+  await heightFailure.finish();
+  assert.equal(heightFailure.commands()[5].payload.kind, "undock");
 
   const paused = fixture("pick");
   await paused.context.advanceGuidedWorkflow();
@@ -200,6 +209,49 @@ async function fullSequence(kind, fast = false) {
   await stale.finish();
   assert.equal(stale.commands().length, 2, "An expired detection cannot authorize Pick");
 
+  const rejectedPick = fixture("pick");
+  const rejectedApi = rejectedPick.context.api;
+  let rejectPick = true;
+  rejectedPick.context.api = async (path, options) => {
+    if (path === "/api/actions" && JSON.parse(options.body).kind === "pick" && rejectPick) {
+      throw new Error("The selected box is no longer a fresh visible detection; select it again");
+    }
+    return rejectedApi(path, options);
+  };
+  await rejectedPick.context.advanceGuidedWorkflow();
+  await rejectedPick.finish();
+  await rejectedPick.finish();
+  assert.equal(rejectedPick.state.guidedWorkflow.failed, true);
+  assert.equal(rejectedPick.state.guidedWorkflow.resumeBlocked, false);
+  rejectPick = false;
+  rejectedPick.state.selectedBoxId = "replacement-box";
+  rejectedPick.state.status.visible_boxes.boxes = [{ instance_id: "replacement-box" }];
+  await rejectedPick.context.continueGuidedWorkflow();
+  await flush();
+  assert.deepEqual(rejectedPick.commands().map((call) => call.payload.kind || "posture"),
+    ["fine_align", "posture", "pick"]);
+  assert.equal(rejectedPick.commands()[2].payload.instance_id, "replacement-box");
+
+  const refreshed = fixture("pick");
+  const refreshApi = refreshed.context.api;
+  refreshed.context.api = async (path, options) => {
+    if (path === "/api/status") refreshed.state.status.visible_boxes.fresh = false;
+    return refreshApi(path, options);
+  };
+  await refreshed.context.advanceGuidedWorkflow();
+  await refreshed.finish();
+  await refreshed.finish();
+  assert.equal(refreshed.commands().length, 2,
+    "A detection that expired since the browser snapshot must block Pick before submission");
+
+  const retryState = fixture("pick", true, "ABORTED");
+  await retryState.context.advanceGuidedWorkflow();
+  await flush();
+  retryState.state.status.manipulation_state.state = "UNKNOWN";
+  await retryState.context.continueGuidedWorkflow();
+  assert.equal(retryState.commands().length, 1);
+  assert.match(retryState.context.error, /expected EMPTY/);
+
   const invisiblePlace = fixture("place", true);
   invisiblePlace.state.selectedBoxId = null;
   invisiblePlace.state.status.visible_boxes = { fresh: false, boxes: [] };
@@ -232,6 +284,11 @@ async function fullSequence(kind, fast = false) {
   await cancel.finish();
   assert.equal(cancel.commands().length, 1, "Stop must prevent all subsequent commands");
   assert.equal(cancel.calls.at(-1).path, "/api/cancel");
+  await cancel.context.continueGuidedWorkflow();
+  await flush();
+  assert.equal(cancel.commands().length, 2);
+  assert.equal(cancel.commands()[1].path, "/api/posture",
+    "A stopped command that subsequently succeeded must not be replayed");
 
   const inFlight = fixture("pick");
   let release;
@@ -253,6 +310,8 @@ async function fullSequence(kind, fast = false) {
   lost.state.status.operations = [];
   lost.context.updateGuidedWorkflow();
   assert.equal(lost.state.guidedWorkflow.failed, true);
+  await lost.context.continueGuidedWorkflow();
+  assert.equal(lost.commands().length, 1, "Lost operation history must block continuation");
 
   const newest = fixture("pick");
   newest.state.status.operations.unshift({ id: "navigation-2", kind: "navigate", status: "ACTIVE" });

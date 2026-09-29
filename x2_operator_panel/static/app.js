@@ -727,9 +727,10 @@
       default_height: "Default Height", undock: "Undock" })[step];
   }
 
-  function failGuidedWorkflow(workflow, message) {
+  function failGuidedWorkflow(workflow, message, resumeBlocked = false) {
     workflow.failed = true;
     workflow.message = message;
+    workflow.resumeBlocked = resumeBlocked;
   }
 
   function updateGuidedWorkflow() {
@@ -740,7 +741,7 @@
       if (!operation) {
         if (workflow.operationSeen) {
           workflow.operationId = null;
-          failGuidedWorkflow(workflow, `${workflow.label} stopped: operation history was lost. Verify the robot state before starting again.`);
+          failGuidedWorkflow(workflow, `${workflow.label} stopped: operation history was lost. Verify the robot state before starting again.`, true);
         }
         return;
       }
@@ -748,7 +749,8 @@
       if (activeStatuses.includes(operation.status)) return;
       workflow.operationId = null;
       if (operation.status !== "SUCCEEDED" || operation.result?.success === false) {
-        failGuidedWorkflow(workflow, `${workflow.label} stopped at ${guidedStepLabel(guidedSteps[workflow.step], workflow.label)}: ${operation.result?.message || operation.detail || operation.status}`);
+        failGuidedWorkflow(workflow, `${workflow.label} stopped at ${guidedStepLabel(guidedSteps[workflow.step], workflow.label)}: ${operation.result?.message || operation.detail || operation.status}`,
+          ["OUTCOME_UNKNOWN", "ERROR"].includes(operation.status));
         return;
       }
       workflow.step += 1;
@@ -814,6 +816,10 @@
       (state.status?.operations || []).some((operation) => activeStatuses.includes(operation.status));
     const running = workflow && !workflow.failed && !workflow.completed;
     byId("stop-guided-workflow").disabled = !running || workflow.cancelRequested;
+    const continueButton = byId("continue-guided-workflow");
+    continueButton.disabled = !workflow?.failed || workflow.resumeBlocked || active || state.guidedSubmitting || byId("plan-only").checked;
+    continueButton.title = workflow?.resumeBlocked ? "Command outcome is unknown; verify robot state before restarting."
+      : "Resume at the failed stage after verifying robot state";
     if (running) {
       const stepLabel = guidedStepLabel(guidedSteps[workflow.step], workflow.label);
       button.textContent = `Running ${workflow.label}: ${stepLabel}`;
@@ -875,13 +881,26 @@
           ...(workflow.placeTarget ? { place_pose: workflow.placeTarget } : {}) };
     state.guidedSubmitting = true;
     renderGuidedWorkflow();
+    let submittingCommand = false;
     try {
       // The initial confirmation authorizes this sequence. Renew the existing
       // one-shot unlock immediately before each command, so long actions do not
       // require manual unlocks or leave a long-lived physical-motion unlock.
       await api("/api/unlock/execution", { method: "POST", body: JSON.stringify({ confirmed: true }) });
       if (workflow.cancelRequested || state.guidedWorkflow !== workflow || state.authenticated === false) return;
-      if (guidedWaitReason(workflow)) return;
+      if (step === "manipulate" && workflow.kind === "pick") {
+        // The browser snapshot can outlive the detection freshness window.
+        applyStatus(await api("/api/status"));
+        if (workflow.cancelRequested || state.guidedWorkflow !== workflow || state.authenticated === false) return;
+      }
+      if (guidedWaitReason(workflow)) {
+        if (step === "manipulate" && workflow.kind === "pick" && !guidedPickId(workflow)) {
+          // No Pick has been sent yet, so a new detection can be selected.
+          workflow.instanceId = null;
+        }
+        return;
+      }
+      submittingCommand = true;
       const response = await api(postureStep ? "/api/posture" : "/api/actions", {
         method: "POST", body: JSON.stringify(payload),
       });
@@ -894,11 +913,61 @@
         updateGuidedWorkflow();
       }
     } catch (error) {
-      failGuidedWorkflow(workflow, `${workflow.label} stopped at ${guidedStepLabel(step, workflow.label)}: ${error.message}`);
+      const staleSelection = error.message === "The selected box is no longer a fresh visible detection; select it again";
+      failGuidedWorkflow(workflow, `${workflow.label} stopped at ${guidedStepLabel(step, workflow.label)}: ${error.message}`,
+        submittingCommand && !staleSelection);
       setError(error.message);
     } finally {
       state.guidedSubmitting = false;
-      if (workflow.cancelRequested) failGuidedWorkflow(workflow, `${workflow.label} sequence stopped. Verify the active command outcome before restarting.`);
+      if (workflow.cancelRequested) failGuidedWorkflow(workflow, `${workflow.label} sequence stopped. Verify the active command outcome before restarting.`, workflow.resumeBlocked);
+      renderGuidedWorkflow();
+      scheduleGuidedStep();
+    }
+  }
+
+  async function continueGuidedWorkflow() {
+    const workflow = state.guidedWorkflow;
+    if (!workflow?.failed || workflow.resumeBlocked || state.guidedSubmitting) return;
+    state.guidedSubmitting = true;
+    try {
+      applyStatus(await api("/api/status"));
+      if (state.guidedWorkflow !== workflow || state.authenticated === false) return;
+      if (byId("plan-only").checked) throw new Error("Turn off Plan only to continue the physical sequence");
+      if (state.status?.navigation?.goal_status?.active ||
+          (state.status?.operations || []).some((operation) => activeStatuses.includes(operation.status))) {
+        throw new Error("Wait for active motion to finish before continuing");
+      }
+      let nextStep = workflow.step;
+      if (workflow.operationId) {
+        const operation = state.status?.operations?.find((item) => item.id === workflow.operationId);
+        if (!operation || ["ERROR", "OUTCOME_UNKNOWN"].includes(operation.status)) {
+          workflow.resumeBlocked = true;
+          throw new Error("Command outcome is unknown; verify robot state before restarting");
+        }
+        if (operation.status === "SUCCEEDED" && operation.result?.success !== false) nextStep += 1;
+      }
+      const expectedState = workflow.kind === "pick"
+        ? (nextStep <= guidedSteps.indexOf("manipulate") ? "EMPTY" : "HOLDING")
+        : (nextStep <= guidedSteps.indexOf("manipulate") ? "HOLDING" : "EMPTY");
+      if (state.status?.manipulation_state?.state !== expectedState) {
+        throw new Error(`Cannot retry this stage in the current manipulation state; expected ${expectedState}`);
+      }
+      const missingNavStatus = !state.status?.navigation?.goal_status?.available;
+      const label = guidedStepLabel(guidedSteps[nextStep], workflow.label) || "completion";
+      if (!window.confirm(`Continue ${workflow.label} from ${label}? Verify robot state before retrying. Remaining steps will run automatically.${missingNavStatus ? " Confirm Nav2 is idle." : ""}`)) return;
+      workflow.step = nextStep;
+      workflow.failed = false;
+      workflow.cancelRequested = false;
+      workflow.operationId = null;
+      workflow.operationSeen = false;
+      workflow.message = "";
+      workflow.confirmNav2Idle = missingNavStatus;
+      workflow.completed = nextStep === guidedSteps.length;
+      if (guidedSteps[nextStep] === "manipulate" && workflow.kind === "pick") workflow.instanceId = null;
+      setError("");
+    } catch (error) { setError(error.message); }
+    finally {
+      state.guidedSubmitting = false;
       renderGuidedWorkflow();
       scheduleGuidedStep();
     }
@@ -1136,6 +1205,7 @@
   byId("place-form").addEventListener("submit", (event) => { event.preventDefault(); submitManipulation("place"); });
   byId("dock-manipulate-undock").addEventListener("click", advanceGuidedWorkflow);
   byId("stop-guided-workflow").addEventListener("click", stopGuidedWorkflow);
+  byId("continue-guided-workflow").addEventListener("click", continueGuidedWorkflow);
   byId("plan-only").addEventListener("change", renderGuidedWorkflow);
   byId("move-carry-a").addEventListener("click", () => submitManipulation("move_carry_pose", { target_pose: 0 }));
   byId("move-carry-b").addEventListener("click", () => submitManipulation("move_carry_pose", { target_pose: 1 }));

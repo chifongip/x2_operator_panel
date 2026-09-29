@@ -238,6 +238,15 @@ not change the running sequence. Box selection is resolved before Pick after
 docking. A failed or canceled stage stops the sequence,
 including a failed height reset, which prevents guided undocking. Use navigation
 separately when moving between pickup and drop-off locations.
+**Continue sequence** refreshes the robot status, asks for confirmation, and
+retries the failed stage while preserving the completed stages and captured
+posture/place targets. After a stale-selection rejection at Pick, select a fresh
+box and continue; Dock and Set Height are not repeated. Continuing requires no
+active motion and the manipulation state expected before that stage. Unknown
+command outcomes or lost operation history block continuation. If a stopped
+command subsequently reports success, Continue advances past that completed
+stage instead of replaying it. **Continue task** remains the control for a
+manipulation action that is still paused rather than terminally failed.
 **Stop sequence** prevents further steps and requests cancellation of the active
 action. A posture service already in progress cannot be canceled; it finishes
 without starting the following step. A paused Pick/Place action holds the
@@ -407,6 +416,17 @@ remain collision obstacles.
 The panel expires visible detections after `box_states_freshness_sec` (default
 0.5 s) and projects `base_link` detections onto the map. Its legacy
 `/box_pose` marker remains available for older single-box localizers.
+This freshness window measures time since receipt of each box detection; it
+does not start at docking completion. The combo has no detection wait timeout:
+it waits before Pick until a fresh target is available or the operator stops it.
+Browser status is published at 1 Hz by default, so the combo requests a fresh
+status snapshot immediately before submitting Pick. The ROS gateway still
+checks freshness at submission and can reject a detection that expires during
+the HTTP round trip. The freshness setting can be supplied at launch, for example
+`ros2 launch x2_operator_panel operator_panel.launch.py box_states_freshness_sec:=0.5`.
+Choose any larger window using the measured detector update interval and
+acceptable pose age; increasing it also allows older object poses. The existing
+configured freshness values are unchanged by this workflow update.
 
 ## Future improvement
 
