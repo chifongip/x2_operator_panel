@@ -9,6 +9,7 @@ import unittest
 from unittest.mock import patch
 
 from builtin_interfaces.msg import Time
+from action_msgs.msg import GoalStatus
 from agibot_x2_manipulation_msgs.action import MoveCarryPose
 from agibot_x2_manipulation_msgs.msg import BoxState, BoxStateArray
 from agibot_x2_manipulation_msgs.srv import (
@@ -24,6 +25,7 @@ from x2_operator_panel.ros_gateway import (
     _diagnostic_level_as_int,
     _display_telemetry_qos,
 )
+from x2_operator_panel.manipulation_timing import ManipulationTiming
 from rclpy.qos import DurabilityPolicy, ReliabilityPolicy
 from x2_navigation.action import FineAlign, Undock
 
@@ -69,6 +71,27 @@ class FakeServiceClient:
 
 
 class RosGatewayTest(unittest.TestCase):
+    def test_controller_status_callback_updates_current_task_timer(self):
+        node = object.__new__(OperatorPanelNode)
+        node._lock = threading.RLock()
+        node._manipulation_timing = ManipulationTiming()
+        node._manipulation_timing.observe_task(
+            {"task_id": "task", "status": "running", "phase": "", "attempt": 0},
+            1.0,
+        )
+        goal = SimpleNamespace(
+            goal_info=SimpleNamespace(goal_id=SimpleNamespace(uuid=bytes(range(16)))),
+            status=GoalStatus.STATUS_EXECUTING,
+        )
+        with patch("x2_operator_panel.ros_gateway.time.monotonic", return_value=2.0):
+            node._on_manipulation_controller_status(SimpleNamespace(status_list=[goal]))
+        goal.status = GoalStatus.STATUS_SUCCEEDED
+        with patch("x2_operator_panel.ros_gateway.time.monotonic", return_value=5.0):
+            node._on_manipulation_controller_status(SimpleNamespace(status_list=[goal]))
+        self.assertEqual(
+            node._manipulation_timing.snapshot(6.0)["controller_execution_sec"], 3.0
+        )
+
     def test_operation_snapshot_does_not_change_with_live_feedback(self):
         operation = Operation("dock", "fine_align", time.time())
         operation.feedback = {"current_error": {"x": 0.1}}
@@ -1215,6 +1238,7 @@ class ContinueManipulationTest(unittest.TestCase):
             "task_id": bytes(range(16)).hex(), "pause_id": 2,
             "status": "paused", "can_continue": True, "action": "pick",
         }
+        node._manipulation_timing = ManipulationTiming()
         node._continue_pending = False
         node._continue_request_id = None
         node._continue_deadline = None

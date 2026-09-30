@@ -1114,6 +1114,14 @@
     byId("manipulation-task-summary").textContent = task.task_id
       ? `${task.status}: ${task.phase || task.action}; attempt ${task.attempt || 0}/${task.maximum_attempts || 0}; object ${task.object_disposition || "unknown"}; completed ${task.last_completed_phase || "none"}`
       : "No active task";
+    const elapsed = Number.isFinite(task.task_elapsed_sec)
+      ? `${task.task_elapsed_sec.toFixed(1)} s` : "—";
+    const controller = Number.isFinite(task.controller_execution_sec)
+      ? `${task.controller_execution_sec.toFixed(1)} s (${task.controller_goal_count || 0} trajectories)`
+      : "—";
+    byId("manipulation-task-timing").textContent =
+      `Task elapsed: ${elapsed} · Controller execution: ${controller}` +
+      (task.timing_partial ? " · Partial: panel joined mid-task" : "");
     byId("manipulation-task-warning").textContent = task.continue_error || task.failure || "";
     const submitting = state.continueRequest?.task_id === task.task_id &&
       state.continueRequest?.pause_id === task.pause_id;

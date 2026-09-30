@@ -487,7 +487,14 @@ colcon test-result --verbose
 
 The **Current task** section displays the server's phase, retry count, last
 completed phase, object disposition, and detailed planning warning. Recoverable
-failures retry automatically while the original action remains active. If the
+failures retry automatically while the original action remains active. The
+section also displays two passive monotonic timings: **Task elapsed** runs from
+the first observed task status to its terminal status (including planning and
+pauses), while **Controller execution** sums observed `EXECUTING` to terminal
+intervals for the dual-arm trajectory controller. The panel refreshes them on
+its existing status cadence, creates no timing log, and labels a task partial
+when the panel joined after it started. Status-message delivery adds small
+measurement uncertainty; controller time is not the full task duration. If the
 server pauses after exhausting retries, **Continue task** requests replanning of
 the unfinished phase. **Cancel task** uses ROS action cancellation for the exact
 task UUID, including tasks started outside this panel.
@@ -503,6 +510,7 @@ paused.
 ROS interfaces:
 
 - `/manipulation_task_status`: `agibot_x2_manipulation_msgs/msg/ManipulationTaskStatus`
+- `/dual_arm_controller/follow_joint_trajectory/_action/status`: `action_msgs/msg/GoalStatusArray`
 - `/continue_manipulation`: `agibot_x2_manipulation_msgs/srv/ContinueManipulation`
 
 Authenticated HTTP endpoints:

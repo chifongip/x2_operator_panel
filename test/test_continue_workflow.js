@@ -20,6 +20,17 @@ vm.runInContext(fragment, context);
   assert.equal(fields["cancel-manipulation"].disabled, false);
   assert.equal(fields["manipulation-task-warning"].textContent, "no route");
   assert.match(fields["manipulation-task-summary"].textContent, /object attached/);
+  context.renderManipulationTask({ ...task, task_elapsed_sec: 12.35,
+    controller_execution_sec: 4.24, controller_goal_count: 2, timing_partial: true });
+  assert.equal(fields["manipulation-task-timing"].textContent,
+    "Task elapsed: 12.3 s · Controller execution: 4.2 s (2 trajectories) · Partial: panel joined mid-task");
+  context.renderManipulationTask({ ...task, task_elapsed_sec: 25,
+    controller_execution_sec: 7, controller_goal_count: 2, status: "completed" });
+  assert.equal(fields["manipulation-task-timing"].textContent,
+    "Task elapsed: 25.0 s · Controller execution: 7.0 s (2 trajectories)");
+  context.renderManipulationTask({ status: "idle" });
+  assert.equal(fields["manipulation-task-timing"].textContent,
+    "Task elapsed: — · Controller execution: —");
   await context.continueManipulation();
   assert.equal(calls[0].path, "/api/manipulation/continue");
   assert.deepEqual(calls[0].payload, { task_id: "task", pause_id: 3 });

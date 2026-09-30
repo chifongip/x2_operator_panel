@@ -58,6 +58,8 @@ from std_msgs.msg import Float32
 from tf2_ros import Buffer, TransformException, TransformListener
 import yaml
 
+from x2_operator_panel.manipulation_timing import ManipulationTiming
+
 
 _ACTIVE_STATUSES = {"SUBMITTING", "ACTIVE", "CANCEL_REQUESTED"}
 _GOAL_STATUS_NAMES = {
@@ -505,6 +507,7 @@ class OperatorPanelNode(Node):
         self._camera_last_encoded_monotonic: dict[str, float] = {}
         self._manipulation_state = {"state": "UNKNOWN", "detail": "No state received"}
         self._manipulation_task = {"status": "idle", "can_continue": False}
+        self._manipulation_timing = ManipulationTiming()
         self._continue_pending = False
         self._continue_request_id = None
         self._continue_deadline = None
@@ -650,6 +653,14 @@ class OperatorPanelNode(Node):
         telemetry_qos = _display_telemetry_qos()
         self.create_subscription(
             ManipulationTaskStatus, "/manipulation_task_status", self._on_manipulation_task, state_qos
+        )
+        # Only the action status stream is needed; no additional polling node
+        # or persistent log is created for execution timing.
+        self.create_subscription(
+            GoalStatusArray,
+            "/dual_arm_controller/follow_joint_trajectory/_action/status",
+            self._on_manipulation_controller_status,
+            state_qos,
         )
         self.create_subscription(
             ManipulationState, "/manipulation_state", self._on_manipulation_state, state_qos
@@ -857,6 +868,7 @@ class OperatorPanelNode(Node):
                 "manipulation_state": dict(self._manipulation_state),
                 "manipulation_task": {
                     **getattr(self, "_manipulation_task", {"status": "idle"}),
+                    **self._manipulation_timing.snapshot(time.monotonic()),
                     "continue_service_ready": (getattr(self, "_continue_client", None) is not None
                                                and self._continue_client.service_is_ready()),
                     "continue_pending": getattr(self, "_continue_pending", False),
@@ -1703,6 +1715,7 @@ class OperatorPanelNode(Node):
             )
         }
         with self._lock:
+            self._manipulation_timing.observe_task(task, time.monotonic())
             previous = self._manipulation_task
             if (task["task_id"] != previous.get("task_id")
                     or task["pause_id"] != previous.get("pause_id")
@@ -1719,6 +1732,20 @@ class OperatorPanelNode(Node):
                     operation.stage = f"{task['status']}/{task['phase']}"
                     operation.detail = task["failure"] or f"Object: {task['object_disposition']}"
                     operation.feedback["manipulation_task"] = dict(task)
+
+    def _on_manipulation_controller_status(self, message: GoalStatusArray) -> None:
+        with self._lock:
+            now = time.monotonic()
+            terminal = {
+                GoalStatus.STATUS_SUCCEEDED,
+                GoalStatus.STATUS_CANCELED,
+                GoalStatus.STATUS_ABORTED,
+            }
+            for goal in message.status_list:
+                goal_id = bytes(goal.goal_info.goal_id.uuid).hex()
+                self._manipulation_timing.observe_controller(
+                    goal_id, goal.status, now, GoalStatus.STATUS_EXECUTING, terminal
+                )
 
     def _continue_manipulation(self, payload: dict[str, Any]) -> dict[str, Any]:
         with self._lock:
