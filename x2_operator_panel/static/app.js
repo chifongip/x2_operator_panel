@@ -18,6 +18,9 @@
     executionUnlockDeadline: null,
     executionUnlockKnown: false,
     executionTimer: null,
+    savedPlans: new Map(),
+    savedOperationEvents: new Set(),
+    savedContext: null,
   };
   const cameraStreams = [
     { endpoint: "/api/cameras/front-center", imageId: "front-center-image", statusId: "front-center-camera-status", etag: null, objectUrl: null, inFlight: false },
@@ -42,6 +45,10 @@
     if (["/api/actions", "/api/posture"].includes(path) &&
         (body?.operation?.plan_only === false || body?.operation?.kind === "reset")) {
       syncExecutionUnlock(0);
+    }
+    if (options.method === "POST" && ["/api/recover-state", "/api/posture", "/api/box-profiles/reload"].includes(path)) {
+      const dryRun = path === "/api/box-profiles/reload" && JSON.parse(options.body || "{}").dry_run;
+      if (!dryRun) {state.savedPlans.clear(); renderSavedPlans();}
     }
     return body;
   }
@@ -419,6 +426,7 @@
     state.executionUnlockKnown = Number.isFinite(remaining) && remaining >= 0;
     state.executionUnlockDeadline = state.executionUnlockKnown ? performance.now() + remaining * 1000 : null;
     renderExecutionState();
+    renderSavedPlans();
     renderGuidedWorkflow();
     if (!(executionUnlockRemaining() > 0) && state.executionTimer !== null) {
       window.clearInterval(state.executionTimer);
@@ -427,6 +435,7 @@
     if (state.authenticated && executionUnlockRemaining() > 0 && state.executionTimer === null) {
       state.executionTimer = window.setInterval(() => {
         renderExecutionState();
+        renderSavedPlans();
         renderGuidedWorkflow();
         if (executionUnlockRemaining() <= 0) {
           window.clearInterval(state.executionTimer);
@@ -441,7 +450,9 @@
     state.executionTimer = null;
     state.executionUnlockKnown = false;
     state.executionUnlockDeadline = null;
+    state.savedPlans.clear();
     renderExecutionState();
+    renderSavedPlans();
     renderGuidedWorkflow();
   }
 
@@ -619,7 +630,58 @@
     if (Number.isFinite(commandedYawSpeed)) parts.push(`yaw ${commandedYawSpeed.toFixed(3)} rad/s`);
     return parts.join(", ");
   }
+  function renderSavedPlans() {
+    const select = byId("saved-plan-select");
+    const button = byId("execute-saved-plan");
+    if (!select || !button) return;
+    const previous = select.value;
+    select.innerHTML = Array.from(state.savedPlans.values()).map((plan) => {
+      const p = plan.result.achieved_pose;
+      const target = p ? ` → (${p.x.toFixed(3)}, ${p.y.toFixed(3)}, ${p.z.toFixed(3)})` : "";
+      return `<option value="${escapeHtml(plan.result.plan_id)}">${escapeHtml(plan.kind + " / " + plan.result.planning_mode + (plan.detail ? " / " + plan.detail : "") + target)}</option>`;
+    }).join("") || '<option value="">Run Plan only to save a complete action</option>';
+    if (Array.from(select.options).some((option) => option.value === previous)) select.value = previous;
+    const busy = ["running", "retrying", "paused"].includes(state.status?.manipulation_task?.status) ||
+      (state.status?.operations || []).some((operation) => ["SUBMITTING", "ACTIVE", "CANCEL_REQUESTED"].includes(operation.status));
+    button.disabled = !select.value || busy || !(executionUnlockRemaining() > 0);
+  }
+
+  async function executeSavedPlan() {
+    const id = byId("saved-plan-select").value;
+    const plan = Array.from(state.savedPlans.values()).find((item) => item.result.plan_id === id);
+    if (!plan) return;
+    if (!window.confirm(`Execute saved ${plan.kind} plan (${plan.result.planning_mode}) with its stored targets?`)) return;
+    try {
+      await api("/api/actions", {method: "POST", body: JSON.stringify({kind: plan.kind,
+        plan_only: false, plan_id: id, confirmed: true})});
+      state.savedPlans.clear();
+      renderSavedPlans();
+      setError("");
+    } catch (error) {setError(error.message);}
+  }
+
   function renderOperations(operations) {
+    const posture = state.status?.locomanipulation_posture?.status;
+    const context = JSON.stringify([state.status?.manipulation_state?.state,
+      posture?.target_height, posture?.target_waist_yaw]);
+    if (state.savedContext != null && state.savedContext !== context) state.savedPlans.clear();
+    state.savedContext = context;
+    for (const kind of state.savedPlans.keys()) {
+      if (state.status?.servers?.[kind] === false) state.savedPlans.delete(kind);
+    }
+    [...(operations || [])].reverse().forEach((operation) => {
+      const event = `${operation.id}/${operation.status}`;
+      if (state.savedOperationEvents.has(event)) return;
+      state.savedOperationEvents.add(event);
+      if (operation.plan_only === false || ["reset", "recover_state", "reload_box_profiles", "set_locomanipulation_posture", "navigate", "fine_align", "undock"].includes(operation.kind)) {
+        state.savedPlans.clear();
+      }
+      if (operation.plan_only === true && operation.status === "SUCCEEDED" &&
+          operation.result?.success && operation.result?.plan_id) {
+        state.savedPlans.set(operation.kind, operation);
+      }
+    });
+    renderSavedPlans();
     byId("operations").innerHTML = (operations || []).slice(0, 15).map((operation) => {
       const message = operation.result?.message || operation.result?.error_msg || operation.detail || "--";
       const planarError = formatPlanarError(operation.result?.final_error || operation.feedback?.current_error);
@@ -781,6 +843,7 @@
       setError("");
     } catch (error) { setError(error.message); }
   }
+  byId("execute-saved-plan")?.addEventListener("click", executeSavedPlan);
   const guidedSteps = ["fine_align", "set_height", "manipulate", "default_height", "undock"];
   const activeStatuses = ["SUBMITTING", "ACTIVE", "CANCEL_REQUESTED"];
 

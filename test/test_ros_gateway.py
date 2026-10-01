@@ -71,6 +71,26 @@ class FakeServiceClient:
 
 
 class RosGatewayTest(unittest.TestCase):
+    def test_saved_goal_uses_id_and_ignores_edited_targets(self):
+        node = object.__new__(OperatorPanelNode)
+        for kind in ("pick", "place", "pick_place", "move_carry_pose"):
+            goal = node._build_manipulation_goal(kind, {
+                "plan_id": "saved-123", "place_pose": "invalid-edited-form",
+                "target_pose": 999, "instance_id": "different-box",
+            }, False)
+            self.assertEqual(goal.plan_id, "saved-123")
+            self.assertFalse(goal.plan_only)
+            if hasattr(goal, "instance_id"):
+                self.assertEqual(goal.instance_id, "")
+        with self.assertRaises(PanelCommandError):
+            node._build_manipulation_goal("pick", {"plan_id": "saved-123"}, True)
+
+    def test_saved_id_and_mode_are_returned_to_browser(self):
+        details = OperatorPanelNode._result_as_dict(SimpleNamespace(
+            success=True, plan_id="saved-123", planning_mode="pose_to_pose"))
+        self.assertEqual(details["plan_id"], "saved-123")
+        self.assertEqual(details["planning_mode"], "pose_to_pose")
+
     def test_controller_status_callback_updates_current_task_timer(self):
         node = object.__new__(OperatorPanelNode)
         node._lock = threading.RLock()

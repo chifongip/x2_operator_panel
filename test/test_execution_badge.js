@@ -12,6 +12,7 @@ const classes = new Set();
 const badge = { classList: { toggle: (name, enabled) => enabled ? classes.add(name) : classes.delete(name) } };
 const planOnly = { checked: true };
 const state = {
+  savedPlans: new Map(),
   authenticated: true, status: null, executionUnlockDeadline: null,
   executionUnlockKnown: false, executionTimer: null,
 };
@@ -24,6 +25,7 @@ const context = vm.createContext({
     clearInterval: (id) => timers.delete(id),
   },
   byId: (id) => id === "execution-state" ? badge : planOnly,
+  renderSavedPlans: () => {},
   renderGuidedWorkflow: () => { guidedRenders += 1; },
   updateGuidedWorkflow: () => {}, addPoseToTrail: () => {}, drawMap: () => {},
   renderStatus: () => context.renderExecutionState(),

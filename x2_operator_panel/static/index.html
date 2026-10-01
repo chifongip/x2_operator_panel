@@ -151,6 +151,12 @@
             <h2>Manipulation</h2>
             <label class="plan-toggle"><input id="plan-only" type="checkbox" checked>Plan only</label>
           </div>
+          <div class="saved-plan-controls">
+            <label for="saved-plan-select">Saved plan</label>
+            <select id="saved-plan-select"><option value="">Run Plan only to save a complete action</option></select>
+            <button id="execute-saved-plan" class="requires-unlock" type="button" disabled>Execute saved plan</button>
+            <p id="saved-plan-status" class="muted">Saved execution uses the stored target and planning mode.</p>
+          </div>
           <div class="visible-box-picker">
             <label for="visible-box-select">Visible box</label>
             <select id="visible-box-select" disabled>

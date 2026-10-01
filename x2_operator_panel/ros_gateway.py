@@ -1256,7 +1256,12 @@ class OperatorPanelNode(Node):
             if manipulation_state != "HOLDING":
                 raise PanelCommandError("Carry-pose transitions require manipulation state HOLDING")
         requires_execution = kind == "reset" or plan_only is False
-        instance_id = self._selected_visible_box_id(kind, payload)
+        plan_id = payload.get("plan_id", "")
+        if not isinstance(plan_id, str) or len(plan_id) > 160 or plan_id != plan_id.strip():
+            raise PanelCommandError("Saved plan ID is invalid")
+        if plan_id and (kind == "reset" or plan_only is not False):
+            raise PanelCommandError("Saved plans require plan_only: false")
+        instance_id = None if plan_id else self._selected_visible_box_id(kind, payload)
         goal = self._build_manipulation_goal(kind, payload, plan_only, instance_id)
         if requires_execution:
             if payload.get("confirmed") is not True:
@@ -1272,6 +1277,10 @@ class OperatorPanelNode(Node):
             plan_only=plan_only,
             admission_deadline=time.monotonic() + self.goal_admission_timeout_sec,
         )
+        if instance_id:
+            operation.detail = f"box={instance_id}"
+        elif kind == "move_carry_pose" and not plan_id:
+            operation.detail = "Carry A" if goal.target_pose == MoveCarryPose.Goal.CARRY_A else "Carry B"
         self._register_operation(operation)
         try:
             future = self._action_clients[kind].send_goal_async(
@@ -1414,6 +1423,16 @@ class OperatorPanelNode(Node):
         plan_only: bool | None,
         instance_id: str | None = None,
     ) -> Any:
+        plan_id = payload.get("plan_id", "")
+        if plan_id:
+            action = {"pick": Pick, "place": Place, "pick_place": PickPlace,
+                      "move_carry_pose": MoveCarryPose}.get(kind)
+            if action is None or plan_only is not False:
+                raise PanelCommandError("Saved plan execution requires a manipulation action")
+            goal = action.Goal()
+            goal.plan_only = False
+            goal.plan_id = plan_id
+            return goal
         if kind == "pick":
             goal = Pick.Goal()
             goal.instance_id = instance_id or ""
@@ -1580,6 +1599,8 @@ class OperatorPanelNode(Node):
         details: dict[str, Any] = {}
         for attribute in (
             "success",
+            "plan_id",
+            "planning_mode",
             "error_code",
             "message",
             "object_held",
