@@ -6,7 +6,7 @@ import threading
 import time
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from builtin_interfaces.msg import Time
 from action_msgs.msg import GoalStatus
@@ -163,6 +163,7 @@ class RosGatewayTest(unittest.TestCase):
         node._camera_frames = {}
         node._camera_frame_versions = {}
         node._camera_last_encoded_monotonic = {}
+        node._camera_requested_monotonic = {}
         node.camera_display_rate_hz = 1.0
         node.camera_jpeg_quality = 70
         image = Image()
@@ -174,8 +175,9 @@ class RosGatewayTest(unittest.TestCase):
 
         with patch(
             "x2_operator_panel.ros_gateway.time.monotonic",
-            side_effect=(10.0, 10.5, 11.0),
+            side_effect=(9.9, 10.0, 10.1, 10.5, 11.0),
         ):
+            self.assertIsNone(node.camera_frame("front_center"))
             node._on_camera_image("front_center", image)
             first = node.camera_frame("front_center")
             node._on_camera_image("front_center", image)
@@ -187,6 +189,76 @@ class RosGatewayTest(unittest.TestCase):
         self.assertEqual(first.etag, '"1"')
         self.assertIsNotNone(latest)
         self.assertEqual(latest.etag, '"2"')
+
+    def test_camera_subscriptions_follow_independent_browser_demand(self):
+        node = object.__new__(OperatorPanelNode)
+        node._lock = threading.RLock()
+        node._camera_requested_monotonic = {}
+        node._camera_subscriptions = {}
+        node._camera_frames = {}
+        node._camera_last_encoded_monotonic = {}
+        node.camera_display_rate_hz = 0.5
+        node.front_center_camera_topic = "/front"
+        node.throttled_camera_topic = "/throttled"
+        first_subscription, second_subscription, resumed_subscription = (
+            object(), object(), object()
+        )
+        node.create_subscription = Mock(
+            side_effect=[first_subscription, second_subscription, resumed_subscription]
+        )
+        node.destroy_subscription = Mock()
+
+        with patch("x2_operator_panel.ros_gateway.time.monotonic") as clock:
+            clock.return_value = 10.0
+            node._sync_camera_subscriptions()
+            node.create_subscription.assert_not_called()
+            self.assertIsNone(node.camera_frame("front_center"))
+            node._sync_camera_subscriptions()
+            node._sync_camera_subscriptions()
+            node.create_subscription.assert_called_once()
+            self.assertEqual(node.create_subscription.call_args.args[1], "/front")
+            callback = node.create_subscription.call_args.args[2]
+            with patch.object(node, "_on_camera_image") as receive:
+                image = Image()
+                callback(image)
+                receive.assert_called_once_with("front_center", image)
+
+            node._camera_frames["front_center"] = "cached-preview"
+            node._camera_last_encoded_monotonic["front_center"] = 10.0
+            clock.return_value = 15.9
+            node.camera_frame("throttled")
+            node._sync_camera_subscriptions()
+            self.assertEqual(node.create_subscription.call_args.args[1], "/throttled")
+            callback = node.create_subscription.call_args.args[2]
+            with patch.object(node, "_on_camera_image") as receive:
+                callback(image)
+                receive.assert_called_once_with("throttled", image)
+            node.destroy_subscription.assert_not_called()
+            clock.return_value = 16.0
+            node._sync_camera_subscriptions()
+            node.destroy_subscription.assert_called_once_with(first_subscription)
+            self.assertEqual(node._camera_frames, {})
+            self.assertEqual(node._camera_last_encoded_monotonic, {})
+            self.assertIsNone(node.camera_frame("front_center"))
+            node._sync_camera_subscriptions()
+            self.assertEqual(node.create_subscription.call_count, 3)
+            self.assertIs(node._camera_subscriptions["front_center"], resumed_subscription)
+            self.assertIs(node._camera_subscriptions["throttled"], second_subscription)
+            clock.return_value = 22.0
+            node._sync_camera_subscriptions()
+            self.assertEqual(node._camera_subscriptions, {})
+            self.assertEqual(node.destroy_subscription.call_count, 3)
+
+    def test_camera_encoding_skips_missing_or_expired_demand(self):
+        node = object.__new__(OperatorPanelNode)
+        node._lock = threading.RLock()
+        node._camera_requested_monotonic = {"front_center": 10.0}
+        node.camera_display_rate_hz = 1.0
+        with patch("x2_operator_panel.ros_gateway.time.monotonic", return_value=13.0):
+            with patch("x2_operator_panel.ros_gateway.encode_camera_image_as_jpeg") as encode:
+                node._on_camera_image("front_center", Image())
+                node._on_camera_image("throttled", Image())
+                encode.assert_not_called()
 
     @staticmethod
     def _map_transform(stamp_sec):

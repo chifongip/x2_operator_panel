@@ -505,6 +505,8 @@ class OperatorPanelNode(Node):
         self._camera_frames: dict[str, CameraFrame] = {}
         self._camera_frame_versions: dict[str, int] = {}
         self._camera_last_encoded_monotonic: dict[str, float] = {}
+        self._camera_requested_monotonic: dict[str, float] = {}
+        self._camera_subscriptions: dict[str, Any] = {}
         self._manipulation_state = {"state": "UNKNOWN", "detail": "No state received"}
         self._manipulation_task = {"status": "idle", "can_continue": False}
         self._manipulation_timing = ManipulationTiming()
@@ -714,18 +716,7 @@ class OperatorPanelNode(Node):
             self._on_diagnostics,
             telemetry_qos,
         )
-        self.create_subscription(
-            Image,
-            self.front_center_camera_topic,
-            lambda message: self._on_camera_image("front_center", message),
-            telemetry_qos,
-        )
-        self.create_subscription(
-            Image,
-            self.throttled_camera_topic,
-            lambda message: self._on_camera_image("throttled", message),
-            telemetry_qos,
-        )
+        self.create_timer(0.20, self._sync_camera_subscriptions)
         self.create_timer(0.05, self._drain_commands)
         self.create_timer(0.20, self._poll_map_pose)
         self.create_timer(0.20, self._expire_pending_operations)
@@ -744,9 +735,43 @@ class OperatorPanelNode(Node):
         return [preset.as_dict() for preset in self._presets.values()]
 
     def camera_frame(self, camera_name: str) -> CameraFrame | None:
-        """Return the latest encoded camera preview without retaining ROS data."""
+        """Renew browser demand and return the latest encoded preview."""
         with self._lock:
+            self._camera_requested_monotonic[camera_name] = time.monotonic()
             return self._camera_frames.get(camera_name)
+
+    def _camera_requested_locked(self, camera_name: str, now: float) -> bool:
+        requested = self._camera_requested_monotonic.get(camera_name)
+        # Allow three refresh periods for network/browser scheduling jitter.
+        timeout = max(3.0, 3.0 / self.camera_display_rate_hz)
+        return requested is not None and now - requested < timeout
+
+    def _sync_camera_subscriptions(self) -> None:
+        """Manage display-only subscriptions on the ROS executor thread."""
+        now = time.monotonic()
+        topics = {
+            "front_center": self.front_center_camera_topic,
+            "throttled": self.throttled_camera_topic,
+        }
+        with self._lock:
+            requested = {
+                name: self._camera_requested_locked(name, now) for name in topics
+            }
+        for name, topic in topics.items():
+            if requested[name] and name not in self._camera_subscriptions:
+                self._camera_subscriptions[name] = self.create_subscription(
+                    Image,
+                    topic,
+                    lambda message, camera_name=name: self._on_camera_image(
+                        camera_name, message
+                    ),
+                    _display_telemetry_qos(),
+                )
+            elif not requested[name] and name in self._camera_subscriptions:
+                self.destroy_subscription(self._camera_subscriptions.pop(name))
+                with self._lock:
+                    self._camera_frames.pop(name, None)
+                    self._camera_last_encoded_monotonic.pop(name, None)
 
     def request(
         self, name: str, payload: dict[str, Any], timeout_sec: float = 5.0
@@ -2352,6 +2377,8 @@ class OperatorPanelNode(Node):
         """Rate-limit raw camera frames, then encode only the selected frame."""
         now = time.monotonic()
         with self._lock:
+            if not self._camera_requested_locked(camera_name, now):
+                return
             last_encoded = self._camera_last_encoded_monotonic.get(camera_name)
             if (
                 last_encoded is not None

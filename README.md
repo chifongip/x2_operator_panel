@@ -60,7 +60,12 @@ authenticated JPEG responses, not through the status WebSocket. By default,
 the panel encodes and polls each preview at no more than 1 Hz with JPEG quality
 70; unchanged frames use HTTP conditional requests and do not resend the JPEG.
 Use the checked-by-default **Show previews** control to pause both browser image
-requests entirely while leaving the rest of the panel active.
+requests entirely while leaving the rest of the panel active. Raw camera
+subscriptions and JPEG encoding are demand-driven: they start when an
+authenticated browser requests each preview and stop after requests cease for
+three refresh periods (at least three seconds). This also stops camera work
+when no browser is connected. On first opening or resuming previews, the browser
+may show **Waiting for image** until the next refresh.
 
 For a lower-bandwidth remote view, for example 0.5 Hz at JPEG quality 60:
 
@@ -80,11 +85,12 @@ not already provide Pillow:
 sudo apt install python3-pil
 ```
 
-These parameters limit Pillow encoding and browser traffic only. They do not
-alter AprilTag detection or reduce DDS traffic from a camera publisher to a
-panel running on another machine. Run the panel on the robot with the camera
-publishers, or rate-limit the source image pipeline, when that DDS link must
-also be reduced.
+While previews are active, these parameters limit Pillow encoding and browser
+traffic only. They do not alter AprilTag detection or reduce the raw DDS frame
+rate from a camera publisher to a panel running on another machine. Paused
+previews unsubscribe from those streams after the demand timeout. Run the panel
+on the robot with the camera publishers, or rate-limit the source image pipeline,
+when that DDS link must also be reduced.
 
 The default address is `http://127.0.0.1:8080`. The server keeps this loopback
 default so credentials and session cookies do not cross a LAN over cleartext
