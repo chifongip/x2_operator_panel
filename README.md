@@ -233,6 +233,29 @@ selected named destination always needs a confirmation before the panel sends
 the real Nav2 goal. Navigation is rejected unless the manipulation state is
 known and the `map -> base_link` transform is current.
 
+The panel admits one task at a time across navigation, Fine Align, Undock,
+and every manipulation action, including plan-only goals, saved-plan execution,
+carry poses, and reset. A goal reserves the slot while submitting and keeps it
+until a terminal result; a cancellation request or acceptance timeout does not
+release it. Running, retrying, or paused `/manipulation_task_status` reports and
+active goals observed on either Nav2 action or any panel action's status topic
+also block new tasks, including tasks started by another ROS client. Manual
+Nav2-idle confirmation cannot override a known active task of any kind.
+Recovery, profile reload, posture commands, initial-pose changes, and costmap
+clearing use the same admission check. A timed-out service's unknown outcome
+keeps the slot reserved until its late response establishes completion.
+Action-result transport errors retain the task slot and retry result retrieval.
+An unknown goal-acceptance outcome also retains the slot; if it cannot be
+resolved, verify and stop the outstanding task before restarting the panel.
+`task_admission` in the status snapshot exposes the blocker to the browser.
+Continue and Cancel operate on the existing task and remain available.
+
+This admission policy governs commands sent through the panel. The navigation,
+docking, and manipulation servers do not share a global task arbiter; concurrent
+requests sent directly by other ROS clients can race across those servers before
+their status reaches the panel. System-wide exclusivity requires a shared
+admission authority in the underlying stacks.
+
 The **Move to Carry A** and **Move to Carry B** controls submit the manual
 `/move_carry_pose` manipulation action. They are available only while the
 reported manipulation state is `HOLDING`; both use the same plan-only toggle,
@@ -347,8 +370,19 @@ holds new navigation requests until a `map -> base_link` transform is stamped
 after the publication and matches the requested pose within 0.5 m and 0.35 rad
 (both configurable launch parameters). A 10-second settle timeout is reported
 and remains a navigation interlock until localization is checked and a new
-initial pose is supplied. Nav2 action status expires after three seconds; the
-operator-idle confirmation is required again until a fresh status arrives. A
+initial pose is supplied. Nav2 action status is event-driven and does not expire
+during silence. The panel monitors both `/navigate_to_pose/_action/status` and
+`/navigate_through_poses/_action/status`, retaining each state while its action
+server is ready and its DDS status-publisher identity is unchanged. A server
+disconnect or publisher replacement clears that action's cached state. A known
+active goal on either action blocks all new tasks, even with operator idle
+confirmation. The second action is optional
+until discovered; once discovered, missing status from it prevents a combined
+Idle indication. Before the first status, readiness alone does not establish
+Idle: the existing operator-idle confirmation remains required. Hover over the
+goal state to see each action's state and the age of its last message.
+`nav_goal_status_freshness_sec` remains accepted for launch compatibility but is
+deprecated and no longer expires action state. A
 map goal sends one confirmed `NavigateToPose`
 action; named preset buttons remain available for surveyed locations. The same
 additional idle confirmation is required for either kind of navigation goal

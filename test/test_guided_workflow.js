@@ -157,7 +157,18 @@ async function fullSequence(kind, fast = false) {
   await flush();
   assert.equal(paused.commands().length, 3, "A paused manipulation action must hold the sequence");
   await paused.finish(); // Continued action eventually succeeds.
+  assert.equal(paused.commands().length, 3, "A still-paused task report must block the next task");
+  paused.state.status.manipulation_task = { status: "completed" };
+  paused.context.updateGuidedWorkflow();
+  await flush();
   assert.equal(paused.commands().length, 4);
+
+  const externalTask = fixture("pick");
+  externalTask.state.status.task_admission = { blocked: true, detail: "Finish or cancel the active fine_align task first" };
+  externalTask.context.renderGuidedWorkflow();
+  assert.equal(externalTask.fields["dock-manipulate-undock"].disabled, true);
+  await externalTask.context.advanceGuidedWorkflow();
+  assert.equal(externalTask.commands().length, 0, "An external task blocks a new sequence");
 
   const delayedState = fixture("pick");
   await delayedState.context.advanceGuidedWorkflow();

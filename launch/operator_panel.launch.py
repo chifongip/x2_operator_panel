@@ -97,7 +97,10 @@ def generate_launch_description():
             ),
             DeclareLaunchArgument("global_path_freshness_sec", default_value="3.0"),
             DeclareLaunchArgument("global_path_max_points", default_value="500"),
-            DeclareLaunchArgument("nav_goal_status_freshness_sec", default_value="3.0"),
+            DeclareLaunchArgument(
+                "nav_goal_status_freshness_sec", default_value="3.0",
+                description="Deprecated compatibility argument; action status no longer expires",
+            ),
             DeclareLaunchArgument(
                 "initial_pose_settle_timeout_sec", default_value="10.0"
             ),

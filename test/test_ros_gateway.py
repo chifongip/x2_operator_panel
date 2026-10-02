@@ -24,10 +24,26 @@ from x2_operator_panel.ros_gateway import (
     PanelCommandError,
     _diagnostic_level_as_int,
     _display_telemetry_qos,
+    _TASK_ACTION_NAMES,
 )
 from x2_operator_panel.manipulation_timing import ManipulationTiming
+from x2_operator_panel.navigation_status import ActionGoalStatus, NavigationGoalStatus
 from rclpy.qos import DurabilityPolicy, ReliabilityPolicy
 from x2_navigation.action import FineAlign, Undock
+
+
+def _new_panel_node():
+    node = object.__new__(OperatorPanelNode)
+    node._lock = threading.RLock()
+    node._operations = {}
+    node._manipulation_task = {"status": "idle"}
+    node._navigation_goal_status = NavigationGoalStatus()
+    node._navigation_status_clients = {}
+    node._navigation_status_subscriptions = {}
+    node._task_goal_status = ActionGoalStatus(tuple(_TASK_ACTION_NAMES.values()))
+    node._task_status_clients = {}
+    node._task_status_subscriptions = {}
+    return node
 
 
 class FakeGoalHandle:
@@ -72,7 +88,7 @@ class FakeServiceClient:
 
 class RosGatewayTest(unittest.TestCase):
     def test_saved_goal_uses_id_and_ignores_edited_targets(self):
-        node = object.__new__(OperatorPanelNode)
+        node = _new_panel_node()
         for kind in ("pick", "place", "pick_place", "move_carry_pose"):
             goal = node._build_manipulation_goal(kind, {
                 "plan_id": "saved-123", "place_pose": "invalid-edited-form",
@@ -92,7 +108,7 @@ class RosGatewayTest(unittest.TestCase):
         self.assertEqual(details["planning_mode"], "pose_to_pose")
 
     def test_controller_status_callback_updates_current_task_timer(self):
-        node = object.__new__(OperatorPanelNode)
+        node = _new_panel_node()
         node._lock = threading.RLock()
         node._manipulation_timing = ManipulationTiming()
         node._manipulation_timing.observe_task(
@@ -131,7 +147,7 @@ class RosGatewayTest(unittest.TestCase):
         self.assertEqual(_diagnostic_level_as_int(1), 1)
 
     def test_diagnostics_callback_keeps_uint8_byte_levels(self):
-        node = object.__new__(OperatorPanelNode)
+        node = _new_panel_node()
         node._lock = threading.RLock()
         node._diagnostics = []
         message = SimpleNamespace(
@@ -158,7 +174,7 @@ class RosGatewayTest(unittest.TestCase):
         self.assertEqual(qos.durability, DurabilityPolicy.VOLATILE)
 
     def test_camera_preview_encodes_rate_limited_raw_image(self):
-        node = object.__new__(OperatorPanelNode)
+        node = _new_panel_node()
         node._lock = threading.RLock()
         node._camera_frames = {}
         node._camera_frame_versions = {}
@@ -191,7 +207,7 @@ class RosGatewayTest(unittest.TestCase):
         self.assertEqual(latest.etag, '"2"')
 
     def test_camera_subscriptions_follow_independent_browser_demand(self):
-        node = object.__new__(OperatorPanelNode)
+        node = _new_panel_node()
         node._lock = threading.RLock()
         node._camera_requested_monotonic = {}
         node._camera_subscriptions = {}
@@ -250,7 +266,7 @@ class RosGatewayTest(unittest.TestCase):
             self.assertEqual(node.destroy_subscription.call_count, 3)
 
     def test_camera_encoding_skips_missing_or_expired_demand(self):
-        node = object.__new__(OperatorPanelNode)
+        node = _new_panel_node()
         node._lock = threading.RLock()
         node._camera_requested_monotonic = {"front_center": 10.0}
         node.camera_display_rate_hz = 1.0
@@ -273,7 +289,7 @@ class RosGatewayTest(unittest.TestCase):
         )
 
     def test_map_pose_freshness_uses_transform_updates_not_source_clock(self):
-        node = object.__new__(OperatorPanelNode)
+        node = _new_panel_node()
         node._lock = threading.RLock()
         node._last_map_transform_stamp = None
         node._last_map_transform_update_monotonic = None
@@ -310,7 +326,7 @@ class RosGatewayTest(unittest.TestCase):
         self.assertTrue(node._map_pose["fresh"])
 
     def test_box_pose_in_base_link_projects_into_the_map(self):
-        node = object.__new__(OperatorPanelNode)
+        node = _new_panel_node()
         node._box_pose = {
             "frame_id": "base_link",
             "x": 1.0,
@@ -339,7 +355,7 @@ class RosGatewayTest(unittest.TestCase):
         self.assertEqual(box_pose["source_frame_id"], "base_link")
 
     def test_box_pose_becomes_stale_without_new_detection(self):
-        node = object.__new__(OperatorPanelNode)
+        node = _new_panel_node()
         node._box_pose = {"frame_id": "map", "x": 1.0, "y": 2.0, "z": 0.2}
         node._box_pose_received_monotonic = 100.0
         node.box_pose_freshness_sec = 0.5
@@ -355,7 +371,7 @@ class RosGatewayTest(unittest.TestCase):
         self.assertIn("/box_pose has not updated", box_pose["detail"])
 
     def test_visible_box_states_are_cached_by_instance_and_expire(self):
-        node = object.__new__(OperatorPanelNode)
+        node = _new_panel_node()
         node._lock = threading.RLock()
         node._visible_boxes = {}
         node._box_states_received_monotonic = None
@@ -386,7 +402,7 @@ class RosGatewayTest(unittest.TestCase):
             self.assertEqual(node._fresh_visible_boxes_locked(), [])
 
     def test_pick_requires_a_current_box_selection(self):
-        node = object.__new__(OperatorPanelNode)
+        node = _new_panel_node()
         node._lock = threading.RLock()
         node._visible_boxes = {
             "tag:180": {
@@ -409,14 +425,14 @@ class RosGatewayTest(unittest.TestCase):
     def test_pick_goals_include_the_selected_visible_box_id(self):
         for kind in ("pick", "pick_place"):
             goal = OperatorPanelNode._build_manipulation_goal(
-                object.__new__(OperatorPanelNode), kind, {}, True, "tag:180"
+                _new_panel_node(), kind, {}, True, "tag:180"
             )
 
             self.assertEqual(goal.instance_id, "tag:180")
             self.assertTrue(goal.plan_only)
 
     def test_place_commands_leave_place_pose_empty(self):
-        node = object.__new__(OperatorPanelNode)
+        node = _new_panel_node()
 
         for kind in ("place", "pick_place"):
             goal = node._build_manipulation_goal(kind, {}, True)
@@ -425,7 +441,7 @@ class RosGatewayTest(unittest.TestCase):
             self.assertEqual(goal.place_pose.header.frame_id, "")
 
     def test_manual_place_pose_is_added_to_the_goal(self):
-        node = object.__new__(OperatorPanelNode)
+        node = _new_panel_node()
         manual_pose = {
             "frame_id": "base_link",
             "x": 0.35,
@@ -445,7 +461,7 @@ class RosGatewayTest(unittest.TestCase):
             self.assertAlmostEqual(goal.place_pose.pose.orientation.w, 1.0)
 
     def test_carry_pose_goal_selects_a_or_b(self):
-        node = object.__new__(OperatorPanelNode)
+        node = _new_panel_node()
 
         for target in (MoveCarryPose.Goal.CARRY_A, MoveCarryPose.Goal.CARRY_B):
             goal = node._build_manipulation_goal(
@@ -456,13 +472,13 @@ class RosGatewayTest(unittest.TestCase):
             self.assertEqual(goal.target_pose, target)
 
     def test_carry_pose_goal_rejects_an_unknown_target(self):
-        node = object.__new__(OperatorPanelNode)
+        node = _new_panel_node()
 
         with self.assertRaisesRegex(PanelCommandError, "Carry-pose target"):
             node._build_manipulation_goal("move_carry_pose", {"target_pose": 2}, True)
 
     def test_carry_pose_transition_requires_a_held_object(self):
-        node = object.__new__(OperatorPanelNode)
+        node = _new_panel_node()
         node._lock = threading.RLock()
         node._manipulation_state = {"state": "EMPTY"}
 
@@ -472,7 +488,7 @@ class RosGatewayTest(unittest.TestCase):
             )
 
     def test_timed_out_queued_command_is_not_executed_later(self):
-        node = object.__new__(OperatorPanelNode)
+        node = _new_panel_node()
         node._commands = Queue()
         node._shutting_down = False
         called = []
@@ -485,7 +501,7 @@ class RosGatewayTest(unittest.TestCase):
         self.assertEqual(called, [])
 
     def test_successful_operation_normalizes_progress_to_complete(self):
-        node = object.__new__(OperatorPanelNode)
+        node = _new_panel_node()
         node._lock = threading.RLock()
         node._audit_sink = None
         operation = Operation("completed", "pick", time.time(), progress=0.15)
@@ -501,7 +517,7 @@ class RosGatewayTest(unittest.TestCase):
         self.assertEqual(operation.status, "SUCCEEDED")
 
     def test_clear_costmaps_calls_global_and_local_services(self):
-        node = object.__new__(OperatorPanelNode)
+        node = _new_panel_node()
         node._lock = threading.RLock()
         node._operations = {}
         node._operation_history = deque(maxlen=10)
@@ -521,7 +537,7 @@ class RosGatewayTest(unittest.TestCase):
         self.assertEqual(len(node._costmap_clear_clients["local"].calls), 1)
 
     def test_clear_costmaps_reports_partial_failure(self):
-        node = object.__new__(OperatorPanelNode)
+        node = _new_panel_node()
         node._lock = threading.RLock()
         node._operations = {}
         node._operation_history = deque(maxlen=10)
@@ -539,7 +555,7 @@ class RosGatewayTest(unittest.TestCase):
         self.assertIn("global costmap: service failed", operation.result["message"])
 
     def test_clear_costmaps_requires_confirmation_and_ready_services(self):
-        node = object.__new__(OperatorPanelNode)
+        node = _new_panel_node()
         node._lock = threading.RLock()
         node._operations = {}
         node._costmap_clear_clients = {
@@ -553,7 +569,7 @@ class RosGatewayTest(unittest.TestCase):
             node._clear_costmaps({"confirmed": True})
 
     def test_unsuccessful_operation_retains_last_reported_progress(self):
-        node = object.__new__(OperatorPanelNode)
+        node = _new_panel_node()
         node._lock = threading.RLock()
         node._audit_sink = None
         operation = Operation("failed", "pick", time.time(), progress=0.15)
@@ -568,26 +584,27 @@ class RosGatewayTest(unittest.TestCase):
         self.assertEqual(operation.progress, 0.15)
 
     def test_operation_history_evicts_old_records(self):
-        node = object.__new__(OperatorPanelNode)
+        node = _new_panel_node()
         node._lock = threading.RLock()
         node._operations = {}
         node._operation_history = deque(maxlen=2)
         for identifier in ("first", "second", "third"):
-            node._register_operation(Operation(identifier, "pick", time.time()))
+            node._register_operation(Operation(identifier, "pick", time.time(), status="SUCCEEDED"))
 
         self.assertEqual(list(node._operations), ["second", "third"])
 
     def test_navigation_requires_fresh_map_pose(self):
-        node = object.__new__(OperatorPanelNode)
+        node = _new_panel_node()
         node._lock = threading.RLock()
         node._manipulation_state = {"state": "EMPTY"}
         node._map_pose = {"available": True, "fresh": False}
+        node._nav_goal_status_locked = Mock(return_value={"available": False, "active": None})
 
         with self.assertRaisesRegex(PanelCommandError, "fresh map"):
             node._submit_navigation({"confirmed": True, "preset_id": "dock"})
 
     def test_navigation_requires_active_collision_monitor(self):
-        node = object.__new__(OperatorPanelNode)
+        node = _new_panel_node()
         node._lock = threading.RLock()
         node._nav_lifecycle_status = {"collision_monitor": {"state_id": 2}}
 
@@ -595,19 +612,19 @@ class RosGatewayTest(unittest.TestCase):
             node._submit_navigation({"confirmed": True, "preset_id": "dock"})
 
     def test_initial_pose_is_rejected_until_nav2_reports_idle(self):
-        node = object.__new__(OperatorPanelNode)
+        node = _new_panel_node()
         node._lock = threading.RLock()
         node._operations = {}
-        node._nav_goal_status = {"available": True, "active": True}
+        node._nav_goal_status_locked = Mock(return_value={"available": True, "active": True})
 
         with self.assertRaisesRegex(PanelCommandError, "Nav2 must be idle"):
             node._set_initial_pose({"x": 1.0, "y": 2.0, "yaw": 0.0, "confirmed": True})
 
     def test_initial_pose_without_status_requires_operator_idle_confirmation(self):
-        node = object.__new__(OperatorPanelNode)
+        node = _new_panel_node()
         node._lock = threading.RLock()
         node._operations = {}
-        node._nav_goal_status = {"available": False, "active": None}
+        node._nav_goal_status_locked = Mock(return_value={"available": False, "active": None})
         node._action_clients = {
             "navigate": SimpleNamespace(server_is_ready=lambda: True)
         }
@@ -617,10 +634,10 @@ class RosGatewayTest(unittest.TestCase):
 
     def test_initial_pose_publishes_map_pose_after_idle_nav2(self):
         published = []
-        node = object.__new__(OperatorPanelNode)
+        node = _new_panel_node()
         node._lock = threading.RLock()
         node._operations = {}
-        node._nav_goal_status = {"available": True, "active": False}
+        node._nav_goal_status_locked = Mock(return_value={"available": True, "active": False})
         node._action_clients = {
             "navigate": SimpleNamespace(server_is_ready=lambda: True)
         }
@@ -652,11 +669,11 @@ class RosGatewayTest(unittest.TestCase):
         sent = Future()
         sent.set_result(handle)
         goals = []
-        node = object.__new__(OperatorPanelNode)
+        node = _new_panel_node()
         node._lock = threading.RLock()
         node._manipulation_state = {"state": "EMPTY"}
         node._map_pose = {"available": True, "fresh": True}
-        node._nav_goal_status = {"available": True, "active": False}
+        node._nav_goal_status_locked = Mock(return_value={"available": True, "active": False})
         node._initial_pose_status = {"state": "NOT_REQUESTED", "detail": ""}
         node._initial_pose_requested_monotonic = None
         node._presets = {}
@@ -684,11 +701,11 @@ class RosGatewayTest(unittest.TestCase):
         self.assertAlmostEqual(goals[0].pose.pose.orientation.z, 2 ** -0.5)
 
     def test_navigation_without_status_requires_operator_idle_confirmation(self):
-        node = object.__new__(OperatorPanelNode)
+        node = _new_panel_node()
         node._lock = threading.RLock()
         node._manipulation_state = {"state": "EMPTY"}
         node._map_pose = {"available": True, "fresh": True}
-        node._nav_goal_status = {"available": False, "active": None}
+        node._nav_goal_status_locked = Mock(return_value={"available": False, "active": None})
         node._initial_pose_status = {"state": "NOT_REQUESTED", "detail": ""}
         node._initial_pose_requested_monotonic = None
         node._action_clients = {
@@ -704,10 +721,10 @@ class RosGatewayTest(unittest.TestCase):
         sent = Future()
         sent.set_result(FakeGoalHandle())
         goals = []
-        node = object.__new__(OperatorPanelNode)
+        node = _new_panel_node()
         node._lock = threading.RLock()
         node._manipulation_state = {"state": "HOLDING"}
-        node._nav_goal_status = {"available": True, "active": False}
+        node._nav_goal_status_locked = Mock(return_value={"available": True, "active": False})
         node._operations = {}
         node._operation_history = deque(maxlen=10)
         node.goal_admission_timeout_sec = 5.0
@@ -724,7 +741,7 @@ class RosGatewayTest(unittest.TestCase):
         self.assertFalse(goals[0].execute)
 
     def test_fine_align_pose_errors_use_the_panel_yaw_field(self):
-        node = object.__new__(OperatorPanelNode)
+        node = _new_panel_node()
         node._lock = threading.RLock()
         operation = Operation("fine-align", "fine_align", time.time())
         node._operations = {operation.identifier: operation}
@@ -750,7 +767,7 @@ class RosGatewayTest(unittest.TestCase):
         )
 
     def test_fine_align_reacquiring_feedback_has_a_readable_stage(self):
-        node = object.__new__(OperatorPanelNode)
+        node = _new_panel_node()
         node._lock = threading.RLock()
         operation = Operation("fine-align", "fine_align", time.time())
         node._operations = {operation.identifier: operation}
@@ -765,19 +782,19 @@ class RosGatewayTest(unittest.TestCase):
         self.assertEqual(operation.stage, "Reacquiring target")
 
     def test_physical_fine_alignment_requires_confirmation(self):
-        node = object.__new__(OperatorPanelNode)
+        node = _new_panel_node()
         node._lock = threading.RLock()
         node._manipulation_state = {"state": "EMPTY"}
-        node._nav_goal_status = {"available": True, "active": False}
+        node._nav_goal_status_locked = Mock(return_value={"available": True, "active": False})
 
         with self.assertRaisesRegex(PanelCommandError, "requires confirmation"):
             node._submit_fine_align({"execute": True})
 
     def test_physical_fine_alignment_requires_execution_unlock(self):
-        node = object.__new__(OperatorPanelNode)
+        node = _new_panel_node()
         node._lock = threading.RLock()
         node._manipulation_state = {"state": "EMPTY"}
-        node._nav_goal_status = {"available": True, "active": False}
+        node._nav_goal_status_locked = Mock(return_value={"available": True, "active": False})
         node._nav_lifecycle_status = {
             "collision_monitor": {"state_id": 3},
         }
@@ -787,10 +804,10 @@ class RosGatewayTest(unittest.TestCase):
             node._submit_fine_align({"execute": True, "confirmed": True})
 
     def test_physical_fine_alignment_requires_safety_lifecycle_nodes(self):
-        node = object.__new__(OperatorPanelNode)
+        node = _new_panel_node()
         node._lock = threading.RLock()
         node._manipulation_state = {"state": "EMPTY"}
-        node._nav_goal_status = {"available": True, "active": False}
+        node._nav_goal_status_locked = Mock(return_value={"available": True, "active": False})
         node._nav_lifecycle_status = {
             "collision_monitor": {"state_id": 2},
         }
@@ -803,10 +820,10 @@ class RosGatewayTest(unittest.TestCase):
         sent = Future()
         sent.set_result(FakeGoalHandle())
         goals = []
-        node = object.__new__(OperatorPanelNode)
+        node = _new_panel_node()
         node._lock = threading.RLock()
         node._manipulation_state = {"state": "EMPTY"}
-        node._nav_goal_status = {"available": True, "active": False}
+        node._nav_goal_status_locked = Mock(return_value={"available": True, "active": False})
         node._nav_lifecycle_status = {"collision_monitor": {"state_id": 3}}
         node._execution_unlocked_until = time.monotonic() + 30.0
         node._operations = {}
@@ -829,10 +846,10 @@ class RosGatewayTest(unittest.TestCase):
         sent = Future()
         sent.set_result(FakeGoalHandle())
         goals = []
-        node = object.__new__(OperatorPanelNode)
+        node = _new_panel_node()
         node._lock = threading.RLock()
         node._manipulation_state = {"state": "EMPTY"}
-        node._nav_goal_status = {"available": True, "active": False}
+        node._nav_goal_status_locked = Mock(return_value={"available": True, "active": False})
         node._nav_lifecycle_status = {"collision_monitor": {"state_id": 3}}
         node._execution_unlocked_until = time.monotonic() + 30.0
         node._operations = {}
@@ -853,7 +870,7 @@ class RosGatewayTest(unittest.TestCase):
         self.assertEqual(node._execution_unlocked_until, 0.0)
 
     def test_undock_feedback_and_result_include_distance(self):
-        node = object.__new__(OperatorPanelNode)
+        node = _new_panel_node()
         node._lock = threading.RLock()
         operation = Operation("undock", "undock", time.time())
         node._operations = {operation.identifier: operation}
@@ -914,7 +931,7 @@ class RosGatewayTest(unittest.TestCase):
         self.assertEqual(points, [[0.0, 0.0], [2.0, 2.0]])
 
     def test_initial_pose_settles_only_after_matching_post_publish_transform(self):
-        node = object.__new__(OperatorPanelNode)
+        node = _new_panel_node()
         node._initial_pose_status = {
             "state": "PENDING",
             "x": 1.0,
@@ -932,21 +949,57 @@ class RosGatewayTest(unittest.TestCase):
         node._update_initial_pose_settling_locked(1_002, 1.2, 2.1, 0.1)
         self.assertEqual(node._initial_pose_status["state"], "SETTLED")
 
-    def test_nav2_status_expires_and_requires_the_idle_fallback(self):
-        node = object.__new__(OperatorPanelNode)
-        node._nav_goal_status = {"available": True, "active": False, "detail": "Nav2 is idle"}
-        node._nav_goal_status_received_monotonic = 100.0
-        node.nav_goal_status_freshness_sec = 3.0
+    def test_navigation_status_callback_checks_publisher_identity(self):
+        node = _new_panel_node()
+        node._lock = threading.RLock()
+        node._navigation_goal_status = NavigationGoalStatus()
+        node._navigation_status_clients = {
+            name: SimpleNamespace(server_is_ready=lambda: True)
+            for name in NavigationGoalStatus.ACTIONS
+        }
+        node._navigation_status_subscriptions = {}
+        node._navigation_status_qos = None
+        node.create_subscription = Mock()
+        node.destroy_subscription = Mock()
+        publisher = b"current"
+        node.get_publishers_info_by_topic = Mock(
+            side_effect=lambda topic: [SimpleNamespace(endpoint_gid=publisher)]
+        )
+        node._refresh_navigation_servers_locked()
+        callback = node._navigation_status_callback("navigate_through_poses", frozenset({publisher}))
+        callback(SimpleNamespace(status_list=[SimpleNamespace(status=2)]))
+        self.assertTrue(node._nav_goal_status_locked()["active"])
+        publisher = b"replacement"
+        callback(SimpleNamespace(status_list=[]))
+        self.assertEqual(node.destroy_subscription.call_count, 2)
+        self.assertEqual(node.create_subscription.call_count, 4)
+        self.assertFalse(node._nav_goal_status_locked()["available"])
+        publisher = b"current"
+        callback(SimpleNamespace(status_list=[SimpleNamespace(status=2)]))
+        status = node._nav_goal_status_locked()
+        self.assertFalse(status["actions"]["navigate_through_poses"]["available"])
 
-        with patch("x2_operator_panel.ros_gateway.time.monotonic", return_value=103.1):
-            status = node._nav_goal_status_locked()
-
-        self.assertFalse(status["available"])
-        self.assertIsNone(status["active"])
-        self.assertIn("not updated", status["detail"])
+    def test_old_active_navigation_blocks_fine_align_even_with_idle_confirmation(self):
+        node = _new_panel_node()
+        node._lock = threading.RLock()
+        node._manipulation_state = {"state": "EMPTY"}
+        node._navigation_goal_status = NavigationGoalStatus()
+        node._navigation_status_clients = {
+            "navigate_to_pose": SimpleNamespace(server_is_ready=lambda: True)
+        }
+        node.get_publishers_info_by_topic = Mock(
+            return_value=[SimpleNamespace(endpoint_gid=b"current")]
+        )
+        node._navigation_goal_status.observe_server(
+            "navigate_to_pose", frozenset({b"current"}), True
+        )
+        node._navigation_goal_status.receive("navigate_to_pose", b"current", [2], 100.0)
+        with patch("x2_operator_panel.ros_gateway.time.monotonic", return_value=1000.0):
+            with self.assertRaisesRegex(PanelCommandError, "Nav2 must be idle"):
+                node._submit_fine_align({"confirm_nav2_idle": True})
 
     def test_stale_global_path_is_removed_from_the_map_snapshot(self):
-        node = object.__new__(OperatorPanelNode)
+        node = _new_panel_node()
         node._global_path = {
             "available": True,
             "fresh": True,
@@ -966,7 +1019,7 @@ class RosGatewayTest(unittest.TestCase):
         self.assertEqual(path["point_count"], 0)
 
     def test_global_path_rejects_non_map_frame(self):
-        node = object.__new__(OperatorPanelNode)
+        node = _new_panel_node()
         node._lock = threading.RLock()
         node.global_path_topic = "/plan"
         node.global_path_max_points = 500
@@ -985,7 +1038,7 @@ class RosGatewayTest(unittest.TestCase):
             service_is_ready=lambda: True,
             call_async=lambda _request: calls.append(True) or pending,
         )
-        node = object.__new__(OperatorPanelNode)
+        node = _new_panel_node()
         node._lock = threading.RLock()
         node._nav_lifecycle_clients = {"planner_server": client}
         node._nav_lifecycle_status = {"planner_server": {}}
@@ -1000,7 +1053,7 @@ class RosGatewayTest(unittest.TestCase):
         self.assertIn("retrying", node._nav_lifecycle_status["planner_server"]["detail"])
 
     def test_recovery_operation_is_reported_as_non_cancelable(self):
-        node = object.__new__(OperatorPanelNode)
+        node = _new_panel_node()
         node._lock = threading.RLock()
         operation = Operation("recover", "recover_state", time.time(), cancelable=False)
         node._operations = {operation.identifier: operation}
@@ -1012,7 +1065,7 @@ class RosGatewayTest(unittest.TestCase):
         self.assertEqual(operation.status, "SUBMITTING")
 
     def test_box_profile_reload_calls_the_coordinator_with_the_configured_file(self):
-        node = object.__new__(OperatorPanelNode)
+        node = _new_panel_node()
         node._lock = threading.RLock()
         node._operations = {}
         node._operation_history = deque(maxlen=10)
@@ -1039,7 +1092,7 @@ class RosGatewayTest(unittest.TestCase):
         self.assertEqual(operation.result["profile_version"], 3)
 
     def test_box_profile_reload_requires_an_empty_manipulation_state(self):
-        node = object.__new__(OperatorPanelNode)
+        node = _new_panel_node()
         node._lock = threading.RLock()
         node._operations = {}
         node._manipulation_state = {"state": "HOLDING"}
@@ -1051,7 +1104,7 @@ class RosGatewayTest(unittest.TestCase):
         self.assertEqual(node._profile_reload_client.calls, [])
 
     def test_posture_control_calls_the_public_service_while_holding(self):
-        node = object.__new__(OperatorPanelNode)
+        node = _new_panel_node()
         node._lock = threading.RLock()
         node._operations = {}
         node._operation_history = deque(maxlen=10)
@@ -1090,7 +1143,7 @@ class RosGatewayTest(unittest.TestCase):
         self.assertEqual(node._execution_unlocked_until, 0.0)
 
     def test_posture_control_preserves_an_exact_zero_waist_yaw(self):
-        node = object.__new__(OperatorPanelNode)
+        node = _new_panel_node()
         node._lock = threading.RLock()
         node._operations = {}
         node._operation_history = deque(maxlen=10)
@@ -1117,7 +1170,7 @@ class RosGatewayTest(unittest.TestCase):
         self.assertEqual(request.waist_yaw, 0.0)
 
     def test_release_posture_control_calls_the_clear_service(self):
-        node = object.__new__(OperatorPanelNode)
+        node = _new_panel_node()
         node._lock = threading.RLock()
         node._operations = {}
         node._operation_history = deque(maxlen=10)
@@ -1136,7 +1189,7 @@ class RosGatewayTest(unittest.TestCase):
         self.assertEqual(operation.result["message"], "posture publisher released")
 
     def test_posture_control_requires_current_enabled_server_status(self):
-        node = object.__new__(OperatorPanelNode)
+        node = _new_panel_node()
         node._lock = threading.RLock()
         node._operations = {}
         node._manipulation_state = {"state": "EMPTY"}
@@ -1157,7 +1210,7 @@ class RosGatewayTest(unittest.TestCase):
         self.assertEqual(node._posture_client.calls, [])
 
     def test_posture_control_rejects_unknown_state_and_invalid_targets(self):
-        node = object.__new__(OperatorPanelNode)
+        node = _new_panel_node()
         node._lock = threading.RLock()
         node._operations = {}
         node._manipulation_state = {"state": "UNKNOWN"}
@@ -1178,7 +1231,7 @@ class RosGatewayTest(unittest.TestCase):
         self.assertEqual(node._posture_client.calls, [])
 
     def test_cancel_dispatch_failure_does_not_claim_cancellation(self):
-        node = object.__new__(OperatorPanelNode)
+        node = _new_panel_node()
         node._lock = threading.RLock()
         node._audit_sink = None
         handle = FakeGoalHandle(fail=True)
@@ -1193,7 +1246,7 @@ class RosGatewayTest(unittest.TestCase):
         self.assertIn("transport failed", operation.detail)
 
     def test_cancel_fine_alignment_does_not_cancel_other_operations(self):
-        node = object.__new__(OperatorPanelNode)
+        node = _new_panel_node()
         node._lock = threading.RLock()
         node._audit_sink = None
         fine_align_handle = FakeGoalHandle()
@@ -1216,7 +1269,7 @@ class RosGatewayTest(unittest.TestCase):
         self.assertEqual(navigation.status, "ACTIVE")
 
     def test_shared_docking_cancel_cancels_undocking(self):
-        node = object.__new__(OperatorPanelNode)
+        node = _new_panel_node()
         node._lock = threading.RLock()
         node._audit_sink = None
         handle = FakeGoalHandle()
@@ -1231,7 +1284,7 @@ class RosGatewayTest(unittest.TestCase):
         self.assertEqual(undock.status, "CANCEL_REQUESTED")
 
     def test_cancel_fine_alignment_requires_an_active_goal(self):
-        node = object.__new__(OperatorPanelNode)
+        node = _new_panel_node()
         node._lock = threading.RLock()
         node._operations = {}
 
@@ -1239,7 +1292,7 @@ class RosGatewayTest(unittest.TestCase):
             node._cancel_fine_align()
 
     def test_admission_timeout_requests_late_goal_cancellation(self):
-        node = object.__new__(OperatorPanelNode)
+        node = _new_panel_node()
         node._lock = threading.RLock()
         node._audit_sink = None
         operation = Operation(
@@ -1256,7 +1309,7 @@ class RosGatewayTest(unittest.TestCase):
         self.assertIn("unknown", operation.detail)
 
     def test_late_goal_handle_is_canceled_after_admission_timeout(self):
-        node = object.__new__(OperatorPanelNode)
+        node = _new_panel_node()
         node._lock = threading.RLock()
         node._audit_sink = None
         operation = Operation(
@@ -1322,7 +1375,7 @@ class ContinueManipulationTest(unittest.TestCase):
                 self.assertEqual(node._continue_error, "")
 
     def node(self, service_result=None):
-        node = object.__new__(OperatorPanelNode)
+        node = _new_panel_node()
         node._lock = threading.RLock()
         node._operations = {}
         node._audit_sink = None

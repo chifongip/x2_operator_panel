@@ -44,7 +44,7 @@ from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped
 from lifecycle_msgs.srv import GetState
 from moveit_msgs.action import MoveGroup
 from moveit_msgs.srv import GetPlanningScene
-from nav2_msgs.action import NavigateToPose
+from nav2_msgs.action import NavigateThroughPoses, NavigateToPose
 from nav2_msgs.srv import ClearEntireCostmap
 from nav_msgs.msg import Odometry, Path as NavPath
 from x2_navigation.action import FineAlign, Undock
@@ -59,9 +59,16 @@ from tf2_ros import Buffer, TransformException, TransformListener
 import yaml
 
 from x2_operator_panel.manipulation_timing import ManipulationTiming
+from x2_operator_panel.navigation_status import ActionGoalStatus, NavigationGoalStatus
 
 
 _ACTIVE_STATUSES = {"SUBMITTING", "ACTIVE", "CANCEL_REQUESTED"}
+_ADMISSION_BLOCKING_STATUSES = _ACTIVE_STATUSES | {"OUTCOME_UNKNOWN"}
+_TASK_ACTION_NAMES = {
+    "pick": "pick_box", "place": "place_box", "pick_place": "pick_place",
+    "move_carry_pose": "move_carry_pose", "reset": "reset_manipulation",
+    "fine_align": "fine_align", "undock": "undock",
+}
 _GOAL_STATUS_NAMES = {
     GoalStatus.STATUS_UNKNOWN: "UNKNOWN",
     GoalStatus.STATUS_ACCEPTED: "ACCEPTED",
@@ -138,6 +145,7 @@ class Operation:
     cancelable: bool = True
     admission_deadline: float | None = field(default=None, repr=False)
     service_deadline: float | None = field(default=None, repr=False)
+    result_retry_deadline: float | None = field(default=None, repr=False)
     goal_handle: Any = field(default=None, repr=False)
 
     def as_dict(self) -> dict[str, Any]:
@@ -401,6 +409,7 @@ class OperatorPanelNode(Node):
         self.global_path_max_points = int(
             self.declare_parameter("global_path_max_points", 500).value
         )
+        # Deprecated compatibility parameter: action status is event-driven.
         self.nav_goal_status_freshness_sec = float(
             self.declare_parameter("nav_goal_status_freshness_sec", 3.0).value
         )
@@ -564,12 +573,8 @@ class OperatorPanelNode(Node):
         }
         self._odom_received_monotonic: float | None = None
         self._joint_states_received_monotonic: float | None = None
-        self._nav_goal_status: dict[str, Any] = {
-            "available": False,
-            "active": None,
-            "detail": "Waiting for Nav2 action status",
-        }
-        self._nav_goal_status_received_monotonic: float | None = None
+        self._navigation_goal_status = NavigationGoalStatus()
+        self._task_goal_status = ActionGoalStatus(tuple(_TASK_ACTION_NAMES.values()))
         self._nav_lifecycle_status = {
             name: {
                 "available": False,
@@ -602,6 +607,15 @@ class OperatorPanelNode(Node):
             "navigate": ActionClient(self, NavigateToPose, "/navigate_to_pose"),
             "fine_align": ActionClient(self, FineAlign, "/fine_align"),
             "undock": ActionClient(self, Undock, "/undock"),
+        }
+        self._navigation_status_clients = {
+            "navigate_to_pose": self._action_clients["navigate"],
+            "navigate_through_poses": ActionClient(
+                self, NavigateThroughPoses, "/navigate_through_poses"
+            ),
+        }
+        self._task_status_clients = {
+            name: self._action_clients[kind] for kind, name in _TASK_ACTION_NAMES.items()
         }
         self._move_group_action_client = ActionClient(
             self, MoveGroup, self.move_group_action_name
@@ -704,12 +718,10 @@ class OperatorPanelNode(Node):
         self.create_subscription(
             JointState, "/joint_states", self._on_joint_states, telemetry_qos
         )
-        self.create_subscription(
-            GoalStatusArray,
-            "/navigate_to_pose/_action/status",
-            self._on_nav_goal_status,
-            state_qos,
-        )
+        self._navigation_status_qos = state_qos
+        self._navigation_status_subscriptions = {}
+        self._task_status_subscriptions = {}
+        self.create_timer(0.20, self._poll_navigation_servers)
         self.create_subscription(
             DiagnosticArray,
             "/pick_place/planning_diagnostics",
@@ -795,10 +807,8 @@ class OperatorPanelNode(Node):
         with self._lock:
             operations = [operation.as_dict() for operation in self._operations.values()]
             operations.sort(key=lambda item: item["requested_at"], reverse=True)
-            active_operation = any(
-                operation.status in _ACTIVE_STATUSES
-                for operation in self._operations.values()
-            )
+            task_blocker = self._task_admission_blocker_locked()
+            active_operation = bool(task_blocker)
             profile_reload_service_ready = self._profile_reload_client.service_is_ready()
             profile_reload_ready = (
                 profile_reload_service_ready
@@ -808,7 +818,7 @@ class OperatorPanelNode(Node):
             if not profile_reload_service_ready:
                 profile_reload_detail = "Box-profile reload service is unavailable"
             elif active_operation:
-                profile_reload_detail = "Wait for the active panel operation to finish"
+                profile_reload_detail = task_blocker
             elif self._manipulation_state["state"] != "EMPTY":
                 profile_reload_detail = "Reload requires manipulation state EMPTY"
             else:
@@ -842,7 +852,7 @@ class OperatorPanelNode(Node):
             elif not posture_status["execution_enabled"]:
                 posture_detail = posture_status["detail"]
             elif active_operation:
-                posture_detail = "Wait for the active panel operation to finish"
+                posture_detail = task_blocker
             elif self._manipulation_state["state"] not in {"EMPTY", "HOLDING"}:
                 posture_detail = "Posture requires manipulation state EMPTY or HOLDING"
             else:
@@ -861,7 +871,7 @@ class OperatorPanelNode(Node):
             elif not posture_status_fresh:
                 posture_release_detail = "Waiting for a current locomanipulation posture server status"
             elif active_operation:
-                posture_release_detail = "Wait for the active panel operation to finish"
+                posture_release_detail = task_blocker
             elif not posture_status["target_active"]:
                 posture_release_detail = "Posture publisher is already released"
             else:
@@ -870,6 +880,7 @@ class OperatorPanelNode(Node):
                 )
             visible_boxes = self._fresh_visible_boxes_locked()
             return {
+                "task_admission": {"blocked": bool(task_blocker), "detail": task_blocker},
                 "servers": {
                     name: client.server_is_ready()
                     for name, client in self._action_clients.items()
@@ -1001,11 +1012,7 @@ class OperatorPanelNode(Node):
     def _clear_costmaps(self, payload: dict[str, Any]) -> dict[str, Any]:
         if payload.get("confirmed") is not True:
             raise PanelCommandError("Clearing costmaps requires confirmation")
-        if any(
-            operation.kind == "clear_costmaps"
-            for operation in self._active_operations()
-        ):
-            raise PanelCommandError("A costmap clear request is already active")
+        self._assert_task_idle()
         unavailable = [
             name
             for name, client in self._costmap_clear_clients.items()
@@ -1053,7 +1060,7 @@ class OperatorPanelNode(Node):
                 error = service_error
         with self._lock:
             operation = self._operations.get(operation_id)
-            if operation is None or operation.status not in _ACTIVE_STATUSES:
+            if operation is None or operation.status not in _ADMISSION_BLOCKING_STATUSES:
                 return
             outcomes = operation.feedback.setdefault("costmaps", {})
             outcomes[costmap] = {
@@ -1089,10 +1096,7 @@ class OperatorPanelNode(Node):
         x, y, yaw = self._parse_map_target(payload, "initial pose")
         with self._lock:
             nav_goal_status = self._nav_goal_status_locked()
-            if self._active_operations():
-                raise PanelCommandError(
-                    "Wait for the active panel operation to reach a terminal state"
-                )
+            self._assert_task_idle_locked()
             if not nav_goal_status.get("available"):
                 if payload.get("confirm_nav2_idle") is not True:
                     raise PanelCommandError(
@@ -1137,28 +1141,54 @@ class OperatorPanelNode(Node):
         return {"initial_pose": self._initial_pose_status_locked()}
 
     def _submit(self, payload: dict[str, Any]) -> dict[str, Any]:
-        if getattr(self, "_manipulation_task", {}).get("status") in {"running", "retrying", "paused"}:
-            raise PanelCommandError("Finish or cancel the active manipulation task first")
-        if self._shutting_down:
-            raise PanelCommandError("The operator panel is shutting down")
-        kind = payload.get("kind")
-        if kind not in self._action_clients:
-            raise PanelCommandError("Unsupported action")
-        if not self._action_clients[kind].server_is_ready():
-            raise PanelCommandError(f"The {kind} action server is unavailable")
-        if self._active_operations():
-            raise PanelCommandError("Wait for the active operation to reach a terminal state")
-        if kind == "navigate":
-            operation = self._submit_navigation(payload)
-        elif kind == "fine_align":
-            operation = self._submit_fine_align(payload)
-        elif kind == "undock":
-            operation = self._submit_undock(payload)
-        else:
-            operation = self._submit_manipulation(kind, payload)
-        return {"operation": operation.as_dict()}
+        # Serialize admission through registration. SUBMITTING reserves the
+        # single task slot before any goal-acceptance response is received.
+        with self._lock:
+            self._assert_task_idle_locked()
+            if self._shutting_down:
+                raise PanelCommandError("The operator panel is shutting down")
+            kind = payload.get("kind")
+            if kind not in self._action_clients:
+                raise PanelCommandError("Unsupported action")
+            if not self._action_clients[kind].server_is_ready():
+                raise PanelCommandError(f"The {kind} action server is unavailable")
+            if kind == "navigate":
+                operation = self._submit_navigation(payload)
+            elif kind == "fine_align":
+                operation = self._submit_fine_align(payload)
+            elif kind == "undock":
+                operation = self._submit_undock(payload)
+            else:
+                operation = self._submit_manipulation(kind, payload)
+            return {"operation": operation.as_dict()}
+
+    def _task_admission_blocker_locked(self) -> str:
+        if self._manipulation_task.get("status") in {"running", "retrying", "paused"}:
+            return "Finish or cancel the active manipulation task first"
+        for operation in self._operations.values():
+            if operation.status in _ADMISSION_BLOCKING_STATUSES:
+                if operation.status == "OUTCOME_UNKNOWN":
+                    return "Wait for the outstanding operation's outcome to be established"
+                return "Wait for the active operation to reach a terminal state"
+        if self._nav_goal_status_locked().get("active") is True:
+            return "Nav2 must be idle; finish or cancel the active navigation task first"
+        self._refresh_task_servers_locked()
+        for name, status in self._task_goal_status.snapshot(time.monotonic()).items():
+            if status["active"] is True:
+                return f"Finish or cancel the active {name} task first"
+        return ""
+
+    def _assert_task_idle_locked(self) -> None:
+        blocker = self._task_admission_blocker_locked()
+        if blocker:
+            raise PanelCommandError(blocker)
+
+    def _assert_task_idle(self) -> None:
+        with self._lock:
+            self._assert_task_idle_locked()
 
     def _submit_fine_align(self, payload: dict[str, Any]) -> Operation:
+        self._assert_task_idle()
         execute = self._optional_boolean(payload, "execute", False)
         if execute and payload.get("confirmed") is not True:
             raise PanelCommandError("Physical fine alignment requires confirmation")
@@ -1211,7 +1241,7 @@ class OperatorPanelNode(Node):
                 ),
             )
         except Exception as error:
-            self._finish_operation(operation.identifier, "ERROR", {"message": str(error)})
+            self._finish_operation(operation.identifier, "OUTCOME_UNKNOWN", {"message": str(error)})
             raise PanelCommandError(f"Failed to submit fine alignment: {error}") from error
         future.add_done_callback(
             lambda sent: self._on_goal_response(operation.identifier, sent)
@@ -1220,6 +1250,7 @@ class OperatorPanelNode(Node):
         return operation
 
     def _submit_undock(self, payload: dict[str, Any]) -> Operation:
+        self._assert_task_idle()
         if payload.get("confirmed") is not True:
             raise PanelCommandError("Physical undocking requires confirmation")
         with self._lock:
@@ -1263,7 +1294,7 @@ class OperatorPanelNode(Node):
                 ),
             )
         except Exception as error:
-            self._finish_operation(operation.identifier, "ERROR", {"message": str(error)})
+            self._finish_operation(operation.identifier, "OUTCOME_UNKNOWN", {"message": str(error)})
             raise PanelCommandError(f"Failed to submit undocking: {error}") from error
         future.add_done_callback(
             lambda sent: self._on_goal_response(operation.identifier, sent)
@@ -1272,6 +1303,7 @@ class OperatorPanelNode(Node):
         return operation
 
     def _submit_manipulation(self, kind: str, payload: dict[str, Any]) -> Operation:
+        self._assert_task_idle()
         plan_only = self._optional_boolean(payload, "plan_only", True) if kind != "reset" else None
         if kind == "reset" and payload.get("confirm_empty") is not True:
             raise PanelCommandError("Reset requires confirmation that no box is held")
@@ -1315,7 +1347,7 @@ class OperatorPanelNode(Node):
                 ),
             )
         except Exception as error:
-            self._finish_operation(operation.identifier, "ERROR", {"message": str(error)})
+            self._finish_operation(operation.identifier, "OUTCOME_UNKNOWN", {"message": str(error)})
             raise PanelCommandError(f"Failed to submit {kind} goal: {error}") from error
         future.add_done_callback(
             lambda sent: self._on_goal_response(operation.identifier, sent)
@@ -1349,6 +1381,7 @@ class OperatorPanelNode(Node):
         return instance_id
 
     def _submit_navigation(self, payload: dict[str, Any]) -> Operation:
+        self._assert_task_idle()
         if payload.get("confirmed") is not True:
             raise PanelCommandError("Navigation requires confirmation")
         mux_client = getattr(self, "_action_clients", {}).get("fine_align")
@@ -1423,7 +1456,7 @@ class OperatorPanelNode(Node):
                 ),
             )
         except Exception as error:
-            self._finish_operation(operation.identifier, "ERROR", {"message": str(error)})
+            self._finish_operation(operation.identifier, "OUTCOME_UNKNOWN", {"message": str(error)})
             raise PanelCommandError(f"Failed to submit navigation goal: {error}") from error
         future.add_done_callback(
             lambda sent: self._on_goal_response(operation.identifier, sent)
@@ -1518,6 +1551,7 @@ class OperatorPanelNode(Node):
 
     def _register_operation(self, operation: Operation) -> None:
         with self._lock:
+            self._assert_task_idle_locked()
             if len(self._operation_history) == self._operation_history.maxlen:
                 oldest = self._operation_history.popleft()
                 self._operations.pop(oldest, None)
@@ -1528,7 +1562,7 @@ class OperatorPanelNode(Node):
         try:
             handle = sent.result()
         except Exception as error:
-            self._finish_operation(operation_id, "ERROR", {"message": str(error)})
+            self._finish_operation(operation_id, "OUTCOME_UNKNOWN", {"message": str(error)})
             return
         with self._lock:
             operation = self._operations.get(operation_id)
@@ -1550,13 +1584,13 @@ class OperatorPanelNode(Node):
         try:
             result_future = handle.get_result_async()
         except Exception as error:
-            self._restore_active_after_cancel_failure(
+            self._schedule_action_result_retry(
                 operation_id, f"Could not track action result: {error}"
             )
-            return
-        result_future.add_done_callback(
-            lambda result: self._on_action_result(operation_id, result)
-        )
+        else:
+            result_future.add_done_callback(
+                lambda result: self._on_action_result(operation_id, result)
+            )
         if cancel_requested:
             self._request_goal_cancel(operation_id, handle)
 
@@ -1612,12 +1646,26 @@ class OperatorPanelNode(Node):
     def _on_action_result(self, operation_id: str, completed: Any) -> None:
         try:
             wrapped = completed.result()
+            if wrapped.status not in {
+                GoalStatus.STATUS_SUCCEEDED, GoalStatus.STATUS_CANCELED, GoalStatus.STATUS_ABORTED,
+            }:
+                raise ValueError("Action result did not establish a terminal goal state")
             result = self._result_as_dict(wrapped.result)
             status = _GOAL_STATUS_NAMES.get(wrapped.status, f"STATUS_{wrapped.status}")
         except Exception as error:
-            self._finish_operation(operation_id, "ERROR", {"message": str(error)})
+            self._schedule_action_result_retry(
+                operation_id, f"Action outcome is unknown: {error}"
+            )
             return
         self._finish_operation(operation_id, status, result)
+
+    def _schedule_action_result_retry(self, operation_id: str, detail: str) -> None:
+        with self._lock:
+            operation = self._operations.get(operation_id)
+            if operation is not None and operation.status in _ACTIVE_STATUSES:
+                operation.result_retry_deadline = time.monotonic() + 1.0
+                operation.stage = "Waiting for action result"
+                operation.detail = detail
 
     @staticmethod
     def _result_as_dict(result: Any) -> dict[str, Any]:
@@ -1661,6 +1709,7 @@ class OperatorPanelNode(Node):
             operation.detail = str(result.get("message", result.get("error_msg", "")))
             operation.admission_deadline = None
             operation.service_deadline = None
+            operation.result_retry_deadline = None
             operation.goal_handle = None
             self._audit(operation.kind, status.lower(), operation.detail or status)
 
@@ -1878,8 +1927,7 @@ class OperatorPanelNode(Node):
         self._audit("cancel_manipulation", "failed" if error else "accepted", error)
 
     def _recover_state(self, payload: dict[str, Any]) -> dict[str, Any]:
-        if self._active_operations():
-            raise PanelCommandError("Wait for the active operation to reach a terminal state")
+        self._assert_task_idle()
         if payload.get("confirmed") is not True:
             raise PanelCommandError("Manipulation-state recovery requires confirmation")
         requested_state = payload.get("requested_state")
@@ -1924,8 +1972,7 @@ class OperatorPanelNode(Node):
         self._finish_operation(operation_id, status, details)
 
     def _reload_box_profiles(self, payload: dict[str, Any]) -> dict[str, Any]:
-        if self._active_operations():
-            raise PanelCommandError("Wait for the active operation to reach a terminal state")
+        self._assert_task_idle()
         if payload.get("confirmed") is not True:
             raise PanelCommandError("Box-profile reload requires confirmation")
         with self._lock:
@@ -1975,8 +2022,7 @@ class OperatorPanelNode(Node):
         self._finish_operation(operation_id, status, details)
 
     def _set_locomanipulation_posture(self, payload: dict[str, Any]) -> dict[str, Any]:
-        if self._active_operations():
-            raise PanelCommandError("Wait for the active operation to reach a terminal state")
+        self._assert_task_idle()
         if payload.get("confirmed") is not True:
             raise PanelCommandError("Locomanipulation posture requires confirmation")
         height = _finite_number(payload.get("height"), "posture height")
@@ -2067,8 +2113,7 @@ class OperatorPanelNode(Node):
     def _release_locomanipulation_posture(
         self, payload: dict[str, Any]
     ) -> dict[str, Any]:
-        if self._active_operations():
-            raise PanelCommandError("Wait for the active operation to reach a terminal state")
+        self._assert_task_idle()
         if payload.get("confirmed") is not True:
             raise PanelCommandError("Releasing locomanipulation posture control requires confirmation")
         if not self._posture_release_client.service_is_ready():
@@ -2111,6 +2156,27 @@ class OperatorPanelNode(Node):
                 self._continue_error = "Continue response timed out; check the current task status"
             operations = list(self._operations.values())
         for operation in operations:
+            if (
+                operation.status in _ACTIVE_STATUSES
+                and operation.result_retry_deadline is not None
+                and now >= operation.result_retry_deadline
+            ):
+                with self._lock:
+                    operation.result_retry_deadline = None
+                    handle = operation.goal_handle
+                if handle is not None:
+                    try:
+                        result_future = handle.get_result_async()
+                    except Exception as error:
+                        self._schedule_action_result_retry(
+                            operation.identifier, f"Could not track action result: {error}"
+                        )
+                    else:
+                        result_future.add_done_callback(
+                            lambda result, operation_id=operation.identifier:
+                            self._on_action_result(operation_id, result)
+                        )
+                continue
             if (
                 operation.status == "SUBMITTING"
                 and operation.admission_deadline is not None
@@ -2417,51 +2483,77 @@ class OperatorPanelNode(Node):
                 "detail": "",
             }
 
-    def _on_nav_goal_status(self, message: GoalStatusArray) -> None:
-        active_statuses = {
-            GoalStatus.STATUS_ACCEPTED,
-            GoalStatus.STATUS_EXECUTING,
-            GoalStatus.STATUS_CANCELING,
-        }
-        active = any(item.status in active_statuses for item in message.status_list)
+    def _poll_navigation_servers(self) -> None:
         with self._lock:
-            self._nav_goal_status = {
-                "available": True,
-                "active": active,
-                "detail": "Active navigation goal" if active else "Nav2 is idle",
-            }
-            self._nav_goal_status_received_monotonic = time.monotonic()
+            self._refresh_navigation_servers_locked()
+            self._refresh_task_servers_locked()
+
+    def _refresh_navigation_servers_locked(self) -> None:
+        self._refresh_goal_servers_locked(
+            self._navigation_goal_status, self._navigation_status_clients,
+            self._navigation_status_subscriptions,
+        )
+
+    def _refresh_task_servers_locked(self) -> None:
+        self._refresh_goal_servers_locked(
+            self._task_goal_status, self._task_status_clients,
+            self._task_status_subscriptions,
+        )
+
+    def _refresh_goal_servers_locked(
+        self, tracker: ActionGoalStatus, clients: dict, subscriptions: dict,
+    ) -> None:
+        for name, client in clients.items():
+            publishers = frozenset(
+                bytes(endpoint.endpoint_gid)
+                for endpoint in self.get_publishers_info_by_topic(f"/{name}/_action/status")
+            )
+            previous = tracker.actions[name]["publishers"]
+            tracker.observe_server(name, publishers, client.server_is_ready())
+            if publishers != previous:
+                subscription = subscriptions.pop(name, None)
+                if subscription is not None:
+                    self.destroy_subscription(subscription)
+                if len(publishers) == 1:
+                    subscriptions[name] = self.create_subscription(
+                        GoalStatusArray, f"/{name}/_action/status",
+                        self._goal_status_callback(tracker, clients, subscriptions, name, publishers),
+                        self._navigation_status_qos,
+                    )
+
+    def _navigation_status_callback(self, name: str, publishers: frozenset) -> Callable:
+        return self._goal_status_callback(
+            self._navigation_goal_status, self._navigation_status_clients,
+            self._navigation_status_subscriptions, name, publishers,
+        )
+
+    def _goal_status_callback(
+        self, tracker: ActionGoalStatus, clients: dict, subscriptions: dict,
+        name: str, publishers: frozenset,
+    ) -> Callable:
+        # Humble does not pass publisher metadata to Python callbacks. Recreate
+        # the transient-local subscription on graph changes, binding callbacks
+        # to that publisher generation so old queued samples cannot restore it.
+        generation = tracker.actions[name]["generation"]
+
+        def callback(message: GoalStatusArray) -> None:
+            with self._lock:
+                self._refresh_goal_servers_locked(tracker, clients, subscriptions)
+                if tracker.actions[name]["generation"] != generation:
+                    return
+                tracker.receive(
+                    name, next(iter(publishers)),
+                    [item.status for item in message.status_list], time.monotonic(),
+                )
+        return callback
 
     @staticmethod
     def _stamp_nanoseconds(stamp: Any) -> int:
         return int(stamp.sec) * 1_000_000_000 + int(stamp.nanosec)
 
     def _nav_goal_status_locked(self) -> dict[str, Any]:
-        status = dict(
-            getattr(
-                self,
-                "_nav_goal_status",
-                {
-                    "available": False,
-                    "active": None,
-                    "detail": "Waiting for Nav2 action status",
-                },
-            )
-        )
-        received = getattr(self, "_nav_goal_status_received_monotonic", None)
-        if received is None:
-            return status
-        age = time.monotonic() - received
-        status["age_sec"] = age
-        if age > getattr(self, "nav_goal_status_freshness_sec", 3.0):
-            status.update(
-                {
-                    "available": False,
-                    "active": None,
-                    "detail": "Nav2 action status has not updated recently",
-                }
-            )
-        return status
+        self._refresh_navigation_servers_locked()
+        return self._navigation_goal_status.snapshot(time.monotonic())
 
     @staticmethod
     def _scan_points_in_map(

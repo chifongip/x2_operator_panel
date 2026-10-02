@@ -533,11 +533,17 @@
     byId("nav2-lifecycle").textContent = lifecycle.length ? `${activeNodes}/${lifecycle.length} active` : "Waiting";
     const goalStatus = navigation.goal_status;
     byId("nav2-goal-state").textContent = goalStatus?.available ? (goalStatus.active ? "Active" : "Idle") : (goalStatus?.detail || "Waiting");
+    byId("nav2-goal-state").title = Object.entries(goalStatus?.actions || {}).map(([name, action]) => {
+      const value = action.available ? (action.active ? "Active" : "Idle") : (action.connected ? "Unknown" : "Unavailable");
+      const age = action.age_sec == null ? "no status received" : `last status ${Math.floor(action.age_sec)}s ago`;
+      return `${name}: ${value}; ${age}`;
+    }).join("\n");
     byId("nav2-odom-state").textContent = navigation.odom?.fresh ? "Current" : (navigation.odom?.detail || "Waiting");
     const costmapServices = navigation.costmap_clear_services || {};
     const clearCostmapsButton = byId("clear-costmaps");
-    clearCostmapsButton.disabled = !(costmapServices.global && costmapServices.local);
-    clearCostmapsButton.title = clearCostmapsButton.disabled ? "Costmap clear services are unavailable" : "Clear both Nav2 costmaps";
+    clearCostmapsButton.disabled = status.task_admission?.blocked || !(costmapServices.global && costmapServices.local);
+    clearCostmapsButton.title = status.task_admission?.blocked ? status.task_admission.detail :
+      clearCostmapsButton.disabled ? "Costmap clear services are unavailable" : "Clear both Nav2 costmaps";
     const dockingMotionActive = (status.operations || []).some((operation) =>
       ["fine_align", "undock"].includes(operation.kind) && ["SUBMITTING", "ACTIVE"].includes(operation.status));
     const cancelDockingMotionButton = byId("cancel-docking-motion");
@@ -641,7 +647,8 @@
       return `<option value="${escapeHtml(plan.result.plan_id)}">${escapeHtml(plan.kind + " / " + plan.result.planning_mode + (plan.detail ? " / " + plan.detail : "") + target)}</option>`;
     }).join("") || '<option value="">Run Plan only to save a complete action</option>';
     if (Array.from(select.options).some((option) => option.value === previous)) select.value = previous;
-    const busy = ["running", "retrying", "paused"].includes(state.status?.manipulation_task?.status) ||
+    const busy = state.status?.task_admission?.blocked || state.status?.navigation?.goal_status?.active ||
+      ["running", "retrying", "paused"].includes(state.status?.manipulation_task?.status) ||
       (state.status?.operations || []).some((operation) => ["SUBMITTING", "ACTIVE", "CANCEL_REQUESTED"].includes(operation.status));
     button.disabled = !select.value || busy || !(executionUnlockRemaining() > 0);
   }
@@ -908,6 +915,10 @@
 
   function guidedWaitReason(workflow) {
     const step = guidedSteps[workflow.step];
+    if (state.status?.task_admission?.blocked) return state.status.task_admission.detail;
+    if (["running", "retrying", "paused"].includes(state.status?.manipulation_task?.status)) {
+      return "Waiting for the active manipulation task to finish.";
+    }
     if (state.status?.navigation?.goal_status?.active) return "Waiting for active navigation to finish.";
     if ((state.status?.operations || []).some((operation) => activeStatuses.includes(operation.status))) {
       return "Waiting for the active operation to finish.";
@@ -937,7 +948,9 @@
     const workflow = state.guidedWorkflow;
     const manipulationState = state.status?.manipulation_state?.state;
     const label = manipulationState === "HOLDING" ? "Place" : "Pick";
-    const active = state.status?.navigation?.goal_status?.active ||
+    const active = state.status?.task_admission?.blocked ||
+      ["running", "retrying", "paused"].includes(state.status?.manipulation_task?.status) ||
+      state.status?.navigation?.goal_status?.active ||
       (state.status?.operations || []).some((operation) => activeStatuses.includes(operation.status));
     const running = workflow && !workflow.failed && !workflow.completed;
     const unlocked = executionUnlockRemaining() > 0;
@@ -976,6 +989,10 @@
         throw new Error("Unlock physical motion before starting the combo sequence");
       }
       if (byId("plan-only").checked) throw new Error("Turn off Plan only for this physical sequence");
+      if (state.status?.task_admission?.blocked) throw new Error(state.status.task_admission.detail);
+      if (["running", "retrying", "paused"].includes(state.status?.manipulation_task?.status)) {
+        throw new Error("Wait for the active manipulation task to finish");
+      }
       if (state.status?.navigation?.goal_status?.active) throw new Error("Wait for active navigation to finish");
       if ((state.status?.operations || []).some((operation) => activeStatuses.includes(operation.status))) {
         throw new Error("Wait for the active operation to finish");
@@ -1075,7 +1092,9 @@
         throw new Error("Unlock physical motion before continuing the combo sequence");
       }
       if (byId("plan-only").checked) throw new Error("Turn off Plan only to continue the physical sequence");
-      if (state.status?.navigation?.goal_status?.active ||
+      if (state.status?.task_admission?.blocked ||
+          ["running", "retrying", "paused"].includes(state.status?.manipulation_task?.status) ||
+          state.status?.navigation?.goal_status?.active ||
           (state.status?.operations || []).some((operation) => activeStatuses.includes(operation.status))) {
         throw new Error("Wait for active motion to finish before continuing");
       }
