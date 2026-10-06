@@ -393,12 +393,12 @@ Collision Monitor lifecycle node to be available.
 After coarse navigation, **Check fine alignment** sends a measurement-only
 `/fine_align` goal. **Fine align** requires the timed, one-shot physical-motion
 unlock plus a separate confirmation and permits coupled forward, lateral, and
-yaw correction toward the tag9-derived table pose. Both require Nav2 idle and
+yaw correction toward the selected tag-derived docking pose. Both require Nav2 idle and
 manipulation state `EMPTY` or `HOLDING`; physical alignment additionally requires
 an active Collision Monitor lifecycle node. Reverse x is controlled by the
 navigation server's `allow_reverse_x` parameter and remains disabled by default.
 Feedback and final planar error appear in operation history and native action
-cancellation remains available. **Undock** submits the fixed-profile `/undock`
+cancellation remains available. **Undock** submits the selected-profile `/undock`
 action, which moves backward while correcting lateral and yaw drift using the
 distance and speed limits configured by `x2_navigation`; it requires the same physical-motion unlock, confirmation,
 Nav2-idle check, manipulation-state gate, and active Collision Monitor as physical
@@ -406,6 +406,61 @@ fine alignment. **Cancel docking motion** cancels the active fine-alignment or
 undocking goal; **Cancel active goals** still cancels every cancelable panel
 operation. `/api/fine-align/cancel` remains a compatibility alias for the shared
 `/api/docking/cancel` endpoint.
+
+### Docking profiles
+
+The **Docking profile** selector applies to Check fine alignment, Fine align,
+and the guided Pick/Place sequence. The panel reads profile names, tag IDs and
+frames, stand-off distances, lateral offsets, and yaw offsets from
+`/fine_align_server/get_parameters`; configure them in the navigation server,
+not in a separate panel file. Profile discovery refreshes every five seconds,
+with the existing `service_timeout_sec` bounding each asynchronous request.
+The default profile retains the navigation server's legacy tag/offset settings.
+The panel shows the selected geometry in meters and radians. Lateral offset is
+measured along tag `+X`; yaw offset is relative to facing the tag.
+
+**Server default** sends an empty `profile_id` to `/fine_align`, allowing the
+navigation server to choose its configured default. The separate **Undocking
+profile** selector defaults to **Last successful dock / server default**, which
+sends an empty selection to `/undock`. The navigation server then tracks the
+last successfully executed dock profile, falling back to its configured default
+after restart. An explicit undocking selection overrides that choice for one
+retreat. Measuring, failed/canceled docking, and undocking do not change the
+server's remembered successful dock.
+
+Guided sequences require profile discovery before starting and capture the
+docking profile when started, show it in the
+physical-motion confirmation, and retain it when retried or continued. After
+Dock succeeds, the sequence uses the profile reported by the action result for
+Undock, including when the server selected the default. Later selector edits
+and the separate manual Undocking profile choice do not change a running
+sequence. Dock/Undock stages wait while profile discovery is unavailable. Operation history displays the requested profile before acquisition
+and the resolved profile from feedback/results afterward.
+
+If discovery is unavailable, automatic manual selections remain usable; explicit
+selections are blocked until the catalog is available. A missing or disconnected
+profile remains visibly selected rather than silently switching to the default.
+Choose a currently configured profile again. Profile validation precedes
+consuming the physical-motion unlock. Nav2-idle checks, manipulation-state gates,
+Collision Monitor requirements, unlocks, confirmations, and cancellation remain
+in effect for every docking command.
+
+Authenticated API additions:
+
+- `GET /api/status` includes `docking_profiles`, with `available`,
+  `default_profile`, `profiles` (each containing `id`, `tag_id`, `tag_frame`,
+  `standoff`, `lateral_offset`, `yaw_offset`), and `detail`.
+- `POST /api/actions` accepts optional `profile_id` for `fine_align` and `undock`.
+  Omit it or use an empty string for automatic server selection. Non-string,
+  malformed, unknown, or unavailable explicit selections are rejected before
+  goal submission; the ROS server also validates selections.
+- Operation records include the requested `profile_id`; docking feedback and
+  results include the resolved `profile_id` and preserve `INVALID_PROFILE`
+  errors from the navigation server.
+
+Rebuild and restart the panel alongside the navigation server when upgrading
+these action interfaces. New profiles still require detector support and
+commissioned offsets before physical execution.
 
 The map's optional laser layer renders at most 360 finite ranges from
 `/scan_nav/laser`, transformed into `map` at the scan timestamp. It is a
@@ -561,3 +616,32 @@ Authenticated HTTP endpoints:
 After a manipulation-server restart, Continue is unavailable; verify the
 physical object state using the existing recovery controls. Restart the panel
 and manipulation server after rebuilding the new ROS interfaces.
+
+### Table profiles and guided docking
+
+The panel discovers immutable physical table profiles from
+`/pick_place_server/get_parameters` and includes them as `table_profiles` in
+status. The standalone manipulation table selector sends `table_profile_id` to
+Pick, Place, and PickPlace. Empty selection uses the manipulation server's
+configured default. Saved execution retains the table reported by its plan,
+independently of the current selector. Operation history shows resolved tables.
+
+The combo derives its table from the manually selected docking profile's **tag
+ID and frame**, requiring exactly one match. Multiple docking approaches may
+share the same physical table. Catalogs must be available and a match must exist
+before startup. The confirmation captures both names; retries and Continue keep
+them. After Dock, the panel checks its resolved profile against the captured
+table before advancing. Manipulation requests carry `table_profile_id` and
+`docking_profile_id`; the gateway checks the match again before consuming the
+motion unlock or submitting the ROS goal. Docking and manipulation select named
+profiles; matching by tag does not introduce visibility-based selection.
+
+Manual placement overrides remain available in the Place combo and standalone
+Place/PickPlace. They override the destination pose while the matching table
+continues to supply collision geometry. Without an override, placement uses the
+selected table's calibration. The combo ignores the standalone table dropdown.
+
+After updating the action definitions, rebuild and restart manipulation and the
+panel together; clients using the previous Pick/Place/PickPlace definitions must
+also be rebuilt. Add measured table profiles and corresponding detector tags
+before using new docking approaches for manipulation.

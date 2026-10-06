@@ -48,6 +48,7 @@ from nav2_msgs.action import NavigateThroughPoses, NavigateToPose
 from nav2_msgs.srv import ClearEntireCostmap
 from nav_msgs.msg import Odometry, Path as NavPath
 from x2_navigation.action import FineAlign, Undock
+from rcl_interfaces.srv import GetParameters
 from rclpy.action import ActionClient
 from rclpy.duration import Duration
 from rclpy.node import Node
@@ -58,6 +59,8 @@ from std_msgs.msg import Float32
 from tf2_ros import Buffer, TransformException, TransformListener
 import yaml
 
+from x2_operator_panel.docking_profiles import DockingProfileMonitor, unavailable_catalog
+from x2_operator_panel.table_profiles import TableProfileMonitor, matching_table
 from x2_operator_panel.manipulation_timing import ManipulationTiming
 from x2_operator_panel.navigation_status import ActionGoalStatus, NavigationGoalStatus
 
@@ -134,6 +137,8 @@ class Operation:
     requested_at: float
     plan_only: bool | None = None
     preset_id: str | None = None
+    profile_id: str | None = None
+    table_profile_id: str | None = None
     target_pose: dict[str, float] | None = None
     status: str = "SUBMITTING"
     goal_uuid: str | None = None
@@ -155,6 +160,8 @@ class Operation:
             "requested_at": self.requested_at,
             "plan_only": self.plan_only,
             "preset_id": self.preset_id,
+            "profile_id": self.profile_id,
+            "table_profile_id": self.table_profile_id,
             "target_pose": deepcopy(self.target_pose),
             "status": self.status,
             "goal_uuid": self.goal_uuid,
@@ -648,6 +655,16 @@ class OperatorPanelNode(Node):
         self._recovery_client = self.create_client(
             RecoverManipulationState, "/recover_manipulation_state"
         )
+        self._docking_profile_monitor = DockingProfileMonitor(
+            self.create_client(GetParameters, "/fine_align_server/get_parameters"),
+            self.service_timeout_sec,
+        )
+        self.create_timer(0.20, self._docking_profile_monitor.poll)
+        self._table_profile_monitor = TableProfileMonitor(
+            self.create_client(GetParameters, "/pick_place_server/get_parameters"),
+            self.service_timeout_sec,
+        )
+        self.create_timer(0.20, self._table_profile_monitor.poll)
         self._profile_reload_client = self.create_client(
             ReloadBoxProfiles, "/reload_box_profiles"
         )
@@ -885,6 +902,8 @@ class OperatorPanelNode(Node):
                     name: client.server_is_ready()
                     for name, client in self._action_clients.items()
                 },
+                "docking_profiles": self._docking_catalog(),
+                "table_profiles": self._table_catalog(),
                 "recovery_service_ready": self._recovery_client.service_is_ready(),
                 "box_profiles_reload": {
                     "service_ready": profile_reload_service_ready,
@@ -1187,8 +1206,56 @@ class OperatorPanelNode(Node):
         with self._lock:
             self._assert_task_idle_locked()
 
+    def _docking_catalog(self) -> dict[str, Any]:
+        monitor = getattr(self, "_docking_profile_monitor", None)
+        return monitor.snapshot() if monitor is not None else unavailable_catalog()
+
+    def _table_catalog(self) -> dict[str, Any]:
+        monitor = getattr(self, "_table_profile_monitor", None)
+        return monitor.snapshot() if monitor else unavailable_catalog("Waiting for table profiles")
+
+    def _table_profile_id(self, payload: dict[str, Any]) -> str:
+        selected = payload.get("table_profile_id", "")
+        if not isinstance(selected, str) or (selected and (
+                not selected.isascii() or not all(c.isalnum() or c == "_" for c in selected))):
+            raise PanelCommandError("Invalid table profile ID")
+        catalog = self._table_catalog()
+        if selected and (not catalog["available"] or selected not in {
+                profile["id"] for profile in catalog["profiles"]}):
+            raise PanelCommandError("The selected table profile is unavailable")
+        if "docking_profile_id" in payload:
+            dock_id = payload["docking_profile_id"]
+            docking = self._docking_catalog()
+            dock = next((profile for profile in docking["profiles"]
+                         if profile["id"] == dock_id), None) if docking["available"] else None
+            if dock is None:
+                raise PanelCommandError("Combo docking profile is unavailable")
+            try:
+                table = matching_table(dock, catalog)
+            except ValueError as error:
+                raise PanelCommandError(str(error)) from error
+            if selected != table["id"]:
+                raise PanelCommandError("Combo table profile does not match the docking tag and frame")
+        return selected
+
+    def _docking_profile_id(self, payload: dict[str, Any]) -> str:
+        profile_id = payload.get("profile_id", "")
+        if not isinstance(profile_id, str):
+            raise PanelCommandError("profile_id must be a string")
+        if profile_id and (not profile_id.isascii() or not all(
+                character.isalnum() or character == "_" for character in profile_id)):
+            raise PanelCommandError("profile_id must contain only letters, numbers, or underscores")
+        catalog = self._docking_catalog()
+        if profile_id:
+            if not catalog["available"]:
+                raise PanelCommandError("Docking profile configuration is unavailable")
+            if profile_id not in {profile["id"] for profile in catalog["profiles"]}:
+                raise PanelCommandError(f"Unknown docking profile: {profile_id}")
+        return profile_id
+
     def _submit_fine_align(self, payload: dict[str, Any]) -> Operation:
         self._assert_task_idle()
+        profile_id = self._docking_profile_id(payload)
         execute = self._optional_boolean(payload, "execute", False)
         if execute and payload.get("confirmed") is not True:
             raise PanelCommandError("Physical fine alignment requires confirmation")
@@ -1225,9 +1292,11 @@ class OperatorPanelNode(Node):
                 self._execution_unlocked_until = 0.0
         goal = FineAlign.Goal()
         goal.execute = execute
+        goal.profile_id = profile_id
         operation = Operation(
             identifier=str(uuid4()),
             kind="fine_align",
+            profile_id=profile_id,
             requested_at=time.time(),
             plan_only=not execute,
             admission_deadline=time.monotonic() + self.goal_admission_timeout_sec,
@@ -1246,11 +1315,15 @@ class OperatorPanelNode(Node):
         future.add_done_callback(
             lambda sent: self._on_goal_response(operation.identifier, sent)
         )
-        self._audit("fine_align", "submitted", "execution" if execute else "measure_only")
+        self._audit(
+            "fine_align", "submitted",
+            f"{'execution' if execute else 'measure_only'}; profile={profile_id or 'server default'}",
+        )
         return operation
 
     def _submit_undock(self, payload: dict[str, Any]) -> Operation:
         self._assert_task_idle()
+        profile_id = self._docking_profile_id(payload)
         if payload.get("confirmed") is not True:
             raise PanelCommandError("Physical undocking requires confirmation")
         with self._lock:
@@ -1281,14 +1354,17 @@ class OperatorPanelNode(Node):
         operation = Operation(
             identifier=str(uuid4()),
             kind="undock",
+            profile_id=profile_id,
             requested_at=time.time(),
             plan_only=False,
             admission_deadline=time.monotonic() + self.goal_admission_timeout_sec,
         )
         self._register_operation(operation)
         try:
+            goal = Undock.Goal()
+            goal.profile_id = profile_id
             future = self._action_clients["undock"].send_goal_async(
-                Undock.Goal(),
+                goal,
                 feedback_callback=lambda message: self._on_feedback(
                     operation.identifier, message
                 ),
@@ -1299,7 +1375,10 @@ class OperatorPanelNode(Node):
         future.add_done_callback(
             lambda sent: self._on_goal_response(operation.identifier, sent)
         )
-        self._audit("undock", "submitted", "execution")
+        self._audit(
+            "undock", "submitted",
+            f"execution; profile={profile_id or 'last successful dock / server default'}",
+        )
         return operation
 
     def _submit_manipulation(self, kind: str, payload: dict[str, Any]) -> Operation:
@@ -1319,7 +1398,11 @@ class OperatorPanelNode(Node):
         if plan_id and (kind == "reset" or plan_only is not False):
             raise PanelCommandError("Saved plans require plan_only: false")
         instance_id = None if plan_id else self._selected_visible_box_id(kind, payload)
+        table_profile_id = (self._table_profile_id(payload)
+                            if kind in {"pick", "place", "pick_place"} else None)
         goal = self._build_manipulation_goal(kind, payload, plan_only, instance_id)
+        if table_profile_id is not None:
+            goal.table_profile_id = table_profile_id
         if requires_execution:
             if payload.get("confirmed") is not True:
                 raise PanelCommandError("Physical manipulation requires per-command confirmation")
@@ -1332,6 +1415,7 @@ class OperatorPanelNode(Node):
             kind=kind,
             requested_at=time.time(),
             plan_only=plan_only,
+            table_profile_id=table_profile_id,
             admission_deadline=time.monotonic() + self.goal_admission_timeout_sec,
         )
         if instance_id:
@@ -1355,6 +1439,8 @@ class OperatorPanelNode(Node):
         audit_detail = "plan_only" if plan_only else "execution"
         if instance_id is not None:
             audit_detail = f"{audit_detail}; {instance_id}"
+        if table_profile_id is not None:
+            audit_detail += f"; table={table_profile_id or 'server default'}"
         self._audit(kind, "submitted", audit_detail)
         return operation
 
@@ -1502,7 +1588,7 @@ class OperatorPanelNode(Node):
                 goal.instance_id = instance_id or ""
             if "place_pose" in payload:
                 goal.place_pose = self._parse_place_pose(payload["place_pose"])
-            # A default-constructed pose tells pick_place_server to use tag9.
+            # An empty pose uses the selected table calibration.
             goal.plan_only = bool(plan_only)
             return goal
         if kind == "move_carry_pose":
@@ -1597,6 +1683,10 @@ class OperatorPanelNode(Node):
     def _on_feedback(self, operation_id: str, message: Any) -> None:
         feedback = message.feedback
         details: dict[str, Any] = {}
+        if hasattr(feedback, "table_profile_id"):
+            details["table_profile_id"] = feedback.table_profile_id
+        if hasattr(feedback, "profile_id"):
+            details["profile_id"] = feedback.profile_id
         if hasattr(feedback, "stage"):
             details["stage"] = feedback.stage
         if hasattr(feedback, "progress"):
@@ -1674,6 +1764,8 @@ class OperatorPanelNode(Node):
             "success",
             "plan_id",
             "planning_mode",
+            "profile_id",
+            "table_profile_id",
             "error_code",
             "message",
             "object_held",

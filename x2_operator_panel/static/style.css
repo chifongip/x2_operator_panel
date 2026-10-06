@@ -94,6 +94,8 @@ h3 { grid-column: 1 / -1; font-size: .82rem; font-weight: 650; }
 .posture-control { display: grid; grid-template-columns: minmax(180px, 1fr) minmax(300px, 1.7fr) auto; align-items: end; gap: 10px 12px; margin-top: 12px; padding-top: 12px; border-top: 1px solid #d8e0e1; }.posture-control > div { display: grid; gap: 4px; }.posture-control h3 { margin: 0; font-size: .82rem; font-weight: 650; }.posture-control .muted { font-size: .76rem; }.posture-fields { min-width: 0; margin: 0; padding: 0; border: 0; display: grid; grid-template-columns: repeat(3, minmax(100px, 1fr)); gap: 8px; }.posture-fields .plan-toggle { align-content: end; padding-bottom: 8px; }.posture-actions { display: flex !important; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
 .preset-list { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; color: #607176; font-size: .82rem; }
 .preset-list + .command-row { margin-top: 8px; }
+.docking-profile-controls label { flex: 1 1 220px; min-width: 0; }
+#docking-profile-detail { margin: 8px 0; }
 
 .operations-section, .audit-section { padding: 14px; }.operations-section { grid-column: 1 / 2; }.audit-section { grid-column: 2 / 3; }
 .table-scroll { overflow-x: auto; margin-top: 10px; }table { border-collapse: collapse; width: 100%; font-size: .78rem; }th, td { border-bottom: 1px solid #e0e6e7; padding: 8px 6px; text-align: left; vertical-align: top; }th { color: #526369; font-weight: 650; }td { color: #33464b; }.audit-log { margin: 10px 0 0; padding: 0; list-style: none; max-height: 184px; overflow: auto; font-size: .76rem; }.audit-log li { padding: 7px 0; border-bottom: 1px solid #e0e6e7; }.audit-log time { color: #65767b; margin-right: 6px; }

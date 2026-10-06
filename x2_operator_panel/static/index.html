@@ -151,6 +151,11 @@
             <h2>Manipulation</h2>
             <label class="plan-toggle"><input id="plan-only" type="checkbox" checked>Plan only</label>
           </div>
+          <div class="visible-box-picker">
+            <label for="table-profile">Table profile (standalone manipulation)</label>
+            <select id="table-profile"><option value="">Server default</option></select>
+            <p id="table-profile-detail" class="muted" role="status">Waiting for table profiles. Combo selection follows the docking tag and frame.</p>
+          </div>
           <div class="saved-plan-controls">
             <label for="saved-plan-select">Saved plan</label>
             <select id="saved-plan-select"><option value="">Run Plan only to save a complete action</option></select>
@@ -239,6 +244,15 @@
         <section class="command-group">
           <h2>Navigation destinations</h2>
           <div id="preset-list" class="preset-list">No configured destinations</div>
+          <div class="command-row docking-profile-controls">
+            <label for="docking-profile">Docking profile (also used by guided sequences)
+              <select id="docking-profile"><option value="">Server default</option></select>
+            </label>
+            <label for="undocking-profile">Undocking profile
+              <select id="undocking-profile"><option value="">Last successful dock / server default</option></select>
+            </label>
+          </div>
+          <p id="docking-profile-detail" class="muted" role="status">Waiting for docking profile configuration</p>
           <div class="command-row">
             <button id="clear-costmaps" class="secondary" type="button" disabled>Clear Costmap</button>
             <button id="check-fine-align" type="button">Check fine alignment</button>

@@ -16,6 +16,13 @@ function fixture(kind, fast = false, completionStatus = "SUCCEEDED") {
       operations: [{ id: "navigation-1", kind: "navigate", status: "SUCCEEDED" }],
       manipulation_state: { state: kind === "pick" ? "EMPTY" : "HOLDING" },
       navigation: { goal_status: { available: true, active: false } },
+      docking_profiles: { available: true, default_profile: "default", profiles: [
+        { id: "default", tag_id: 9, tag_frame: "tag9" }, { id: "offset", tag_id: 9, tag_frame: "tag9" },
+      ] },
+      table_profiles: { available: true, default_profile: "default", profiles: [
+        { id: "default", tag_id: 9, tag_frame: "tag9", dimensions: [0.6, 0.4, 0.6] },
+        { id: "second", tag_id: 10, tag_frame: "tag10", dimensions: [0.8, 0.5, 0.7] },
+      ] },
       locomanipulation_posture: { ready: true }, execution_unlock_remaining_sec: 30,
       visible_boxes: { fresh: true, boxes: [{ instance_id: "box-1" }] },
     },
@@ -53,7 +60,7 @@ function fixture(kind, fast = false, completionStatus = "SUCCEEDED") {
   vm.runInContext(fragment, context);
   function finishOperation(operation, status, success, publishState = true) {
     operation.status = status;
-    operation.result = { success };
+    operation.result = { success, ...(operation.kind === "fine_align" ? { profile_id: "offset" } : {}) };
     if (publishState && operation.kind === kind && success && status === "SUCCEEDED") {
       state.status.manipulation_state.state = kind === "pick" ? "HOLDING" : "EMPTY";
     }
@@ -89,6 +96,8 @@ async function fullSequence(kind, fast = false) {
     { height: 0.48, waist_yaw: 0.2, wait_for_settle: true, confirmed: true });
   assert.deepEqual(f.commands()[3].payload,
     { height: 0.64, waist_yaw: 0.0, wait_for_settle: true, confirmed: true });
+  assert.equal(f.commands()[0].payload.profile_id, "default");
+  assert.equal(f.commands()[4].payload.profile_id, "offset", "Undock uses the resolved successful Dock profile");
   assert.equal(f.state.guidedWorkflow.completed, true);
   f.context.renderGuidedWorkflow();
   assert.equal(f.fields["dock-manipulate-undock"].disabled, true,
@@ -98,7 +107,81 @@ async function fullSequence(kind, fast = false) {
   assert.equal(f.fields["dock-manipulate-undock"].disabled, false);
 }
 
+async function tableBindingChecks() {
+  const changedBeforeRetreat = fixture("pick");
+  await changedBeforeRetreat.context.advanceGuidedWorkflow();
+  await changedBeforeRetreat.finish();
+  await changedBeforeRetreat.finish();
+  await changedBeforeRetreat.finish();
+  changedBeforeRetreat.state.status.docking_profiles.profiles[1].tag_id = 10;
+  changedBeforeRetreat.state.status.docking_profiles.profiles[1].tag_frame = "tag10";
+  await changedBeforeRetreat.finish();
+  assert.equal(changedBeforeRetreat.commands().length, 4,
+    "A restarted docking server must not redirect the retreat to another table");
+
+  const missing = fixture("pick");
+  missing.state.status.table_profiles.profiles = [];
+  await missing.context.advanceGuidedWorkflow();
+  assert.equal(missing.commands().length, 0);
+  assert.match(missing.context.error, /match exactly one table/);
+
+  const distinct = fixture("place");
+  distinct.state.status.docking_profiles.profiles[1].tag_id = 10;
+  distinct.state.status.docking_profiles.profiles[1].tag_frame = "tag10";
+  distinct.fields["docking-profile"] = { value: "offset" };
+  distinct.context.manualPlacePoseEnabled = () => true;
+  distinct.context.placePose = () => ({ frame_id: "base_link", x: 0.35, y: 0, z: 0.17, yaw: 0 });
+  await distinct.context.advanceGuidedWorkflow();
+  assert.equal(distinct.state.guidedWorkflow.tableId, "second");
+  assert.match(distinct.confirmations[0], /table second/);
+  await distinct.finish();
+  distinct.fields["table-profile"] = { value: "default" };
+  await distinct.finish();
+  const payload = distinct.commands()[2].payload;
+  assert.equal(payload.table_profile_id, "second");
+  assert.equal(payload.docking_profile_id, "offset");
+  assert.equal(payload.place_pose.x, 0.35);
+
+  const mismatch = fixture("pick");
+  mismatch.state.status.docking_profiles.profiles[1].tag_id = 10;
+  mismatch.state.status.docking_profiles.profiles[1].tag_frame = "tag10";
+  await mismatch.context.advanceGuidedWorkflow();
+  await mismatch.finish(); // The fake Dock resolves offset, which now targets another table.
+  assert.equal(mismatch.commands().length, 1);
+  assert.equal(mismatch.state.guidedWorkflow.resumeBlocked, true);
+
+  const dockDisconnected = fixture("pick");
+  await dockDisconnected.context.advanceGuidedWorkflow();
+  dockDisconnected.state.status.table_profiles.available = false;
+  await dockDisconnected.finish();
+  assert.equal(dockDisconnected.commands().length, 1);
+  assert.equal(!!dockDisconnected.state.guidedWorkflow.failed, false);
+  dockDisconnected.state.status.table_profiles.available = true;
+  dockDisconnected.context.updateGuidedWorkflow();
+  await flush();
+  assert.equal(dockDisconnected.commands().length, 2);
+
+  const changed = fixture("pick");
+  await changed.context.advanceGuidedWorkflow();
+  changed.state.status.table_profiles.profiles[0].dimensions[0] = 1.0;
+  await changed.finish();
+  assert.equal(changed.commands().length, 1);
+  assert.equal(changed.state.guidedWorkflow.resumeBlocked, true);
+
+  const disconnected = fixture("pick");
+  await disconnected.context.advanceGuidedWorkflow();
+  await disconnected.finish();
+  disconnected.state.status.table_profiles.available = false;
+  await disconnected.finish();
+  assert.equal(disconnected.commands().length, 2);
+  disconnected.state.status.table_profiles.available = true;
+  disconnected.context.updateGuidedWorkflow();
+  await flush();
+  assert.equal(disconnected.commands()[2].payload.table_profile_id, "default");
+}
+
 (async () => {
+  await tableBindingChecks();
   for (const kind of ["pick", "place"]) {
     await fullSequence(kind);
     await fullSequence(kind, true);
@@ -180,6 +263,50 @@ async function fullSequence(kind, fast = false) {
   delayedState.context.updateGuidedWorkflow();
   await flush();
   assert.equal(delayedState.commands().length, 4);
+
+  const named = fixture("pick");
+  named.fields["docking-profile"] = { value: "offset" };
+  await named.context.advanceGuidedWorkflow();
+  assert.equal(named.commands()[0].payload.profile_id, "offset");
+  assert.match(named.confirmations[0], /docking profile offset/);
+  named.fields["docking-profile"].value = "default";
+  named.state.status.docking_profiles.default_profile = "default";
+  for (let step = 0; step < 4; step++) await named.finish();
+  assert.equal(named.commands()[4].payload.profile_id, "offset", "Form changes cannot change retreat selection");
+
+  const profileRetry = fixture("pick");
+  profileRetry.fields["docking-profile"] = { value: "offset" };
+  await profileRetry.context.advanceGuidedWorkflow();
+  await profileRetry.finish("ABORTED", false);
+  profileRetry.fields["docking-profile"].value = "default";
+  profileRetry.state.status.execution_unlock_remaining_sec = 30;
+  await profileRetry.context.continueGuidedWorkflow();
+  assert.equal(profileRetry.commands()[1].payload.profile_id, "offset", "Retry preserves the captured profile");
+
+  const noCatalog = fixture("pick");
+  noCatalog.state.status.docking_profiles.available = false;
+  noCatalog.context.renderGuidedWorkflow();
+  assert.equal(noCatalog.fields["dock-manipulate-undock"].disabled, true);
+  await noCatalog.context.advanceGuidedWorkflow();
+  assert.equal(noCatalog.commands().length, 0);
+  assert.match(noCatalog.context.error, /Docking profile configuration is unavailable/);
+
+  const disconnectedRetreat = fixture("place");
+  await disconnectedRetreat.context.advanceGuidedWorkflow();
+  for (let step = 0; step < 3; step++) await disconnectedRetreat.finish();
+  disconnectedRetreat.state.status.docking_profiles.available = false;
+  await disconnectedRetreat.finish();
+  assert.equal(disconnectedRetreat.commands().length, 4, "Wait for catalog before retreat");
+  disconnectedRetreat.state.status.docking_profiles.available = true;
+  disconnectedRetreat.context.updateGuidedWorkflow();
+  await flush();
+  assert.equal(disconnectedRetreat.commands()[4].payload.profile_id, "offset");
+
+  const staleProfile = fixture("pick");
+  staleProfile.fields["docking-profile"] = { value: "removed" };
+  await staleProfile.context.advanceGuidedWorkflow();
+  assert.equal(staleProfile.commands().length, 0);
+  assert.match(staleProfile.context.error, /selected docking profile is unavailable/);
 
   const captured = fixture("pick");
   await captured.context.advanceGuidedWorkflow();

@@ -489,6 +489,8 @@
       ? `${visibleBoxes.box_count} fresh`
       : (visibleBoxes?.detail || "Waiting");
     renderVisibleBoxes(visibleBoxes);
+    renderDockingProfiles();
+    renderTableProfiles();
     renderGuidedWorkflow();
     const metrics = status.localization_metrics || {};
     const confidence = metrics.confidence;
@@ -644,7 +646,7 @@
     select.innerHTML = Array.from(state.savedPlans.values()).map((plan) => {
       const p = plan.result.achieved_pose;
       const target = p ? ` → (${p.x.toFixed(3)}, ${p.y.toFixed(3)}, ${p.z.toFixed(3)})` : "";
-      return `<option value="${escapeHtml(plan.result.plan_id)}">${escapeHtml(plan.kind + " / " + plan.result.planning_mode + (plan.detail ? " / " + plan.detail : "") + target)}</option>`;
+      return `<option value="${escapeHtml(plan.result.plan_id)}">${escapeHtml(plan.kind + " / " + plan.result.planning_mode + (plan.result.table_profile_id ? " / table " + plan.result.table_profile_id : "") + (plan.detail ? " / " + plan.detail : "") + target)}</option>`;
     }).join("") || '<option value="">Run Plan only to save a complete action</option>';
     if (Array.from(select.options).some((option) => option.value === previous)) select.value = previous;
     const busy = state.status?.task_admission?.blocked || state.status?.navigation?.goal_status?.active ||
@@ -660,7 +662,7 @@
     if (!window.confirm(`Execute saved ${plan.kind} plan (${plan.result.planning_mode}) with its stored targets?`)) return;
     try {
       await api("/api/actions", {method: "POST", body: JSON.stringify({kind: plan.kind,
-        plan_only: false, plan_id: id, confirmed: true})});
+        plan_only: false, plan_id: id, table_profile_id: plan.result.table_profile_id || "", confirmed: true})});
       state.savedPlans.clear();
       renderSavedPlans();
       setError("");
@@ -693,7 +695,13 @@
       const message = operation.result?.message || operation.result?.error_msg || operation.detail || "--";
       const planarError = formatPlanarError(operation.result?.final_error || operation.feedback?.current_error);
       const motionDetail = planarError || formatUndockDistance(operation);
-      const detail = motionDetail ? `${message}; ${motionDetail}` : message;
+      const profileId = operation.result?.profile_id || operation.feedback?.profile_id || operation.profile_id;
+      const profileDetail = ["fine_align", "undock"].includes(operation.kind)
+        ? `Profile: ${profileId || (operation.kind === "undock" ? "last successful dock / server default" : "server default")}` : "";
+      const tableId = operation.result?.table_profile_id || operation.feedback?.table_profile_id || operation.table_profile_id;
+      const tableDetail = ["pick", "place", "pick_place"].includes(operation.kind)
+        ? `Table: ${tableId || "server default"}` : "";
+      const detail = [message, profileDetail, tableDetail, motionDetail].filter(Boolean).join("; ");
       return `<tr><td>${escapeHtml(operation.kind)}</td><td>${escapeHtml(operation.status)}</td><td>${escapeHtml(operation.stage)}</td><td>${operation.progress == null ? "--" : `${Math.round(operation.progress * 100)}%`}</td><td>${escapeHtml(detail)}</td></tr>`;
     }).join("") || '<tr><td colspan="5">No panel operations</td></tr>';
   }
@@ -842,8 +850,9 @@
       }
       const planOnly = kind === "reset" ? null : byId("plan-only").checked;
       const physical = kind === "reset" || !planOnly;
-      if (physical && !window.confirm("Submit a physical manipulation command?")) return;
-      const payload = { kind, ...extra };
+      const payload = { kind, ...extra, ...(["pick", "place", "pick_place"].includes(kind)
+        ? { table_profile_id: tableProfileSelection() } : {}) };
+      if (physical && !window.confirm(`Submit a physical manipulation command${Object.hasOwn(payload, "table_profile_id") ? ` using table ${payload.table_profile_id || "server default"}` : ""}?`)) return;
       if (planOnly !== null) payload.plan_only = planOnly;
       if (physical) payload.confirmed = true;
       await api("/api/actions", { method: "POST", body: JSON.stringify(payload) });
@@ -852,6 +861,105 @@
   }
   byId("execute-saved-plan")?.addEventListener("click", executeSavedPlan);
   const guidedSteps = ["fine_align", "set_height", "manipulate", "default_height", "undock"];
+
+  function tableProfileSelection() {
+    const id = byId("table-profile").value || "";
+    const catalog = state.status?.table_profiles;
+    if (id && (!catalog?.available || !catalog.profiles.some((table) => table.id === id))) {
+      throw new Error("The selected table profile is unavailable; choose again");
+    }
+    return id;
+  }
+
+  function comboTable(profileId, expectedId = null, expectedSignature = null) {
+    const docking = state.status?.docking_profiles;
+    const tables = state.status?.table_profiles;
+    if (!docking?.available || !tables?.available) {
+      throw new Error("Waiting for docking and table profile configuration.");
+    }
+    const dock = docking.profiles.find((profile) => profile.id === profileId);
+    if (!dock) throw new Error("The combo docking profile is unavailable.");
+    const matches = tables.profiles.filter((table) => table.tag_id === dock.tag_id && table.tag_frame === dock.tag_frame);
+    if (matches.length !== 1) throw new Error("Docking must match exactly one table profile by tag ID and frame.");
+    if (expectedId && matches[0].id !== expectedId) throw new Error("The docking result does not match the combo table.");
+    if (expectedSignature && JSON.stringify(matches[0]) !== expectedSignature) {
+      throw new Error("The combo table calibration changed; verify robot state before restarting.");
+    }
+    return matches[0];
+  }
+
+  function bindCompletedDock(workflow, operation) {
+    const resolved = operation.result?.profile_id;
+    if (!resolved) throw new Error("Dock did not report its resolved profile; verify robot state before restarting.");
+    comboTable(resolved, workflow.tableId, workflow.tableSignature);
+    workflow.profileId = resolved;
+  }
+
+  function renderTableProfiles() {
+    const catalog = state.status?.table_profiles;
+    const select = byId("table-profile");
+    const selected = select.value || "";
+    const choices = [["", catalog?.available ? `Server default (${catalog.default_profile})` : "Server default"],
+      ...(catalog?.available ? catalog.profiles.map((table) => [table.id, table.id]) : [])];
+    if (selected && !choices.some(([value]) => value === selected)) choices.push([selected, `${selected} (unavailable)`]);
+    const signature = JSON.stringify(choices);
+    if (select.dataset.choices !== signature) {
+      select.replaceChildren(...choices.map(([value, label]) => {
+        const option = document.createElement("option");
+        option.value = value; option.textContent = label; return option;
+      }));
+      select.value = selected; select.dataset.choices = signature;
+    }
+    const table = catalog?.profiles?.find((item) => item.id === (selected || catalog.default_profile));
+    byId("table-profile-detail").textContent = table
+      ? `Table ${table.id}: tag ${table.tag_id} (${table.tag_frame}), dimensions ${table.dimensions.map((value) => value.toFixed(3)).join(" × ")} m. Combo selection follows the docking tag and frame.`
+      : catalog?.available ? "The selected table profile is unavailable; choose again."
+        : catalog?.detail || "Waiting for table profile configuration.";
+  }
+
+  function dockingProfileSelection(undocking = false) {
+    const profileId = byId(undocking ? "undocking-profile" : "docking-profile").value || "";
+    const catalog = state.status?.docking_profiles;
+    if (profileId && (!catalog?.available || !catalog.profiles.some((profile) => profile.id === profileId))) {
+      throw new Error("The selected docking profile is unavailable; choose a configured profile again");
+    }
+    return profileId;
+  }
+
+  function renderDockingProfiles() {
+    const catalog = state.status?.docking_profiles;
+    const running = state.guidedWorkflow && !state.guidedWorkflow.failed && !state.guidedWorkflow.completed;
+    for (const [id, automatic] of [["docking-profile", "Server default"],
+        ["undocking-profile", "Last successful dock / server default"]]) {
+      const select = byId(id);
+      const selected = select.value || "";
+      const choices = [["", id === "docking-profile" && catalog?.available
+        ? `Server default (${catalog.default_profile})` : automatic],
+        ...(catalog?.available ? catalog.profiles.map((profile) => [profile.id, profile.id]) : [])];
+      if (selected && !choices.some(([value]) => value === selected)) {
+        choices.push([selected, `${selected} (unavailable)`]);
+      }
+      const signature = JSON.stringify(choices);
+      if (select.dataset.choices !== signature) {
+        select.replaceChildren(...choices.map(([value, label]) => {
+          const option = document.createElement("option");
+          option.value = value;
+          option.textContent = label;
+          return option;
+        }));
+        select.value = selected;
+        select.dataset.choices = signature;
+      }
+      select.disabled = !!running;
+    }
+    const selected = byId("docking-profile").value || catalog?.default_profile;
+    const profile = catalog?.profiles?.find((item) => item.id === selected);
+    byId("docking-profile-detail").textContent = !catalog?.available
+      ? `${catalog?.detail || "Waiting for docking profile configuration"}. Automatic manual selection remains available.`
+      : !profile ? "The selected docking profile is no longer configured; choose again."
+        : `Dock ${profile.id}: tag ${profile.tag_id} (${profile.tag_frame}), stand-off ${profile.standoff.toFixed(3)} m, lateral offset ${profile.lateral_offset.toFixed(3)} m, yaw offset ${profile.yaw_offset.toFixed(3)} rad. Undocking uses its own selection above.`;
+  }
+
   const activeStatuses = ["SUBMITTING", "ACTIVE", "CANCEL_REQUESTED"];
 
   function guidedStepLabel(step, label) {
@@ -879,11 +987,18 @@
       }
       workflow.operationSeen = true;
       if (activeStatuses.includes(operation.status)) return;
+      if (guidedSteps[workflow.step] === "fine_align" && operation.status === "SUCCEEDED" &&
+          operation.result?.success !== false && (!state.status?.docking_profiles?.available ||
+          !state.status?.table_profiles?.available)) return;
       workflow.operationId = null;
       if (operation.status !== "SUCCEEDED" || operation.result?.success === false) {
         failGuidedWorkflow(workflow, `${workflow.label} stopped at ${guidedStepLabel(guidedSteps[workflow.step], workflow.label)}: ${operation.result?.message || operation.detail || operation.status}`,
           ["OUTCOME_UNKNOWN", "ERROR"].includes(operation.status));
         return;
+      }
+      if (guidedSteps[workflow.step] === "fine_align") {
+        try { bindCompletedDock(workflow, operation); }
+        catch (error) { failGuidedWorkflow(workflow, error.message, true); return; }
       }
       workflow.step += 1;
       if (workflow.step === guidedSteps.length) {
@@ -918,6 +1033,13 @@
     if (state.status?.task_admission?.blocked) return state.status.task_admission.detail;
     if (["running", "retrying", "paused"].includes(state.status?.manipulation_task?.status)) {
       return "Waiting for the active manipulation task to finish.";
+    }
+    if (["fine_align", "undock"].includes(step) && !state.status?.docking_profiles?.available) {
+      return "Waiting for docking profile configuration.";
+    }
+    if (["fine_align", "manipulate", "undock"].includes(step)) {
+      try { comboTable(workflow.profileId, workflow.tableId, workflow.tableSignature); }
+      catch (error) { return error.message; }
     }
     if (state.status?.navigation?.goal_status?.active) return "Waiting for active navigation to finish.";
     if ((state.status?.operations || []).some((operation) => activeStatuses.includes(operation.status))) {
@@ -961,17 +1083,24 @@
       : "Resume at the failed stage after verifying robot state";
     if (running) {
       const stepLabel = guidedStepLabel(guidedSteps[workflow.step], workflow.label);
-      button.textContent = `Running ${workflow.label}: ${stepLabel}`;
+      button.textContent = `Running ${workflow.label}: ${stepLabel} (${workflow.profileId || "server default"}, table ${workflow.tableId})`;
       button.disabled = true;
       message.textContent = workflow.cancelRequested ? "Stopping sequence; no further steps will start."
+        : workflow.operationId && guidedSteps[workflow.step] === "fine_align" &&
+          (!state.status?.docking_profiles?.available || !state.status?.table_profiles?.available)
+          ? "Waiting for docking and table profile configuration before advancing."
         : workflow.operationId ? `Waiting for ${stepLabel} to finish.`
           : guidedWaitReason(workflow) || `Starting ${stepLabel} automatically (${workflow.step + 1}/${guidedSteps.length}).`;
     } else {
       button.textContent = `Dock → Set Height → ${label} → Default Height → Undock`;
-      button.disabled = active || state.guidedSubmitting || !["EMPTY", "HOLDING"].includes(manipulationState) || byId("plan-only").checked || !unlocked;
+      let tableProblem = "";
+      try { comboTable(dockingProfileSelection() || state.status?.docking_profiles?.default_profile); }
+      catch (error) { tableProblem = error.message; }
+      button.disabled = !!tableProblem || active || state.guidedSubmitting || !state.status?.docking_profiles?.available || !["EMPTY", "HOLDING"].includes(manipulationState) || byId("plan-only").checked || !unlocked;
       message.textContent = workflow?.message || (byId("plan-only").checked
         ? "Turn off Plan only to run the physical sequence."
         : active ? "Wait for the active operation to finish."
+          : tableProblem ? tableProblem
           : !unlocked ? "Unlock physical motion before starting the combo sequence."
           : `Ready for ${label.toLowerCase()}. One confirmation runs all five steps automatically.`);
     }
@@ -1003,9 +1132,12 @@
       const posture = { ...postureTarget(), wait_for_settle: true };
       const placeTarget = kind === "place" && manualPlacePoseEnabled() ? placePose() : null;
       const label = kind === "pick" ? "Pick" : "Place";
+      if (!state.status?.docking_profiles?.available) throw new Error("Docking profile configuration is unavailable");
+      const profileId = dockingProfileSelection() || state.status.docking_profiles.default_profile;
+      const table = comboTable(profileId);
       const missingNavStatus = !state.status?.navigation?.goal_status?.available;
-      if (!window.confirm(`Run the complete physical sequence: Dock → Set Height (${posture.height.toFixed(3)} m, waist yaw ${posture.waist_yaw.toFixed(4)} rad) → ${label} → Default Height → Undock? All five steps will run automatically.${missingNavStatus ? " Nav2 status is unavailable: confirm Nav2 is idle before starting." : ""}`)) return;
-      state.guidedWorkflow = { kind, label, posture, placeTarget, instanceId: null,
+      if (!window.confirm(`Run the complete physical sequence using docking profile ${profileId || "server default"} and table ${table.id}: Dock → Set Height (${posture.height.toFixed(3)} m, waist yaw ${posture.waist_yaw.toFixed(4)} rad) → ${label} → Default Height → Undock? All five steps will run automatically.${missingNavStatus ? " Nav2 status is unavailable: confirm Nav2 is idle before starting." : ""}`)) return;
+      state.guidedWorkflow = { kind, label, posture, placeTarget, profileId, tableId: table.id, tableSignature: JSON.stringify(table), instanceId: null,
         step: 0, operationId: null, confirmNav2Idle: missingNavStatus, useManualUnlock: true };
       setError("");
       starting = false;
@@ -1028,9 +1160,9 @@
     const postureStep = ["set_height", "default_height"].includes(step);
     const posture = step === "set_height" ? workflow.posture : { height: 0.64, waist_yaw: 0.0, wait_for_settle: true };
     const payload = postureStep ? { ...posture, confirmed: true }
-      : step === "fine_align" ? { kind: "fine_align", execute: true, confirmed: true, confirm_nav2_idle: workflow.confirmNav2Idle }
-      : step === "undock" ? { kind: "undock", confirmed: true, confirm_nav2_idle: workflow.confirmNav2Idle }
-      : { kind: workflow.kind, plan_only: false, confirmed: true,
+      : step === "fine_align" ? { kind: "fine_align", profile_id: workflow.profileId || "", execute: true, confirmed: true, confirm_nav2_idle: workflow.confirmNav2Idle }
+      : step === "undock" ? { kind: "undock", profile_id: workflow.profileId || "", confirmed: true, confirm_nav2_idle: workflow.confirmNav2Idle }
+      : { kind: workflow.kind, table_profile_id: workflow.tableId, docking_profile_id: workflow.profileId, plan_only: false, confirmed: true,
           ...(workflow.kind === "pick" ? { instance_id: workflow.instanceId } : {}),
           ...(workflow.placeTarget ? { place_pose: workflow.placeTarget } : {}) };
     state.guidedSubmitting = true;
@@ -1070,8 +1202,15 @@
       }
     } catch (error) {
       const staleSelection = error.message === "The selected box is no longer a fresh visible detection; select it again";
+      const profileRejected = error.message === "Docking profile configuration is unavailable" ||
+        error.message.startsWith("Unknown docking profile:") ||
+        error.message === "The selected table profile is unavailable" ||
+        error.message === "Combo docking profile is unavailable" ||
+        error.message === "Table profile configuration is unavailable" ||
+        error.message === "Combo table profile does not match the docking tag and frame" ||
+        error.message === "Docking profile must match exactly one table tag ID and frame";
       failGuidedWorkflow(workflow, `${workflow.label} stopped at ${guidedStepLabel(step, workflow.label)}: ${error.message}`,
-        submittingCommand && !staleSelection);
+        submittingCommand && !staleSelection && !profileRejected);
       setError(error.message);
     } finally {
       state.guidedSubmitting = false;
@@ -1105,7 +1244,16 @@
           workflow.resumeBlocked = true;
           throw new Error("Command outcome is unknown; verify robot state before restarting");
         }
-        if (operation.status === "SUCCEEDED" && operation.result?.success !== false) nextStep += 1;
+        if (operation.status === "SUCCEEDED" && operation.result?.success !== false) {
+          if (guidedSteps[nextStep] === "fine_align") {
+            try { bindCompletedDock(workflow, operation); }
+            catch (error) {
+              workflow.resumeBlocked = !!(state.status?.docking_profiles?.available && state.status?.table_profiles?.available);
+              throw error;
+            }
+          }
+          nextStep += 1;
+        }
       }
       const expectedState = workflow.kind === "pick"
         ? (nextStep <= guidedSteps.indexOf("manipulate") ? "EMPTY" : "HOLDING")
@@ -1115,7 +1263,7 @@
       }
       const missingNavStatus = !state.status?.navigation?.goal_status?.available;
       const label = guidedStepLabel(guidedSteps[nextStep], workflow.label) || "completion";
-      if (!window.confirm(`Continue ${workflow.label} from ${label}? Verify robot state before retrying. Remaining steps will run automatically.${missingNavStatus ? " Confirm Nav2 is idle." : ""}`)) return;
+      if (!window.confirm(`Continue ${workflow.label} from ${label} using docking profile ${workflow.profileId || "server default"} and table ${workflow.tableId}? Verify robot state before retrying. Remaining steps will run automatically.${missingNavStatus ? " Confirm Nav2 is idle." : ""}`)) return;
       workflow.step = nextStep;
       workflow.failed = false;
       workflow.cancelRequested = false;
@@ -1155,7 +1303,11 @@
     try { await api("/api/actions", { method: "POST", body: JSON.stringify({ kind: "navigate", preset_id: preset.id, confirmed: true, confirm_nav2_idle: confirmNav2Idle }) }); setError(""); } catch (error) { setError(error.message); }
   }
   async function fineAlign(execute) {
-    if (execute && !window.confirm("Move the robot in x, y, and yaw to fine-align with the table?")) return;
+    let profileId;
+    try { profileId = dockingProfileSelection(); }
+    catch (error) { setError(error.message); return; }
+    const label = profileId || `server default (${state.status?.docking_profiles?.default_profile || "automatic"})`;
+    if (execute && !window.confirm(`Move the robot in x, y, and yaw to fine-align using docking profile ${label}?`)) return;
     const confirmNav2Idle = confirmNav2IdleWithoutStatus();
     if (!state.status?.navigation?.goal_status?.available && !confirmNav2Idle) return;
     try {
@@ -1163,6 +1315,7 @@
         method: "POST",
         body: JSON.stringify({
           kind: "fine_align",
+          profile_id: profileId,
           execute,
           confirmed: execute,
           confirm_nav2_idle: confirmNav2Idle,
@@ -1172,7 +1325,10 @@
     } catch (error) { setError(error.message); }
   }
   async function undock() {
-    if (!window.confirm("Move the robot backward using the configured undocking profile?")) return;
+    let profileId;
+    try { profileId = dockingProfileSelection(true); }
+    catch (error) { setError(error.message); return; }
+    if (!window.confirm(`Move the robot backward using ${profileId ? `docking profile ${profileId}` : "the last successful dock profile (or server default after restart)"}?`)) return;
     const confirmNav2Idle = confirmNav2IdleWithoutStatus();
     if (!state.status?.navigation?.goal_status?.available && !confirmNav2Idle) return;
     try {
@@ -1180,6 +1336,7 @@
         method: "POST",
         body: JSON.stringify({
           kind: "undock",
+          profile_id: profileId,
           confirmed: true,
           confirm_nav2_idle: confirmNav2Idle,
         }),
@@ -1402,6 +1559,9 @@
   byId("check-fine-align").addEventListener("click", () => fineAlign(false));
   byId("execute-fine-align").addEventListener("click", () => fineAlign(true));
   byId("execute-undock").addEventListener("click", undock);
+  byId("table-profile").addEventListener("change", renderTableProfiles);
+  byId("docking-profile").addEventListener("change", () => { renderDockingProfiles(); renderGuidedWorkflow(); });
+  byId("undocking-profile").addEventListener("change", renderDockingProfiles);
   byId("select-initial-pose").addEventListener("click", () => setMapMode("initial_pose"));
   byId("select-navigation-goal").addEventListener("click", () => setMapMode("navigate"));
   byId("show-scan").addEventListener("change", drawMap);

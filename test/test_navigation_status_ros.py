@@ -22,6 +22,10 @@ class StatusMonitor(Node):
     _refresh_navigation_servers_locked = OperatorPanelNode._refresh_navigation_servers_locked
     _navigation_status_callback = OperatorPanelNode._navigation_status_callback
     _nav_goal_status_locked = OperatorPanelNode._nav_goal_status_locked
+    _table_catalog = OperatorPanelNode._table_catalog
+    _table_profile_id = OperatorPanelNode._table_profile_id
+    _docking_catalog = OperatorPanelNode._docking_catalog
+    _docking_profile_id = OperatorPanelNode._docking_profile_id
     _submit_fine_align = OperatorPanelNode._submit_fine_align
     _submit_manipulation = OperatorPanelNode._submit_manipulation
     _submit_navigation = OperatorPanelNode._submit_navigation
