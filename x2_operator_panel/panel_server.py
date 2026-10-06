@@ -21,7 +21,7 @@ from urllib.parse import urlsplit
 
 import rclpy
 from ament_index_python.packages import get_package_share_directory
-from rclpy.executors import MultiThreadedExecutor
+from rclpy.executors import SingleThreadedExecutor
 from rclpy.signals import SignalHandlerOptions
 from websockets.asyncio.server import serve
 from websockets.exceptions import ConnectionClosed
@@ -856,7 +856,11 @@ def main() -> None:
     rclpy.init(signal_handler_options=SignalHandlerOptions.NO)
     node: OperatorPanelNode | None = None
     application: PanelApplication | None = None
-    executor = MultiThreadedExecutor(num_threads=2)
+    # Camera demand and action-server changes destroy subscriptions in callbacks.
+    # Humble's multithreaded executor can queue a take for a handle that another
+    # callback then destroys. Serialize ROS work, including subscription takes;
+    # HTTP and WebSocket handling already run on their own threads.
+    executor = SingleThreadedExecutor()
 
     def stop_on_sigterm(_: int, __: Any) -> None:
         raise KeyboardInterrupt
