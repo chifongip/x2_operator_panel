@@ -10,6 +10,7 @@ from io import BytesIO
 from math import atan2, cos, hypot, isfinite, sin
 from pathlib import Path
 from queue import Empty, Queue
+import re
 import threading
 import time
 from typing import Any, Callable
@@ -139,6 +140,8 @@ class Operation:
     preset_id: str | None = None
     profile_id: str | None = None
     table_profile_id: str | None = None
+    docking_profile_id: str | None = None
+    instance_id: str | None = None
     target_pose: dict[str, float] | None = None
     status: str = "SUBMITTING"
     goal_uuid: str | None = None
@@ -162,6 +165,8 @@ class Operation:
             "preset_id": self.preset_id,
             "profile_id": self.profile_id,
             "table_profile_id": self.table_profile_id,
+            "docking_profile_id": self.docking_profile_id,
+            "instance_id": self.instance_id,
             "target_pose": deepcopy(self.target_pose),
             "status": self.status,
             "goal_uuid": self.goal_uuid,
@@ -1223,7 +1228,8 @@ class OperatorPanelNode(Node):
         if selected and (not catalog["available"] or selected not in {
                 profile["id"] for profile in catalog["profiles"]}):
             raise PanelCommandError("The selected table profile is unavailable")
-        if "docking_profile_id" in payload:
+        requires_table = (payload.get("kind") != "pick" and "place_pose" not in payload)
+        if "docking_profile_id" in payload and requires_table:
             dock_id = payload["docking_profile_id"]
             docking = self._docking_catalog()
             dock = next((profile for profile in docking["profiles"]
@@ -1256,6 +1262,31 @@ class OperatorPanelNode(Node):
     def _submit_fine_align(self, payload: dict[str, Any]) -> Operation:
         self._assert_task_idle()
         profile_id = self._docking_profile_id(payload)
+        catalog = self._docking_catalog()
+        instance_id = None
+        box = None
+        if payload.get("instance_id"):
+            instance_id = self._selected_visible_box_id("pick", payload)
+            with self._lock:
+                box = next((item for item in self._fresh_visible_boxes_locked()
+                            if item["instance_id"] == instance_id), None)
+            if not box:
+                raise PanelCommandError("The selected box is no longer a fresh visible detection")
+            if not profile_id:
+                profile_id = box.get("default_docking_profile", "")
+                if not profile_id:
+                    raise PanelCommandError("The selected box has no default docking profile")
+        resolved = profile_id or catalog.get("default_profile")
+        profile = next((item for item in catalog["profiles"] if item["id"] == resolved), None)
+        if profile and profile.get("target_source", "tag") == "box":
+            if not box:
+                raise PanelCommandError("Select a fresh visible box before box docking")
+            if resolved not in box.get("docking_profile_ids", []):
+                raise PanelCommandError("This docking profile is not supported by the selected box")
+            if not re.fullmatch(r"tag:(0|[1-9][0-9]*)", instance_id):
+                raise PanelCommandError("Box docking requires a tag:<id> box instance")
+        elif instance_id:
+            raise PanelCommandError("Select a box docking profile to dock to a box instance")
         execute = self._optional_boolean(payload, "execute", False)
         if execute and payload.get("confirmed") is not True:
             raise PanelCommandError("Physical fine alignment requires confirmation")
@@ -1291,12 +1322,14 @@ class OperatorPanelNode(Node):
                     raise PanelCommandError("Physical execution unlock has expired")
                 self._execution_unlocked_until = 0.0
         goal = FineAlign.Goal()
+        goal.instance_id = instance_id or ""
         goal.execute = execute
         goal.profile_id = profile_id
         operation = Operation(
             identifier=str(uuid4()),
             kind="fine_align",
             profile_id=profile_id,
+            instance_id=instance_id,
             requested_at=time.time(),
             plan_only=not execute,
             admission_deadline=time.monotonic() + self.goal_admission_timeout_sec,
@@ -1398,7 +1431,25 @@ class OperatorPanelNode(Node):
         if plan_id and (kind == "reset" or plan_only is not False):
             raise PanelCommandError("Saved plans require plan_only: false")
         instance_id = None if plan_id else self._selected_visible_box_id(kind, payload)
-        table_profile_id = (self._table_profile_id(payload)
+        docking_profile_id = payload.get("docking_profile_id")
+        last_box_dock = getattr(self, "_last_box_dock", None)
+        if kind == "pick" and instance_id and last_box_dock:
+            if docking_profile_id == last_box_dock["profile_id"] and instance_id != last_box_dock["instance_id"]:
+                raise PanelCommandError("Pick must use the box instance reported by the successful dock")
+            if instance_id == last_box_dock["instance_id"] and not docking_profile_id:
+                docking_profile_id = last_box_dock["profile_id"]
+        dock_catalog = self._docking_catalog() if docking_profile_id else {"profiles": []}
+        box_approach = any(item["id"] == docking_profile_id and item.get("target_source") == "box"
+                           for item in dock_catalog["profiles"])
+        if last_box_dock and docking_profile_id == last_box_dock["profile_id"]:
+            box_approach = True
+        if kind == "pick" and box_approach and instance_id:
+            with self._lock:
+                box = next((item for item in self._fresh_visible_boxes_locked()
+                            if item["instance_id"] == instance_id), None)
+            if not box or docking_profile_id not in box.get("docking_profile_ids", []):
+                raise PanelCommandError("The box no longer supports the docked approach")
+        table_profile_id = (self._table_profile_id({**payload, "kind": kind})
                             if kind in {"pick", "place", "pick_place"} else None)
         goal = self._build_manipulation_goal(kind, payload, plan_only, instance_id)
         if table_profile_id is not None:
@@ -1416,6 +1467,8 @@ class OperatorPanelNode(Node):
             requested_at=time.time(),
             plan_only=plan_only,
             table_profile_id=table_profile_id,
+            docking_profile_id=docking_profile_id,
+            instance_id=instance_id,
             admission_deadline=time.monotonic() + self.goal_admission_timeout_sec,
         )
         if instance_id:
@@ -1685,6 +1738,8 @@ class OperatorPanelNode(Node):
         details: dict[str, Any] = {}
         if hasattr(feedback, "table_profile_id"):
             details["table_profile_id"] = feedback.table_profile_id
+        if hasattr(feedback, "instance_id"):
+            details["instance_id"] = feedback.instance_id
         if hasattr(feedback, "profile_id"):
             details["profile_id"] = feedback.profile_id
         if hasattr(feedback, "stage"):
@@ -1693,6 +1748,9 @@ class OperatorPanelNode(Node):
             details["progress"] = float(feedback.progress)
         if hasattr(feedback, "box_pose"):
             details["box_pose"] = _pose_as_dict(feedback.box_pose)
+        if hasattr(feedback, "undock_mode"):
+            details["undock_mode"] = feedback.undock_mode
+            details["elapsed_time"] = float(feedback.elapsed_time)
         if hasattr(feedback, "distance_remaining"):
             details["distance_remaining"] = float(feedback.distance_remaining)
         if hasattr(feedback, "distance_traveled"):
@@ -1766,11 +1824,14 @@ class OperatorPanelNode(Node):
             "planning_mode",
             "profile_id",
             "table_profile_id",
+            "instance_id",
             "error_code",
             "message",
             "object_held",
             "error_msg",
             "distance_traveled",
+            "undock_mode",
+            "elapsed_time",
         ):
             if hasattr(result, attribute):
                 details[attribute] = getattr(result, attribute)
@@ -1791,6 +1852,11 @@ class OperatorPanelNode(Node):
             operation = self._operations.get(operation_id)
             if operation is None:
                 return
+            if operation.kind == "fine_align" and status == "SUCCEEDED" and result.get("success"):
+                if operation.plan_only is False:
+                    self._last_box_dock = ({"profile_id": result["profile_id"],
+                                            "instance_id": result["instance_id"]}
+                                           if result.get("instance_id") else None)
             operation.status = status
             operation.stage = status.title()
             if status == "SUCCEEDED":
@@ -2393,6 +2459,9 @@ class OperatorPanelNode(Node):
                 {
                     "instance_id": instance_id,
                     "profile_id": profile_id,
+                    "docking_profile_ids": list(state.docking_profile_ids),
+                    "default_docking_profile": state.default_docking_profile,
+                    "tag_frame": state.tag_frame,
                     "stamp": (
                         state.header.stamp.sec
                         + state.header.stamp.nanosec / 1_000_000_000

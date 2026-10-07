@@ -117,3 +117,36 @@ def test_manual_pose_keeps_matching_table_and_saved_execution_selection():
     goal = node._action_clients["place"].send_goal_async.call_args.args[0]
     assert goal.plan_id == "saved"
     assert goal.table_profile_id == "second"
+
+
+def test_box_only_pick_and_manual_place_skip_docking_table_match():
+    node = panel()
+    assert node._table_profile_id({"kind": "pick", "docking_profile_id": "offset"}) == ""
+    pose = {"frame_id": "base_link", "x": 0.35, "y": 0.0, "z": 0.17, "yaw": 0.0}
+    node._submit_manipulation("place", {
+        "plan_only": True, "docking_profile_id": "offset", "place_pose": pose,
+    })
+    goal = node._action_clients["place"].send_goal_async.call_args.args[0]
+    assert goal.place_pose.header.frame_id == "base_link"
+    assert goal.table_profile_id == ""
+
+
+def test_pick_reuses_successful_box_docking_profile_and_rejects_another_instance():
+    node = panel()
+    node._last_box_dock = {"profile_id": "box", "instance_id": "tag:17"}
+    node._fresh_visible_boxes_locked = Mock(return_value=[{
+        "instance_id": "tag:17", "docking_profile_ids": ["box"],
+        "default_docking_profile": "box",
+    }])
+    node._selected_visible_box_id.return_value = "tag:17"
+    operation = node._submit_manipulation("pick", {"plan_only": True, "instance_id": "tag:17"})
+    assert operation.docking_profile_id == "box"
+    assert operation.instance_id == "tag:17"
+    goal = node._action_clients["pick"].send_goal_async.call_args.args[0]
+    assert goal.instance_id == "tag:17"
+    node._selected_visible_box_id.return_value = "tag:42"
+    before = node._execution_unlocked_until
+    with pytest.raises(PanelCommandError, match="box instance"):
+        node._submit_manipulation("pick", {"plan_only": False, "confirmed": True,
+            "instance_id": "tag:42", "docking_profile_id": "box"})
+    assert node._execution_unlocked_until == before

@@ -18,7 +18,7 @@ const field = (id) => fields[id] ||= {
   replaceChildren(...children) { this.children = children; },
 };
 const context = vm.createContext({
-  state, byId: field,
+  state, byId: field, guidedPickId: () => state.selectedBoxId || null,
   document: { createElement: () => ({ value: "", textContent: "" }) },
   window: { confirm: (message) => { confirmations.push(message); return true; } },
   confirmNav2IdleWithoutStatus: () => false,
@@ -106,3 +106,10 @@ vm.runInContext(source.slice(source.indexOf("  function renderOperations("),
     table_profile_id: "default", result: { table_profile_id: "second", success: true } }]);
   assert.match(field("operations").innerHTML, /Table: second/);
 })().catch((error) => { console.error(error); process.exitCode = 1; });
+
+
+vm.runInContext(source.slice(source.indexOf("  function formatUndockDistance("),
+  source.indexOf("  function formatUndockDistance(") + source.slice(source.indexOf("  function formatUndockDistance(")).indexOf("\n  }\n") + 5), context);
+assert.match(context.formatUndockDistance({result: {
+  undock_mode: "timed_reverse", elapsed_time: 3, distance_traveled: 0.3,
+}}), /estimated travel 0.300 m.*timed reverse.*3.0 s elapsed/);

@@ -121,9 +121,12 @@ async function tableBindingChecks() {
 
   const missing = fixture("pick");
   missing.state.status.table_profiles.profiles = [];
+  missing.state.status.table_profiles.available = false;
   await missing.context.advanceGuidedWorkflow();
-  assert.equal(missing.commands().length, 0);
-  assert.match(missing.context.error, /match exactly one table/);
+  assert.equal(missing.commands().length, 1, "Pick can dock without a table profile");
+  await missing.finish();
+  await missing.finish();
+  assert.equal(missing.commands()[2].payload.kind, "pick");
 
   const distinct = fixture("place");
   distinct.state.status.docking_profiles.profiles[1].tag_id = 10;
@@ -132,13 +135,13 @@ async function tableBindingChecks() {
   distinct.context.manualPlacePoseEnabled = () => true;
   distinct.context.placePose = () => ({ frame_id: "base_link", x: 0.35, y: 0, z: 0.17, yaw: 0 });
   await distinct.context.advanceGuidedWorkflow();
-  assert.equal(distinct.state.guidedWorkflow.tableId, "second");
-  assert.match(distinct.confirmations[0], /table second/);
+  assert.equal(distinct.state.guidedWorkflow.tableId, "");
+  assert.match(distinct.confirmations[0], /without a table tag/);
   await distinct.finish();
   distinct.fields["table-profile"] = { value: "default" };
   await distinct.finish();
   const payload = distinct.commands()[2].payload;
-  assert.equal(payload.table_profile_id, "second");
+  assert.equal(payload.table_profile_id, "");
   assert.equal(payload.docking_profile_id, "offset");
   assert.equal(payload.place_pose.x, 0.35);
 
@@ -150,7 +153,7 @@ async function tableBindingChecks() {
   assert.equal(mismatch.commands().length, 1);
   assert.equal(mismatch.state.guidedWorkflow.resumeBlocked, true);
 
-  const dockDisconnected = fixture("pick");
+  const dockDisconnected = fixture("place");
   await dockDisconnected.context.advanceGuidedWorkflow();
   dockDisconnected.state.status.table_profiles.available = false;
   await dockDisconnected.finish();
@@ -161,14 +164,14 @@ async function tableBindingChecks() {
   await flush();
   assert.equal(dockDisconnected.commands().length, 2);
 
-  const changed = fixture("pick");
+  const changed = fixture("place");
   await changed.context.advanceGuidedWorkflow();
   changed.state.status.table_profiles.profiles[0].dimensions[0] = 1.0;
   await changed.finish();
   assert.equal(changed.commands().length, 1);
   assert.equal(changed.state.guidedWorkflow.resumeBlocked, true);
 
-  const disconnected = fixture("pick");
+  const disconnected = fixture("place");
   await disconnected.context.advanceGuidedWorkflow();
   await disconnected.finish();
   disconnected.state.status.table_profiles.available = false;
@@ -180,8 +183,88 @@ async function tableBindingChecks() {
   assert.equal(disconnected.commands()[2].payload.table_profile_id, "default");
 }
 
+async function boxBindingChecks() {
+  for (const race of ["refresh", "retry"]) {
+    const bound = fixture("pick");
+    bound.state.status.docking_profiles.profiles.forEach((p) => p.target_source = "box");
+    const targets = ["tag:17", "tag:42"].map((instance_id) => ({
+      instance_id, docking_profile_ids: ["default", "offset"], default_docking_profile: "default",
+    }));
+    bound.state.status.visible_boxes.boxes = targets;
+    bound.state.selectedBoxId = "tag:17";
+    await bound.context.advanceGuidedWorkflow();
+    bound.state.status.operations[0].status = "SUCCEEDED";
+    bound.state.status.operations[0].result = { success: true, profile_id: "offset", instance_id: "tag:17" };
+    bound.context.updateGuidedWorkflow();
+    await flush();
+    const api = bound.context.api;
+    let interrupt = true;
+    bound.context.api = async (path, options) => {
+      if (interrupt && bound.state.guidedWorkflow.step === 2) {
+        if (race === "refresh" && path === "/api/status") {
+          bound.state.status.visible_boxes.boxes = [targets[1]];
+        } else if (race === "retry" && path === "/api/actions") {
+          throw new Error("The selected box is no longer a fresh visible detection; select it again");
+        }
+      }
+      return api(path, options);
+    };
+    await bound.finish();
+    assert.equal(bound.commands().length, 2);
+    assert.equal(bound.state.guidedWorkflow.instanceId, "tag:17",
+      "Losing a detection during refresh must retain the docked box identity");
+    interrupt = false;
+    bound.state.selectedBoxId = "tag:42";
+    bound.state.status.visible_boxes.boxes = targets;
+    if (race === "retry") {
+      bound.state.status.execution_unlock_remaining_sec = 30;
+      await bound.context.continueGuidedWorkflow();
+    } else {
+      bound.context.updateGuidedWorkflow();
+    }
+    await flush();
+    assert.equal(bound.commands()[2].payload.instance_id, "tag:17",
+      "Refresh and Continue must pick the same box used for docking");
+  }
+  const f = fixture("pick");
+  f.state.status.table_profiles.available = false;
+  f.state.status.docking_profiles.profiles[0].target_source = "box";
+  f.state.status.docking_profiles.profiles[1].target_source = "box";
+  f.state.status.visible_boxes.boxes = [
+    { instance_id: "tag:17", docking_profile_ids: ["default", "offset"], default_docking_profile: "default" },
+    { instance_id: "tag:42", docking_profile_ids: ["offset"], default_docking_profile: "offset" },
+  ];
+  f.state.selectedBoxId = "tag:17";
+  await f.context.advanceGuidedWorkflow();
+  assert.equal(f.commands()[0].payload.instance_id, "tag:17");
+  f.state.selectedBoxId = "tag:42";
+  f.state.status.operations[0].status = "SUCCEEDED";
+  f.state.status.operations[0].result = { success: true, profile_id: "offset", instance_id: "tag:17" };
+  f.context.updateGuidedWorkflow();
+  await flush();
+  await f.finish();
+  assert.equal(f.commands()[2].payload.instance_id, "tag:17");
+  assert.equal(f.commands()[2].payload.docking_profile_id, "offset");
+  const other = fixture("pick");
+  other.state.status.docking_profiles.profiles.forEach((p) => p.target_source = "box");
+  other.state.status.visible_boxes.boxes = [{ instance_id: "tag:42", docking_profile_ids: ["offset"], default_docking_profile: "offset" }];
+  other.state.selectedBoxId = "tag:42";
+  await other.context.advanceGuidedWorkflow();
+  assert.equal(other.commands()[0].payload.profile_id, "offset");
+  assert.equal(other.commands()[0].payload.instance_id, "tag:42");
+  const mismatch = fixture("pick");
+  mismatch.state.status.docking_profiles.profiles.forEach((p) => p.target_source = "box");
+  mismatch.state.status.visible_boxes.boxes[0].docking_profile_ids = ["default", "offset"];
+  mismatch.state.status.visible_boxes.boxes[0].default_docking_profile = "default";
+  await mismatch.context.advanceGuidedWorkflow();
+  await mismatch.finish();
+  assert.equal(mismatch.commands().length, 1, "A dock result must identify the same box");
+  assert.equal(mismatch.state.guidedWorkflow.resumeBlocked, true);
+}
+
 (async () => {
   await tableBindingChecks();
+  await boxBindingChecks();
   for (const kind of ["pick", "place"]) {
     await fullSequence(kind);
     await fullSequence(kind, true);

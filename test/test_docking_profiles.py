@@ -65,6 +65,25 @@ class ParameterClient:
 
 
 class DockingProfileMonitorTest(unittest.TestCase):
+    def test_legacy_service_rejecting_unknown_optional_parameters_remains_available(self):
+        class StrictParameterClient(ParameterClient):
+            def call_async(self, request):
+                if any(name not in self.parameters for name in request.names):
+                    future = Future()
+                    future.set_result(SimpleNamespace(values=[]))
+                    return future
+                return super().call_async(request)
+
+        client = StrictParameterClient()
+        monitor = DockingProfileMonitor(client, 1.0)
+        monitor.poll()
+        self.assertTrue(monitor.snapshot()["available"])
+        self.assertEqual(monitor.snapshot()["profiles"][1]["undock_mode"], "tag_relative")
+        del client.parameters["docking_profiles.offset.standoff"]
+        monitor = DockingProfileMonitor(client, 1.0)
+        monitor.poll()
+        self.assertFalse(monitor.snapshot()["available"])
+
     def test_discovers_offsets_and_returns_independent_snapshots(self):
         client = ParameterClient()
         monitor = DockingProfileMonitor(client, 1.0)
@@ -230,3 +249,56 @@ class DockingProfileGatewayTest(unittest.TestCase):
         for result in (FineAlign.Result(), Undock.Result()):
             result.profile_id = "offset"
             self.assertEqual(node._result_as_dict(result)["profile_id"], "offset")
+
+
+def test_monitor_discovers_timed_profile_and_rejects_invalid_mode():
+    client = ParameterClient()
+    client.parameters.update({
+        "docking_profiles.offset.detections_topic": "/detections",
+        "docking_profiles.offset.undock_mode": "timed_reverse",
+        "docking_profiles.offset.timed_reverse_speed": 0.1,
+        "docking_profiles.offset.timed_reverse_duration": 3.0,
+    })
+    monitor = DockingProfileMonitor(client, 1.0)
+    monitor.poll()
+    profile = monitor.snapshot()["profiles"][1]
+    assert profile["detections_topic"] == "/detections"
+    assert profile["undock_mode"] == "timed_reverse"
+    assert profile["timed_reverse_duration"] == 3.0
+    client.parameters["docking_profiles.offset.undock_mode"] = "unknown"
+    monitor = DockingProfileMonitor(client, 1.0)
+    monitor.poll()
+    assert not monitor.snapshot()["available"]
+
+
+def test_box_template_discovers_without_a_fixed_tag_and_passes_selected_instance():
+    client = ParameterClient()
+    client.parameters.update({
+        "docking_profiles.offset.target_source": "box",
+        "docking_profiles.offset.tag_id": -1,
+        "docking_profiles.offset.tag_frame": "",
+    })
+    monitor = DockingProfileMonitor(client, 1.0)
+    monitor.poll()
+    assert monitor.snapshot()["available"]
+    node = DockingProfileGatewayTest().panel()
+    node._docking_profile_monitor = monitor
+    node._selected_visible_box_id = Mock(return_value="tag:42")
+    node._fresh_visible_boxes_locked = Mock(return_value=[{
+        "instance_id": "tag:42", "docking_profile_ids": ["offset"],
+        "default_docking_profile": "offset",
+    }])
+    operation = node._submit_fine_align({"profile_id": "offset", "instance_id": "tag:42"})
+    goal = node._action_clients["fine_align"].send_goal_async.call_args.args[0]
+    assert goal.instance_id == "tag:42"
+    assert goal.profile_id == "offset"
+    assert operation.instance_id == "tag:42"
+    # An empty approach selection uses this box type's default.
+    operation = node._submit_fine_align({"instance_id": "tag:42"})
+    assert operation.profile_id == "offset"
+    node._fresh_visible_boxes_locked.return_value[0]["docking_profile_ids"] = ["other"]
+    with unittest.TestCase().assertRaises(PanelCommandError):
+        node._submit_fine_align({"profile_id": "offset", "instance_id": "tag:42"})
+    node._selected_visible_box_id.return_value = "legacy"
+    with unittest.TestCase().assertRaises(PanelCommandError):
+        node._submit_fine_align({"profile_id": "offset", "instance_id": "legacy"})

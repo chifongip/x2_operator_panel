@@ -10,7 +10,9 @@ from rcl_interfaces.srv import GetParameters
 from rclpy.parameter import parameter_value_to_python
 
 
-PROFILE_FIELDS = ("tag_id", "tag_frame", "standoff", "lateral_offset", "yaw_offset")
+GEOMETRY_FIELDS = ("tag_id", "tag_frame", "standoff", "lateral_offset", "yaw_offset")
+PROFILE_FIELDS = (*GEOMETRY_FIELDS, "detections_topic", "undock_mode",
+                  "timed_reverse_speed", "timed_reverse_duration", "target_source")
 
 
 def unavailable_catalog(detail="Waiting for docking profile configuration"):
@@ -71,19 +73,19 @@ class DockingProfileMonitor:
                 lambda values: self._request_profiles(token, values),
             )
 
-    def _request(self, token, names, callback):
+    def _request(self, token, names, callback, on_incomplete=None):
         request = GetParameters.Request()
         request.names = names
         self._deadline = self.clock() + self.timeout
         try:
             self._future = self.client.call_async(request)
             self._future.add_done_callback(
-                lambda completed: self._on_response(token, names, callback, completed)
+                lambda completed: self._on_response(token, names, callback, completed, on_incomplete)
             )
         except Exception as error:
             self._invalidate(f"Cannot read {self.catalog_label.lower()} profiles: {error}")
 
-    def _on_response(self, token, names, callback, completed):
+    def _on_response(self, token, names, callback, completed, on_incomplete=None):
         with self._lock:
             if self._token is not token:
                 return
@@ -97,6 +99,9 @@ class DockingProfileMonitor:
             try:
                 values = completed.result().values
                 if len(values) != len(names):
+                    if on_incomplete is not None:
+                        on_incomplete()
+                        return
                     raise ValueError(f"Incomplete {self.catalog_label.lower()} parameter response")
                 callback([parameter_value_to_python(value) for value in values])
             except Exception as error:
@@ -115,13 +120,41 @@ class DockingProfileMonitor:
             self.parameter_name(name, field)
             for name in names for field in self.profile_fields
         ]
-        self._request(token, parameters, lambda fields: self._store_profiles(names, default, fields))
+        self._request(
+            token, parameters, lambda fields: self._store_profiles(names, default, fields),
+            (lambda: self._request_legacy_profiles(token, names, default))
+            if self.catalog_label == "Docking" else None,
+        )
+
+    def _request_legacy_profiles(self, token, names, default):
+        # Some ROS parameter servers return an empty response for the whole
+        # request when any optional field is undeclared. Retry mandatory fields
+        # alone; a missing required field must still invalidate the catalog.
+        parameters = [self.parameter_name(name, field)
+                      for name in names for field in GEOMETRY_FIELDS]
+
+        def store(values):
+            fields = []
+            for index in range(len(names)):
+                fields.extend(values[index * len(GEOMETRY_FIELDS):(index + 1) * len(GEOMETRY_FIELDS)])
+                fields.extend([None] * (len(self.profile_fields) - len(GEOMETRY_FIELDS)))
+            self._store_profiles(names, default, fields)
+
+        self._request(token, parameters, store)
 
     def _store_profiles(self, names, default, values):
         profiles = []
         for index, name in enumerate(names):
             fields = values[index * len(self.profile_fields):(index + 1) * len(self.profile_fields)]
             profile = dict(zip(self.profile_fields, fields), id=name)
+            if self.catalog_label == "Docking":
+                defaults = {"detections_topic": (profiles[0]["detections_topic"] if profiles
+                                                  else "/front_center_rectify/detections"),
+                            "undock_mode": "tag_relative", "timed_reverse_speed": 0.1,
+                            "timed_reverse_duration": 3.0, "target_source": "tag"}
+                for field, value in defaults.items():
+                    if profile[field] is None:
+                        profile[field] = value
             self.validate_profile(profile)
             profiles.append(profile)
         self._catalog = {
@@ -133,8 +166,18 @@ class DockingProfileMonitor:
         return field if name == "default" else f"{self.profile_prefix}.{name}.{field}"
 
     def validate_profile(self, profile):
-        if (type(profile["tag_id"]) is not int or profile["tag_id"] < 0
-                or not isinstance(profile["tag_frame"], str) or not profile["tag_frame"]
+        source = profile["target_source"]
+        if (source not in {"tag", "box"}
+                or (source == "tag" and (type(profile["tag_id"]) is not int
+                    or profile["tag_id"] < 0 or not isinstance(profile["tag_frame"], str)
+                    or not profile["tag_frame"]))
                 or any(type(profile[field]) is not float or not isfinite(profile[field])
-                       for field in PROFILE_FIELDS[2:]) or profile["standoff"] <= 0):
+                       for field in GEOMETRY_FIELDS[2:]) or profile["standoff"] <= 0):
             raise ValueError(f"Invalid docking profile: {profile['id']}")
+        if (not isinstance(profile["detections_topic"], str) or not profile["detections_topic"]
+                or profile["undock_mode"] not in {"tag_relative", "timed_reverse"}
+                or any(type(profile[field]) is not float or not isfinite(profile[field])
+                       or profile[field] <= 0 for field in
+                       ("timed_reverse_speed", "timed_reverse_duration"))
+                or profile["timed_reverse_speed"] > 0.5):
+            raise ValueError(f"Invalid undock settings: {profile['id']}")

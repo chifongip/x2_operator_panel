@@ -437,6 +437,31 @@ and the separate manual Undocking profile choice do not change a running
 sequence. Dock/Undock stages wait while profile discovery is unavailable. Operation history displays the requested profile before acquisition
 and the resolved profile from feedback/results afterward.
 
+The catalog also shows each profile's detection source and undock mode.
+The supplied box approaches use the selected visible box's vertical tag and a
+timed retreat at 0.1 m/s for 3.0 s. Box types reference their own named docking
+profiles in the manipulation catalog. The selector offers the selected box's
+supported approaches and uses that box's default when no approach is selected. Timed feedback shows elapsed seconds and estimated travel, rather
+than measured distance. The undock mode follows the resolved docking profile;
+it is not an automatic fallback when a table tag disappears.
+
+For a `target_source: box` docking profile, select a fresh visible box before
+starting. The guided workflow captures its `instance_id` before Dock and checks
+that Dock reports the same instance. Pick reuses the resolved docking profile
+and that box ID, even if the selection changes or another box becomes visible.
+If the bound box is lost, the sequence waits for that box rather than switching.
+Standalone Fine align also accepts the selected visible box. Standalone Pick of
+the same box records the last successful box docking profile in operation
+history; gateway requests that explicitly reuse that profile reject a different
+box instance before consuming the execution unlock. Manipulation geometry
+continues to come from the box profile; navigation offsets are not grasp offsets.
+
+Guided Pick and manual-pose Place do not require a matching table profile or a
+visible table tag. Automatic Place still requires exactly one matching table
+profile and a fresh stable observation. Guided workflows retain the docking
+calibration and mode; changes during a sequence require operator review.
+Existing execution unlock, confirmations, and server motion authority apply.
+
 If discovery is unavailable, automatic manual selections remain usable; explicit
 selections are blocked until the catalog is available. A missing or disconnected
 profile remains visibly selected rather than silently switching to the default.
@@ -626,8 +651,8 @@ Pick, Place, and PickPlace. Empty selection uses the manipulation server's
 configured default. Saved execution retains the table reported by its plan,
 independently of the current selector. Operation history shows resolved tables.
 
-The combo derives its table from the manually selected docking profile's **tag
-ID and frame**, requiring exactly one match. Multiple docking approaches may
+For automatic Place, the combo derives its table from the selected docking
+profile's **tag ID and frame**, requiring exactly one match. Multiple docking approaches may
 share the same physical table. Catalogs must be available and a match must exist
 before startup. The confirmation captures both names; retries and Continue keep
 them. After Dock, the panel checks its resolved profile against the captured
@@ -637,11 +662,11 @@ motion unlock or submitting the ROS goal. Docking and manipulation select named
 profiles; matching by tag does not introduce visibility-based selection.
 
 Manual placement overrides remain available in the Place combo and standalone
-Place/PickPlace. They override the destination pose while the matching table
-continues to supply collision geometry. Without an override, placement uses the
+Place/PickPlace. They override the destination pose without requiring a matching
+table. Fresh table observations can still supply optional collision geometry. Without an override, placement uses the
 selected table's calibration. The combo ignores the standalone table dropdown.
 
 After updating the action definitions, rebuild and restart manipulation and the
 panel together; clients using the previous Pick/Place/PickPlace definitions must
 also be rebuilt. Add measured table profiles and corresponding detector tags
-before using new docking approaches for manipulation.
+before using new docking approaches for automatic placement.

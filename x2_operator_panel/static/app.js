@@ -627,7 +627,11 @@
   function formatUndockDistance(operation) {
     const traveled = operation.result?.distance_traveled ?? operation.feedback?.distance_traveled;
     if (!Number.isFinite(traveled)) return "";
-    const parts = [`traveled ${traveled.toFixed(3)} m`];
+    const mode = operation.result?.undock_mode || operation.feedback?.undock_mode;
+    const elapsed = operation.result?.elapsed_time ?? operation.feedback?.elapsed_time;
+    const parts = [`${mode === "timed_reverse" ? "estimated travel" : "traveled"} ${traveled.toFixed(3)} m`];
+    if (mode) parts.push(mode === "timed_reverse" ? "timed reverse" : "tag relative");
+    if (Number.isFinite(elapsed)) parts.push(`${elapsed.toFixed(1)} s elapsed`);
     const remaining = operation.feedback?.distance_remaining;
     const commandedSpeed = operation.feedback?.commanded_speed;
     const commandedLateralSpeed = operation.feedback?.commanded_lateral_speed;
@@ -888,10 +892,28 @@
     return matches[0];
   }
 
+  function comboDock(profileId, expectedSignature = null) {
+    const catalog = state.status?.docking_profiles;
+    if (!catalog?.available) throw new Error("Waiting for docking profile configuration.");
+    const dock = catalog.profiles.find((profile) => profile.id === profileId);
+    if (!dock) throw new Error("The combo docking profile is unavailable.");
+    const signature = JSON.stringify([dock.tag_id, dock.tag_frame, dock.standoff,
+      dock.lateral_offset, dock.yaw_offset, dock.detections_topic, dock.undock_mode,
+      dock.timed_reverse_speed, dock.timed_reverse_duration, dock.target_source]);
+    if (expectedSignature && signature !== expectedSignature) {
+      throw new Error("The combo docking calibration changed; verify robot state before restarting.");
+    }
+    return signature;
+  }
+
   function bindCompletedDock(workflow, operation) {
     const resolved = operation.result?.profile_id;
     if (!resolved) throw new Error("Dock did not report its resolved profile; verify robot state before restarting.");
-    comboTable(resolved, workflow.tableId, workflow.tableSignature);
+    comboDock(resolved, workflow.dockSignature);
+    if (workflow.boxTarget && operation.result?.instance_id !== workflow.instanceId) {
+      throw new Error("Dock reported a different box instance; verify robot state before restarting.");
+    }
+    if (workflow.requiresTable) comboTable(resolved, workflow.tableId, workflow.tableSignature);
     workflow.profileId = resolved;
   }
 
@@ -926,16 +948,37 @@
     return profileId;
   }
 
+  function boxDockChoice(preferBox = true) {
+    const catalog = state.status?.docking_profiles;
+    const id = guidedPickId({});
+    const box = state.status?.visible_boxes?.boxes?.find((item) => item.instance_id === id);
+    let profileId = dockingProfileSelection();
+    if (!profileId) profileId = (preferBox && box?.default_docking_profile) || catalog?.default_profile;
+    const profile = catalog?.profiles?.find((item) => item.id === profileId);
+    const boxTarget = profile?.target_source === "box";
+    if (boxTarget) {
+      if (!box) throw new Error("Select a fresh visible box before box docking.");
+      if (!box.docking_profile_ids?.includes(profileId)) {
+        throw new Error("This docking profile is not supported by the selected box.");
+      }
+    }
+    return { profileId, box, boxTarget };
+  }
+
   function renderDockingProfiles() {
     const catalog = state.status?.docking_profiles;
     const running = state.guidedWorkflow && !state.guidedWorkflow.failed && !state.guidedWorkflow.completed;
+    const boxId = guidedPickId({});
+    const box = state.status?.visible_boxes?.boxes?.find((item) => item.instance_id === boxId);
     for (const [id, automatic] of [["docking-profile", "Server default"],
         ["undocking-profile", "Last successful dock / server default"]]) {
       const select = byId(id);
       const selected = select.value || "";
       const choices = [["", id === "docking-profile" && catalog?.available
-        ? `Server default (${catalog.default_profile})` : automatic],
-        ...(catalog?.available ? catalog.profiles.map((profile) => [profile.id, profile.id]) : [])];
+        ? (box?.default_docking_profile ? `Box default (${box.default_docking_profile})` : `Server default (${catalog.default_profile})`) : automatic],
+        ...(catalog?.available ? catalog.profiles.filter((profile) => id === "undocking-profile" ||
+          profile.target_source !== "box" || box?.docking_profile_ids?.includes(profile.id))
+          .map((profile) => [profile.id, profile.id]) : [])];
       if (selected && !choices.some(([value]) => value === selected)) {
         choices.push([selected, `${selected} (unavailable)`]);
       }
@@ -952,12 +995,21 @@
       }
       select.disabled = !!running;
     }
-    const selected = byId("docking-profile").value || catalog?.default_profile;
+    const selected = byId("docking-profile").value || box?.default_docking_profile || catalog?.default_profile;
     const profile = catalog?.profiles?.find((item) => item.id === selected);
     byId("docking-profile-detail").textContent = !catalog?.available
       ? `${catalog?.detail || "Waiting for docking profile configuration"}. Automatic manual selection remains available.`
       : !profile ? "The selected docking profile is no longer configured; choose again."
-        : `Dock ${profile.id}: tag ${profile.tag_id} (${profile.tag_frame}), stand-off ${profile.standoff.toFixed(3)} m, lateral offset ${profile.lateral_offset.toFixed(3)} m, yaw offset ${profile.yaw_offset.toFixed(3)} rad. Undocking uses its own selection above.`;
+        : `Dock ${profile.id}: ${profile.target_source === "box" ? "selected box tag" : `tag ${profile.tag_id} (${profile.tag_frame})`}, stand-off ${profile.standoff.toFixed(3)} m, lateral offset ${profile.lateral_offset.toFixed(3)} m, yaw offset ${profile.yaw_offset.toFixed(3)} rad. Detection source ${profile.detections_topic || "/front_center_rectify/detections"}. ${profile.undock_mode === "timed_reverse" ? `Undock: timed reverse at ${profile.timed_reverse_speed.toFixed(2)} m/s for ${profile.timed_reverse_duration.toFixed(1)} s (estimated travel).` : "Undock: tag relative."} Undocking uses its own selection above.`;
+    const retreatId = byId("undocking-profile").value;
+    const retreat = catalog?.profiles?.find((item) => item.id === retreatId);
+    byId("undocking-profile-detail").textContent = !retreatId
+      ? "Undock uses the last successful dock profile, or the server default after restart; feedback reports the resolved mode."
+      : !retreat ? "The selected undocking profile is unavailable."
+        : retreat.undock_mode === "timed_reverse"
+          ? `Undock ${retreat.id}: reverse at ${retreat.timed_reverse_speed.toFixed(2)} m/s for ${retreat.timed_reverse_duration.toFixed(1)} s; distance is estimated.`
+          : `Undock ${retreat.id}: track ${retreat.target_source === "box" ? "the last docked box tag" : `stationary tag ${retreat.tag_id} (${retreat.tag_frame})`} throughout retreat.`;
+
   }
 
   const activeStatuses = ["SUBMITTING", "ACTIVE", "CANCEL_REQUESTED"];
@@ -989,7 +1041,7 @@
       if (activeStatuses.includes(operation.status)) return;
       if (guidedSteps[workflow.step] === "fine_align" && operation.status === "SUCCEEDED" &&
           operation.result?.success !== false && (!state.status?.docking_profiles?.available ||
-          !state.status?.table_profiles?.available)) return;
+          (workflow.requiresTable && !state.status?.table_profiles?.available))) return;
       workflow.operationId = null;
       if (operation.status !== "SUCCEEDED" || operation.result?.success === false) {
         failGuidedWorkflow(workflow, `${workflow.label} stopped at ${guidedStepLabel(guidedSteps[workflow.step], workflow.label)}: ${operation.result?.message || operation.detail || operation.status}`,
@@ -1038,6 +1090,10 @@
       return "Waiting for docking profile configuration.";
     }
     if (["fine_align", "manipulate", "undock"].includes(step)) {
+      try { comboDock(workflow.profileId, workflow.dockSignature); }
+      catch (error) { return error.message; }
+    }
+    if (workflow.requiresTable && ["fine_align", "manipulate", "undock"].includes(step)) {
       try { comboTable(workflow.profileId, workflow.tableId, workflow.tableSignature); }
       catch (error) { return error.message; }
     }
@@ -1083,18 +1139,22 @@
       : "Resume at the failed stage after verifying robot state";
     if (running) {
       const stepLabel = guidedStepLabel(guidedSteps[workflow.step], workflow.label);
-      button.textContent = `Running ${workflow.label}: ${stepLabel} (${workflow.profileId || "server default"}, table ${workflow.tableId})`;
+      button.textContent = `Running ${workflow.label}: ${stepLabel} (${workflow.profileId || "server default"}${workflow.requiresTable ? `, table ${workflow.tableId}` : ", no table tag required"})`;
       button.disabled = true;
       message.textContent = workflow.cancelRequested ? "Stopping sequence; no further steps will start."
         : workflow.operationId && guidedSteps[workflow.step] === "fine_align" &&
-          (!state.status?.docking_profiles?.available || !state.status?.table_profiles?.available)
+          (!state.status?.docking_profiles?.available || (workflow.requiresTable && !state.status?.table_profiles?.available))
           ? "Waiting for docking and table profile configuration before advancing."
         : workflow.operationId ? `Waiting for ${stepLabel} to finish.`
           : guidedWaitReason(workflow) || `Starting ${stepLabel} automatically (${workflow.step + 1}/${guidedSteps.length}).`;
     } else {
       button.textContent = `Dock → Set Height → ${label} → Default Height → Undock`;
       let tableProblem = "";
-      try { comboTable(dockingProfileSelection() || state.status?.docking_profiles?.default_profile); }
+      try {
+        if (manipulationState === "HOLDING" && !manualPlacePoseEnabled()) {
+          comboTable(dockingProfileSelection() || state.status?.docking_profiles?.default_profile);
+        }
+      }
       catch (error) { tableProblem = error.message; }
       button.disabled = !!tableProblem || active || state.guidedSubmitting || !state.status?.docking_profiles?.available || !["EMPTY", "HOLDING"].includes(manipulationState) || byId("plan-only").checked || !unlocked;
       message.textContent = workflow?.message || (byId("plan-only").checked
@@ -1133,11 +1193,15 @@
       const placeTarget = kind === "place" && manualPlacePoseEnabled() ? placePose() : null;
       const label = kind === "pick" ? "Pick" : "Place";
       if (!state.status?.docking_profiles?.available) throw new Error("Docking profile configuration is unavailable");
-      const profileId = dockingProfileSelection() || state.status.docking_profiles.default_profile;
-      const table = comboTable(profileId);
+      const { profileId, box, boxTarget } = boxDockChoice(kind === "pick" || !!placeTarget);
+      const instanceId = boxTarget ? box.instance_id : null;
+      if (boxTarget && !instanceId) throw new Error("Select a fresh visible box before box docking.");
+      const requiresTable = kind !== "pick" && !placeTarget;
+      const table = requiresTable ? comboTable(profileId) : null;
+      const dockSignature = comboDock(profileId);
       const missingNavStatus = !state.status?.navigation?.goal_status?.available;
-      if (!window.confirm(`Run the complete physical sequence using docking profile ${profileId || "server default"} and table ${table.id}: Dock → Set Height (${posture.height.toFixed(3)} m, waist yaw ${posture.waist_yaw.toFixed(4)} rad) → ${label} → Default Height → Undock? All five steps will run automatically.${missingNavStatus ? " Nav2 status is unavailable: confirm Nav2 is idle before starting." : ""}`)) return;
-      state.guidedWorkflow = { kind, label, posture, placeTarget, profileId, tableId: table.id, tableSignature: JSON.stringify(table), instanceId: null,
+      if (!window.confirm(`Run the complete physical sequence using docking profile ${profileId || "server default"}${boxTarget ? ` for box ${instanceId}` : ""} ${table ? `and table ${table.id}` : "without a table tag"}: Dock → Set Height (${posture.height.toFixed(3)} m, waist yaw ${posture.waist_yaw.toFixed(4)} rad) → ${label} → Default Height → Undock? All five steps will run automatically.${missingNavStatus ? " Nav2 status is unavailable: confirm Nav2 is idle before starting." : ""}`)) return;
+      state.guidedWorkflow = { kind, label, posture, placeTarget, profileId, dockSignature, requiresTable, boxTarget, tableId: table?.id || "", tableSignature: table ? JSON.stringify(table) : null, instanceId,
         step: 0, operationId: null, confirmNav2Idle: missingNavStatus, useManualUnlock: true };
       setError("");
       starting = false;
@@ -1160,7 +1224,7 @@
     const postureStep = ["set_height", "default_height"].includes(step);
     const posture = step === "set_height" ? workflow.posture : { height: 0.64, waist_yaw: 0.0, wait_for_settle: true };
     const payload = postureStep ? { ...posture, confirmed: true }
-      : step === "fine_align" ? { kind: "fine_align", profile_id: workflow.profileId || "", execute: true, confirmed: true, confirm_nav2_idle: workflow.confirmNav2Idle }
+      : step === "fine_align" ? { kind: "fine_align", profile_id: workflow.profileId || "", ...(workflow.boxTarget ? { instance_id: workflow.instanceId } : {}), execute: true, confirmed: true, confirm_nav2_idle: workflow.confirmNav2Idle }
       : step === "undock" ? { kind: "undock", profile_id: workflow.profileId || "", confirmed: true, confirm_nav2_idle: workflow.confirmNav2Idle }
       : { kind: workflow.kind, table_profile_id: workflow.tableId, docking_profile_id: workflow.profileId, plan_only: false, confirmed: true,
           ...(workflow.kind === "pick" ? { instance_id: workflow.instanceId } : {}),
@@ -1181,7 +1245,7 @@
         if (workflow.cancelRequested || state.guidedWorkflow !== workflow || state.authenticated === false) return;
       }
       if (guidedWaitReason(workflow)) {
-        if (step === "manipulate" && workflow.kind === "pick" && !guidedPickId(workflow)) {
+        if (step === "manipulate" && workflow.kind === "pick" && !workflow.boxTarget && !guidedPickId(workflow)) {
           // No Pick has been sent yet, so a new detection can be selected.
           workflow.instanceId = null;
         }
@@ -1273,7 +1337,7 @@
       workflow.confirmNav2Idle = missingNavStatus;
       workflow.useManualUnlock = true;
       workflow.completed = nextStep === guidedSteps.length;
-      if (guidedSteps[nextStep] === "manipulate" && workflow.kind === "pick") workflow.instanceId = null;
+      if (guidedSteps[nextStep] === "manipulate" && workflow.kind === "pick" && !workflow.boxTarget) workflow.instanceId = null;
       setError("");
     } catch (error) { setError(error.message); }
     finally {
@@ -1303,8 +1367,12 @@
     try { await api("/api/actions", { method: "POST", body: JSON.stringify({ kind: "navigate", preset_id: preset.id, confirmed: true, confirm_nav2_idle: confirmNav2Idle }) }); setError(""); } catch (error) { setError(error.message); }
   }
   async function fineAlign(execute) {
-    let profileId;
-    try { profileId = dockingProfileSelection(); }
+    let profileId, instanceId;
+    try {
+      const choice = boxDockChoice();
+      profileId = choice.profileId || "";
+      if (choice.boxTarget) instanceId = choice.box.instance_id;
+    }
     catch (error) { setError(error.message); return; }
     const label = profileId || `server default (${state.status?.docking_profiles?.default_profile || "automatic"})`;
     if (execute && !window.confirm(`Move the robot in x, y, and yaw to fine-align using docking profile ${label}?`)) return;
@@ -1316,6 +1384,7 @@
         body: JSON.stringify({
           kind: "fine_align",
           profile_id: profileId,
+          ...(instanceId ? { instance_id: instanceId } : {}),
           execute,
           confirmed: execute,
           confirm_nav2_idle: confirmNav2Idle,
@@ -1526,12 +1595,21 @@
   document.querySelectorAll("[data-command]").forEach((button) => button.addEventListener("click", () => submitManipulation(button.dataset.command)));
   byId("visible-box-select").addEventListener("change", (event) => {
     state.selectedBoxId = event.target.value || null;
+    const box = state.status?.visible_boxes?.boxes?.find((item) => item.instance_id === state.selectedBoxId);
+    const selectedApproach = state.status?.docking_profiles?.profiles?.find(
+      (item) => item.id === byId("docking-profile").value);
+    if (selectedApproach?.target_source === "box" && !box?.docking_profile_ids?.includes(selectedApproach.id)) {
+      byId("docking-profile").value = "";
+    }
     renderVisibleBoxes(state.status?.visible_boxes);
+    renderDockingProfiles();
     renderGuidedWorkflow();
     scheduleGuidedStep();
     drawMap();
   });
-  byId("use-manual-place-pose").addEventListener("change", syncManualPlacePoseFields);
+  byId("use-manual-place-pose").addEventListener("change", () => {
+    syncManualPlacePoseFields(); renderGuidedWorkflow();
+  });
   syncManualPlacePoseFields();
   byId("place-form").addEventListener("submit", (event) => { event.preventDefault(); submitManipulation("place"); });
   byId("dock-manipulate-undock").addEventListener("click", advanceGuidedWorkflow);
