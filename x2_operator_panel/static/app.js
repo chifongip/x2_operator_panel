@@ -116,6 +116,7 @@
   }
   function syncManualPlacePoseFields() {
     byId("manual-place-fields").disabled = !manualPlacePoseEnabled();
+    byId("manual-place-fields").hidden = !manualPlacePoseEnabled();
   }
   function escapeHtml(value) {
     return String(value ?? "").replace(/[&<>'"]/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" }[character]));
@@ -933,16 +934,53 @@
     const catalog = state.taskShortcuts;
     shortcutOptions("task-shortcut-select", catalog.shortcuts.map((item) => [item.id, item.name]), "Choose a shortcut");
     const item = shortcutSelected();
-    byId("task-shortcut-preview").textContent = item ? shortcutDescription(item) : "Save a combination, then run it with one confirmation.";
+    byId("task-shortcut-preview").textContent = item ? shortcutDescription(item) : "Choose a shortcut button to review and run its sequence.";
     byId("task-shortcut-status").textContent = catalog.available ? `${catalog.shortcuts.length} saved shortcut(s).` : catalog.detail;
-    const workflow = state.guidedWorkflow;
-    const running = workflow && !workflow.failed && !workflow.completed;
-    byId("task-shortcut-run").disabled = !item || !catalog.available || !state.statusConnected || running || state.guidedSubmitting ||
-      byId("plan-only").checked || !(executionUnlockRemaining() > 0) || !!state.status?.task_admission?.blocked;
+    const list = byId("task-shortcut-buttons");
+    const signature = JSON.stringify(catalog.shortcuts.map((entry) => entry.id));
+    if (list.dataset.shortcuts !== signature) {
+      list.replaceChildren(...catalog.shortcuts.map((entry) => {
+        const button = document.createElement("button");
+        button.type = "button"; button.className = "requires-unlock";
+        button.addEventListener("click", () => {
+          byId("task-shortcut-select").value = entry.id;
+          renderTaskShortcuts();
+          runTaskShortcut(entry.id);
+        });
+        return button;
+      }));
+      list.dataset.shortcuts = signature;
+    }
+    if (!catalog.shortcuts.length) list.textContent = catalog.available
+      ? "No saved shortcuts. Open Manage shortcuts to create one." : "Shortcuts unavailable.";
+    catalog.shortcuts.forEach((entry, index) => {
+      const button = list.children[index];
+      const reason = shortcutUnavailableReason(entry);
+      button.textContent = entry.name;
+      button.disabled = !!reason;
+      button.title = reason || shortcutDescription(entry);
+    });
     for (const id of ["edit", "duplicate", "delete"]) byId(`task-shortcut-${id}`).disabled = !item || !catalog.available;
     byId("task-shortcut-new").disabled = !catalog.available;
     byId("task-shortcut-save").disabled = state.shortcutSaving || !state.shortcutDraft;
     if (!byId("task-shortcut-editor").hidden) renderShortcutChoices();
+  }
+
+  function shortcutUnavailableReason(item) {
+    if (!state.taskShortcuts.available) return "Shortcut storage is unavailable.";
+    if (!state.statusConnected || state.authenticated === false) return "Connect live status before starting a shortcut.";
+    const workflow = state.guidedWorkflow;
+    if (state.guidedSubmitting || (workflow && !workflow.failed && !workflow.completed) ||
+        state.status?.task_admission?.blocked || state.status?.navigation?.goal_status?.active ||
+        ["running", "retrying", "paused"].includes(state.status?.manipulation_task?.status) ||
+        (state.status?.operations || []).some((operation) => activeStatuses.includes(operation.status))) {
+      return "Wait for the active operation to finish.";
+    }
+    if (byId("plan-only").checked) return "Turn off Plan only to run a physical sequence.";
+    if (!(executionUnlockRemaining() > 0)) return "Unlock physical motion before starting a shortcut.";
+    const expected = item.action === "pick" ? "EMPTY" : "HOLDING";
+    if (state.status?.manipulation_state?.state !== expected) return `This shortcut requires manipulation state ${expected}.`;
+    return "";
   }
 
   function renderShortcutChoices() {
@@ -987,6 +1025,7 @@
     const draft = JSON.parse(JSON.stringify(mode === "new" ? defaults : selected));
     if (mode === "duplicate") { delete draft.id; delete draft.revision; draft.name = `${draft.name} copy`; }
     state.shortcutDraft = draft;
+    byId("task-shortcut-management").open = true;
     byId("task-shortcut-save").disabled = state.shortcutSaving;
     byId("task-shortcut-editor").hidden = false;
     byId("shortcut-name").value = draft.name;
@@ -1117,9 +1156,10 @@
     renderGuidedWorkflow();
   }
 
-  async function runTaskShortcut() {
+  async function runTaskShortcut(shortcutId = null) {
     if (state.guidedSubmitting || (state.guidedWorkflow && !state.guidedWorkflow.failed && !state.guidedWorkflow.completed)) return;
-    const selected = shortcutSelected();
+    const selected = shortcutId === null ? shortcutSelected()
+      : state.taskShortcuts?.shortcuts.find((item) => item.id === shortcutId);
     if (!selected) return;
     state.guidedSubmitting = true;
     try {
@@ -1939,7 +1979,6 @@
   byId("task-shortcut-duplicate").addEventListener("click", () => editTaskShortcut("duplicate"));
   byId("task-shortcut-delete").addEventListener("click", deleteTaskShortcut);
   byId("task-shortcut-refresh").addEventListener("click", loadTaskShortcuts);
-  byId("task-shortcut-run").addEventListener("click", runTaskShortcut);
   byId("task-shortcut-editor").addEventListener("submit", saveTaskShortcut);
   byId("task-shortcut-editor-close").addEventListener("click", () => {
     byId("task-shortcut-editor").hidden = true; state.shortcutDraft = null;

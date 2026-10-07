@@ -23,6 +23,7 @@ function fixture(item = shortcut(), fast = false) {
     let value = "";
     return { get value() { return value; }, set value(next) { value = String(next); },
       checked: false, hidden: false, dataset: {}, options: [], listeners: {},
+      get children() { return this.options; },
       addEventListener(name, callback) { this.listeners[name] = callback; },
       replaceChildren(...children) { this.options = children; } };
   }
@@ -290,6 +291,77 @@ async function overlappingSaveChecks() {
   assert.equal(replaced.byId("task-shortcut-save").disabled, false);
 }
 
+async function shortcutButtonChecks() {
+  const f = fixture();
+  const second = { ...shortcut(), id: "shortcut-2", name: "Pick second box",
+    box: { profile_id: "grey_box", instance_id: "tag:181" } };
+  f.state.taskShortcuts.shortcuts.push(second);
+  f.context.renderTaskShortcuts();
+  const list = f.byId("task-shortcut-buttons");
+  assert.deepEqual(list.children.map((button) => button.textContent), ["Grey box task", "Pick second box"]);
+  const originalButton = list.children[0];
+  f.state.taskShortcuts.shortcuts[0].name = "<img src=x onerror=alert(1)>";
+  f.context.renderTaskShortcuts();
+  assert.equal(list.children[0], originalButton, "Status updates and renames must preserve button focus");
+  assert.equal(originalButton.textContent, "<img src=x onerror=alert(1)>");
+  assert.equal(originalButton.className, "requires-unlock");
+  assert.equal(originalButton.disabled, false);
+  const requested = [];
+  const runner = f.context.runTaskShortcut;
+  f.context.runTaskShortcut = (id) => requested.push(id);
+  list.children[1].listeners.click();
+  assert.deepEqual(requested, ["shortcut-2"]);
+  assert.equal(f.byId("task-shortcut-select").value, "shortcut-2");
+  f.context.runTaskShortcut = runner;
+  f.byId("task-shortcut-select").value = "shortcut-1";
+  await Promise.all([runner("shortcut-2"), runner("shortcut-2")]);
+  assert.equal(f.commands().length, 1, "Repeated shortcut clicks must not start concurrent tasks");
+  assert.equal(f.commands()[0].payload.instance_id, "tag:181", "Button ID must override the management selection");
+
+  for (const [reason, change] of [
+    [/live status/, (f) => { f.state.statusConnected = false; }],
+    [/live status/, (f) => { f.state.authenticated = false; }],
+    [/Plan only/, (f) => { f.byId("plan-only").checked = true; }],
+    [/Unlock/, (f) => { f.state.status.execution_unlock_remaining_sec = 0; }],
+    [/EMPTY/, (f) => { f.state.status.manipulation_state.state = "HOLDING"; }],
+    [/EMPTY/, (f) => { f.state.status.manipulation_state.state = "UNKNOWN"; }],
+    [/active operation/, (f) => { f.state.status.task_admission = { blocked: true }; }],
+    [/active operation/, (f) => { f.state.status.operations = [{ status: "CANCEL_REQUESTED" }]; }],
+    [/active operation/, (f) => { f.state.status.navigation.goal_status.active = true; }],
+    [/active operation/, (f) => { f.state.status.manipulation_task = { status: "paused" }; }],
+    [/unavailable/, (f) => { f.state.taskShortcuts.available = false; }],
+  ]) {
+    const gated = fixture(); change(gated); gated.context.renderTaskShortcuts();
+    const button = gated.byId("task-shortcut-buttons").children[0];
+    assert.equal(button.disabled, true);
+    assert.match(button.title, reason);
+  }
+  const holding = fixture(shortcut("place"));
+  holding.context.renderTaskShortcuts();
+  assert.equal(holding.byId("task-shortcut-buttons").children[0].disabled, false);
+  holding.context.window.confirm = () => false;
+  await holding.context.runTaskShortcut("shortcut-1");
+  assert.equal(holding.commands().length, 0);
+
+  const stale = fixture();
+  const api = stale.context.api;
+  stale.context.api = (path, options) => path === "/api/task-shortcuts"
+    ? Promise.resolve({ available: true, shortcuts: [] }) : api(path, options);
+  await stale.context.runTaskShortcut("shortcut-1");
+  assert.equal(stale.commands().length, 0);
+  assert.match(stale.context.error, /unavailable/);
+  assert.equal(stale.byId("task-shortcut-buttons").children.length, 0);
+
+  const removed = fixture();
+  removed.context.renderTaskShortcuts();
+  removed.state.taskShortcuts.shortcuts = [];
+  removed.context.renderTaskShortcuts();
+  assert.equal(removed.byId("task-shortcut-buttons").children.length, 0);
+  removed.state.taskShortcuts.shortcuts = [second];
+  removed.context.renderTaskShortcuts();
+  assert.equal(removed.byId("task-shortcut-buttons").children[0].textContent, second.name);
+}
+
 async function editorChecks() {
   const f = fixture();
   f.context.editTaskShortcut("edit");
@@ -423,5 +495,5 @@ async function navigationCarryChecks() {
   assert.equal(editor.byId("shortcut-carry-start-enabled").disabled, false);
 }
 
-(async () => { await sequenceChecks(); await failureChecks(); await overlappingSaveChecks(); await editorChecks(); await navigationCarryChecks(); })()
+(async () => { await sequenceChecks(); await failureChecks(); await overlappingSaveChecks(); await shortcutButtonChecks(); await editorChecks(); await navigationCarryChecks(); })()
   .catch((error) => { console.error(error); process.exitCode = 1; });

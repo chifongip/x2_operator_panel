@@ -464,9 +464,37 @@ fresh stable table-tag observation. Guided workflows retain the docking
 calibration and mode; changes during a sequence require operator review.
 Existing execution unlock, confirmations, and server motion authority apply.
 
+### Command layout
+
+A full-width **Execution controls** section directly above Commands contains
+the physical-motion unlock, its status badge, and **Cancel active goals**.
+
+The Commands header contains the shared **Plan only** toggle and **Visible box**
+selection. The selected box applies to standalone actions and the quick combo;
+saved shortcuts use their configured fixed target.
+
+- **Tasks** presents saved shortcut buttons and the quick combo side by side,
+  with shared sequence status, Stop, and Continue controls below.
+- **Manipulation** groups Pick/Place and their target settings. Manual pose
+  fields appear when **Use manual target** is selected. Current task controls
+  stay visible; **Saved plans** and **Recovery and profiles** start open and can
+  be collapsed when not needed.
+- **Posture** contains height, waist yaw, posture actions, and Carry A/B.
+  **Posture options** exposes the feedback-window setting.
+- **Navigation** contains destination buttons and **Clear costmaps**. Interactive
+  initial-pose and navigation-goal controls remain beside the map.
+- **Docking** contains profile selectors, alignment commands, Undock, and
+  Cancel docking motion.
+
+Tasks spans the full width above both columns. Manipulation occupies the left
+column below Tasks. The right column stacks Posture at the top, Docking in the
+middle, and Navigation at the bottom. Columns stack
+on smaller screens. Shortcut management and posture options start collapsed;
+task warnings and cancellation controls remain visible.
+
 ### Editable task shortcuts
 
-In **Task shortcuts**, choose **New**, name the shortcut, select **Pick** or
+In **Tasks → Saved shortcuts → Manage shortcuts**, choose **New**, name the shortcut, select **Pick** or
 **Place held box**, and configure the optional stages around the combo:
 
 **Navigation → Carry Pose → Combo Task → Carry Pose → Navigation**
@@ -508,8 +536,14 @@ box-based Dock or Pick. Navigation uses the existing localization, Nav2-idle,
 Collision Monitor, and task-admission checks. A failed or canceled navigation or
 carry move stops progression just like a failed combo stage.
 
+Each saved shortcut appears as a named amber button, in saved order. The
+selector inside **Manage shortcuts** is used for editing, duplicating, or
+deleting definitions; running a button uses that button's shortcut ID.
+
 To execute, connect live status, turn off **Plan only**, unlock physical motion,
-and select **Run shortcut**. One confirmation lists all enabled stages; each
+and click the shortcut's button. Buttons are disabled while execution is
+blocked or the manipulation state is incompatible with Pick/Place. One
+confirmation lists all enabled stages; each
 stage uses the existing ROS action or posture service and advances only after
 success. A status disconnect pauses progression. An already submitted command
 may finish; after reconnecting, verify its outcome, unlock again, and use
