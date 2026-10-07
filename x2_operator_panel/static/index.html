@@ -183,6 +183,74 @@
             <p class="muted">Docking does not require a visible object. Before Pick, one detected object is selected automatically; choose from Visible box when several are detected.</p>
             <p class="muted">Set the object’s Height and Waist yaw below before the Set Height step. Default Height restores 0.64 m and 0.0 rad.</p>
           </div>
+          <section class="task-shortcuts" aria-label="Task shortcuts">
+            <h3>Task shortcuts</h3>
+            <label>Saved shortcut<select id="task-shortcut-select"><option value="">No saved shortcuts</option></select></label>
+            <p id="task-shortcut-preview" class="muted"></p>
+            <div class="command-row">
+              <button id="task-shortcut-run" class="requires-unlock" type="button" disabled>Run shortcut</button>
+              <button id="task-shortcut-new" type="button" class="secondary">New</button>
+              <button id="task-shortcut-edit" type="button" class="secondary">Edit</button>
+              <button id="task-shortcut-duplicate" type="button" class="secondary">Duplicate</button>
+              <button id="task-shortcut-delete" type="button" class="danger">Delete</button>
+              <button id="task-shortcut-refresh" type="button" class="secondary">Refresh</button>
+            </div>
+            <p id="task-shortcut-status" class="muted" role="status">Loading shortcuts…</p>
+            <form id="task-shortcut-editor" hidden>
+              <div class="shortcut-fields">
+                <label>Name<input id="shortcut-name" maxlength="80" required></label>
+                <label>Action<select id="shortcut-action"><option value="pick">Pick</option><option value="place">Place held box</option></select></label>
+                <label>Detected box<select id="shortcut-detected-box"><option value="">Enter a fixed target below</option></select></label>
+                <label>Box profile<input id="shortcut-box-profile" placeholder="grey_box" list="shortcut-box-profiles"></label>
+                <datalist id="shortcut-box-profiles"></datalist>
+                <label>Fixed box instance<input id="shortcut-box-instance" placeholder="tag:180"></label>
+              </div>
+              <p class="muted">Pick and box-based Dock use this exact instance. For Place, it is only the docking reference; Place operates on the held box.</p>
+              <datalist id="shortcut-docking-profiles"></datalist>
+              <datalist id="shortcut-table-profiles"></datalist>
+              <fieldset><legend><label class="plan-toggle"><input id="shortcut-navigate-start-enabled" type="checkbox">Navigation before combo</label></legend>
+                <label>Destination<select id="shortcut-navigate-start-preset"><option value="">Choose a destination</option></select></label>
+              </fieldset>
+              <fieldset><legend><label class="plan-toggle"><input id="shortcut-carry-start-enabled" type="checkbox">Carry pose before combo</label></legend>
+                <label>Pose<select id="shortcut-carry-start-pose"><option value="a">Carry A</option><option value="b">Carry B</option></select></label>
+                <p class="muted">Available before Place, when a box is held.</p>
+              </fieldset>
+              <p class="muted">Combo task</p>
+              <fieldset><legend><label class="plan-toggle"><input id="shortcut-dock-enabled" type="checkbox" checked>1. Dock</label></legend><label>Profile<input id="shortcut-dock-profile" list="shortcut-docking-profiles" placeholder="grey_box_dock"></label></fieldset>
+              <fieldset><legend><label class="plan-toggle"><input id="shortcut-posture-enabled" type="checkbox" checked>2. Set posture</label></legend><div class="shortcut-fields">
+                <label>Height (m)<input id="shortcut-posture-height" type="number" step="any" value="0.64" min="0.30" max="0.64"></label>
+                <label>Waist yaw (rad)<input id="shortcut-posture-yaw" type="number" step="any" value="0" min="-1.5708" max="1.5708"></label>
+              </div></fieldset>
+              <fieldset id="shortcut-place-fields" hidden>
+                <legend>3. Place target</legend>
+                <label>Target<select id="shortcut-place-mode"><option value="automatic">Automatic from table tag</option><option value="manual">Manual pose</option></select></label>
+                <label id="shortcut-table-field">Table profile<input id="shortcut-table-profile" list="shortcut-table-profiles"></label>
+                <div id="shortcut-manual-fields" class="shortcut-fields" hidden>
+                  <label>Frame<select id="shortcut-place-frame"><option value="base_link">base_link</option><option value="map">map</option></select></label>
+                  <label>X (m)<input id="shortcut-place-x" type="number" step="any" value="0.35" ></label>
+                  <label>Y (m)<input id="shortcut-place-y" type="number" step="any" value="0" ></label>
+                  <label>Z (m)<input id="shortcut-place-z" type="number" step="any" value="0.29" ></label>
+                  <label>Yaw (rad)<input id="shortcut-place-yaw" type="number" step="any" value="0" ></label>
+                </div>
+              </fieldset>
+              <fieldset><legend><label class="plan-toggle"><input id="shortcut-return-enabled" type="checkbox" checked>4. Return posture</label></legend><div class="shortcut-fields">
+                <label>Height (m)<input id="shortcut-return-height" type="number" step="any" value="0.64" min="0.30" max="0.64"></label>
+                <label>Waist yaw (rad)<input id="shortcut-return-yaw" type="number" step="any" value="0" min="-1.5708" max="1.5708"></label>
+              </div></fieldset>
+              <fieldset><legend><label class="plan-toggle"><input id="shortcut-undock-enabled" type="checkbox" checked>5. Undock</label></legend><label>Profile<input id="shortcut-undock-profile" list="shortcut-docking-profiles"></label></fieldset>
+              <fieldset><legend><label class="plan-toggle"><input id="shortcut-carry-end-enabled" type="checkbox">Carry pose after combo</label></legend>
+                <label>Pose<select id="shortcut-carry-end-pose"><option value="a">Carry A</option><option value="b">Carry B</option></select></label>
+                <p class="muted">Available after Pick, while holding the box.</p>
+              </fieldset>
+              <fieldset><legend><label class="plan-toggle"><input id="shortcut-navigate-end-enabled" type="checkbox">Navigation after combo</label></legend>
+                <label>Destination<select id="shortcut-navigate-end-preset"><option value="">Choose a destination</option></select></label>
+              </fieldset>
+              <div class="command-row">
+                <button id="task-shortcut-save" type="submit">Save shortcut</button>
+                <button id="task-shortcut-editor-close" type="button" class="secondary">Close editor</button>
+              </div>
+            </form>
+          </section>
           <div class="command-row">
             <button id="move-carry-a" class="requires-unlock" type="button">Move to Carry A</button>
             <button id="move-carry-b" class="requires-unlock" type="button">Move to Carry B</button>

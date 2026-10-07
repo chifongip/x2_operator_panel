@@ -20,6 +20,7 @@ setup(
         ]),
     ],
     install_requires=["setuptools", "Pillow", "PyYAML", "websockets"],
+    tests_require=["pytest"],
     zip_safe=True,
     maintainer="oscar",
     maintainer_email="oscar.ip@lscm.hk",

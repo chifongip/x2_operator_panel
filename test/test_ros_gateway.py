@@ -21,6 +21,7 @@ from sensor_msgs.msg import Image
 from x2_operator_panel.ros_gateway import (
     Operation,
     OperatorPanelNode,
+    NavigationPreset,
     PanelCommandError,
     _diagnostic_level_as_int,
     _display_telemetry_qos,
@@ -699,6 +700,31 @@ class RosGatewayTest(unittest.TestCase):
         self.assertEqual(goals[0].pose.header.frame_id, "map")
         self.assertAlmostEqual(goals[0].pose.pose.position.x, 2.0)
         self.assertAlmostEqual(goals[0].pose.pose.orientation.z, 2 ** -0.5)
+
+    def test_shortcut_navigation_rejects_changed_preset_before_goal_submission(self):
+        node = _new_panel_node()
+        node._assert_task_idle = Mock()
+        node._manipulation_state = {"state": "HOLDING"}
+        node._map_pose = {"available": True, "fresh": True}
+        node._nav_goal_status_locked = Mock(return_value={"available": True, "active": False})
+        node._initial_pose_status_locked = Mock(return_value={"state": "NOT_REQUESTED"})
+        node._presets = {"bay": NavigationPreset("bay", "Loading bay", 1.0, 2.0, 0.5)}
+        node._action_clients = {"navigate": Mock()}
+        node.goal_admission_timeout_sec = 5.0
+        node._register_operation = Mock()
+        node._audit = Mock()
+        node.get_clock = lambda: SimpleNamespace(now=lambda: SimpleNamespace(to_msg=lambda: Time()))
+        payload = {"confirmed": True, "preset_id": "bay",
+                   "expected_preset_pose": {"x": 1.0, "y": 2.0, "yaw": 0.5}}
+        for changed in ({"x": 9.0, "y": 2.0, "yaw": 0.5}, None,
+                        {"x": nan, "y": 2.0, "yaw": 0.5}):
+            with self.assertRaises(PanelCommandError):
+                node._submit_navigation(dict(payload, expected_preset_pose=changed))
+            node._action_clients["navigate"].send_goal_async.assert_not_called()
+        operation = node._submit_navigation(payload)
+        self.assertEqual(operation.preset_id, "bay")
+        self.assertEqual(operation.target_pose, payload["expected_preset_pose"])
+        node._action_clients["navigate"].send_goal_async.assert_called_once()
 
     def test_navigation_without_status_requires_operator_idle_confirmation(self):
         node = _new_panel_node()

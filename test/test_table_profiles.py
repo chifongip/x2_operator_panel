@@ -87,7 +87,7 @@ def test_combo_and_standalone_forward_table_and_serialize_result(kind, action):
 
 @pytest.mark.parametrize("payload", [
     {"table_profile_id": "missing"}, {"table_profile_id": 9},
-    {"table_profile_id": "default", "docking_profile_id": "offset"},
+    {"table_profile_id": "", "docking_profile_id": "offset"},
     {"table_profile_id": "second", "docking_profile_id": "missing"},
 ])
 def test_invalid_selection_is_rejected_before_unlock_or_submission(payload):
@@ -117,6 +117,15 @@ def test_manual_pose_keeps_matching_table_and_saved_execution_selection():
     goal = node._action_clients["place"].send_goal_async.call_args.args[0]
     assert goal.plan_id == "saved"
     assert goal.table_profile_id == "second"
+
+
+def test_explicit_table_can_differ_from_docking_tag():
+    node = panel()
+    node._submit_manipulation("place", {
+        "plan_only": True, "table_profile_id": "default", "docking_profile_id": "offset",
+    })
+    goal = node._action_clients["place"].send_goal_async.call_args.args[0]
+    assert goal.table_profile_id == "default"
 
 
 def test_box_only_pick_and_manual_place_skip_docking_table_match():

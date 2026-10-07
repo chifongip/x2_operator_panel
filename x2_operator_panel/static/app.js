@@ -14,6 +14,11 @@
     selectedBoxId: null,
     guidedWorkflow: null,
     guidedSubmitting: false,
+    taskShortcuts: { available: false, shortcuts: [], detail: "Loading shortcuts…" },
+    shortcutDraft: null,
+    shortcutSaving: false,
+    statusConnected: false,
+    connectionGeneration: 0,
     continueRequest: null,
     executionUnlockDeadline: null,
     executionUnlockKnown: false,
@@ -77,6 +82,8 @@
     return merged;
   }
   function returnToLogin(message) {
+    if (state.guidedWorkflow?.shortcut) pauseShortcutConnection();
+    state.statusConnected = false;
     if (state.guidedWorkflow) state.guidedWorkflow.cancelRequested = true;
     state.authenticated = false;
     invalidateExecutionUnlock();
@@ -136,6 +143,7 @@
       renderPresets();
       applyStatus(status);
       connectStatusStream();
+      await loadTaskShortcuts();
       startCameraStreams();
     } catch (error) { setError(error.message); }
   }
@@ -827,11 +835,16 @@
             (delta.remove || []).some((path) => path[0] === "execution_unlock_remaining_sec");
           applyStatus(mergeStatus(state.status, delta), unlockChanged);
         }
+        if (["status", "status_delta"].includes(message.type)) {
+          state.statusConnected = true;
+          renderTaskShortcuts();
+        }
       } catch (_) { setError("Received an invalid status update"); }
     };
     socket.onclose = (event) => {
       if (state.socket !== socket) return;
       state.socket = null;
+      pauseShortcutConnection();
       invalidateExecutionUnlock();
       if (event.code === 1008) {
         returnToLogin("Your operator session expired. Sign in again.");
@@ -865,6 +878,291 @@
   }
   byId("execute-saved-plan")?.addEventListener("click", executeSavedPlan);
   const guidedSteps = ["fine_align", "set_height", "manipulate", "default_height", "undock"];
+
+  function workflowSteps(workflow) { return workflow.steps || guidedSteps; }
+
+  function shortcutSteps(item) {
+    const settings = { fine_align: item.dock, set_height: item.posture,
+      default_height: item.return_posture, undock: item.undock };
+    return ["navigate_start", "carry_start", ...guidedSteps, "carry_end", "navigate_end"]
+      .filter((step) => step === "manipulate" || (settings[step] || item[step])?.enabled);
+  }
+
+  function shortcutSelected() {
+    return state.taskShortcuts?.shortcuts?.find((item) => item.id === byId("task-shortcut-select").value);
+  }
+
+  function shortcutDescription(item) {
+    const steps = [];
+    if (item.navigate_start?.enabled) steps.push(`Navigate to ${item.navigate_start.preset_id}`);
+    if (item.carry_start?.enabled) steps.push(`Carry ${item.carry_start.pose.toUpperCase()}`);
+    if (item.dock.enabled) steps.push(`Dock ${item.dock.profile_id}${item.action === "place" && item.box ? `; box reference ${item.box.instance_id}` : ""}`);
+    if (item.posture.enabled) steps.push(`Posture ${item.posture.height} m / ${item.posture.waist_yaw} rad`);
+    steps.push(item.action === "pick" ? `Pick ${item.box.profile_id} (${item.box.instance_id})`
+      : item.place.mode === "automatic" ? `Place on ${item.place.table_profile_id}`
+        : `Place at ${item.place.pose.frame_id} (${item.place.pose.x}, ${item.place.pose.y}, ${item.place.pose.z}), yaw ${item.place.pose.yaw}`);
+    if (item.return_posture.enabled) steps.push(`Return posture ${item.return_posture.height} m / ${item.return_posture.waist_yaw} rad`);
+    if (item.undock.enabled) steps.push(`Undock ${item.undock.profile_id}`);
+    if (item.carry_end?.enabled) steps.push(`Carry ${item.carry_end.pose.toUpperCase()}`);
+    if (item.navigate_end?.enabled) steps.push(`Navigate to ${item.navigate_end.preset_id}`);
+    return steps.join(" → ");
+  }
+
+  async function loadTaskShortcuts() {
+    try { state.taskShortcuts = await api("/api/task-shortcuts"); }
+    catch (error) { state.taskShortcuts = { available: false, shortcuts: [], detail: error.message }; }
+    renderTaskShortcuts();
+  }
+
+  function shortcutOptions(id, choices, prompt) {
+    const select = byId(id), selected = select.value || "";
+    const values = [["", prompt], ...choices];
+    if (selected && !values.some(([value]) => value === selected)) values.push([selected, `${selected} (unavailable)`]);
+    const signature = JSON.stringify(values);
+    if (select.dataset.choices !== signature) {
+      select.replaceChildren(...values.map(([value, label]) => {
+        const option = document.createElement("option");
+        option.value = value; option.textContent = label; return option;
+      }));
+      select.value = selected; select.dataset.choices = signature;
+    }
+  }
+
+  function renderTaskShortcuts() {
+    if (!state.taskShortcuts) return;
+    const catalog = state.taskShortcuts;
+    shortcutOptions("task-shortcut-select", catalog.shortcuts.map((item) => [item.id, item.name]), "Choose a shortcut");
+    const item = shortcutSelected();
+    byId("task-shortcut-preview").textContent = item ? shortcutDescription(item) : "Save a combination, then run it with one confirmation.";
+    byId("task-shortcut-status").textContent = catalog.available ? `${catalog.shortcuts.length} saved shortcut(s).` : catalog.detail;
+    const workflow = state.guidedWorkflow;
+    const running = workflow && !workflow.failed && !workflow.completed;
+    byId("task-shortcut-run").disabled = !item || !catalog.available || !state.statusConnected || running || state.guidedSubmitting ||
+      byId("plan-only").checked || !(executionUnlockRemaining() > 0) || !!state.status?.task_admission?.blocked;
+    for (const id of ["edit", "duplicate", "delete"]) byId(`task-shortcut-${id}`).disabled = !item || !catalog.available;
+    byId("task-shortcut-new").disabled = !catalog.available;
+    byId("task-shortcut-save").disabled = state.shortcutSaving || !state.shortcutDraft;
+    if (!byId("task-shortcut-editor").hidden) renderShortcutChoices();
+  }
+
+  function renderShortcutChoices() {
+    const docks = state.status?.docking_profiles;
+    const tables = state.status?.table_profiles;
+    for (const [id, catalog] of [["shortcut-docking-profiles", docks], ["shortcut-table-profiles", tables]]) {
+      byId(id).replaceChildren(...(catalog?.available ? catalog.profiles : []).map((item) => {
+        const option = document.createElement("option"); option.value = item.id; return option;
+      }));
+    }
+    const boxes = state.status?.visible_boxes?.fresh ? state.status.visible_boxes.boxes : [];
+    shortcutOptions("shortcut-detected-box", boxes.map((item) => [item.instance_id, `${item.profile_id} / ${item.instance_id}`]), "Enter a fixed target below");
+    byId("shortcut-box-profiles").replaceChildren(...[...new Set(boxes.map((item) => item.profile_id))].map((value) => {
+      const option = document.createElement("option"); option.value = value; return option;
+    }));
+    const place = byId("shortcut-action").value === "place";
+    for (const stage of ["start", "end"]) {
+      shortcutOptions(`shortcut-navigate-${stage}-preset`, (state.presets || []).map((item) => [item.id, `${item.label} (${item.id})`]), "Choose a destination");
+      const incompatible = stage === "start" ? !place : place;
+      const enabled = byId(`shortcut-carry-${stage}-enabled`);
+      enabled.disabled = incompatible;
+      if (incompatible) enabled.checked = false;
+      byId(`shortcut-carry-${stage}-pose`).disabled = incompatible;
+    }
+    const manual = byId("shortcut-place-mode").value === "manual";
+    byId("shortcut-place-fields").hidden = !place;
+    byId("shortcut-table-field").hidden = manual;
+    byId("shortcut-manual-fields").hidden = !manual;
+  }
+
+  function editTaskShortcut(mode) {
+    const selected = shortcutSelected();
+    if (mode !== "new" && !selected) return;
+    const box = state.status?.visible_boxes?.boxes?.find((item) => item.instance_id === guidedPickId({}));
+    const profile = box?.default_docking_profile || state.status?.docking_profiles?.default_profile || "";
+    const defaults = { name: "", action: "pick", box: box ? { profile_id: box.profile_id, instance_id: box.instance_id } : null,
+      dock: { enabled: true, profile_id: profile }, undock: { enabled: true, profile_id: profile },
+      posture: { enabled: true, height: 0.64, waist_yaw: 0 }, return_posture: { enabled: true, height: 0.64, waist_yaw: 0 },
+      navigate_start: { enabled: false, preset_id: "" }, navigate_end: { enabled: false, preset_id: "" },
+      carry_start: { enabled: false, pose: "a" }, carry_end: { enabled: false, pose: "a" },
+      place: { mode: "automatic", table_profile_id: state.status?.table_profiles?.default_profile || "" } };
+    const draft = JSON.parse(JSON.stringify(mode === "new" ? defaults : selected));
+    if (mode === "duplicate") { delete draft.id; delete draft.revision; draft.name = `${draft.name} copy`; }
+    state.shortcutDraft = draft;
+    byId("task-shortcut-save").disabled = state.shortcutSaving;
+    byId("task-shortcut-editor").hidden = false;
+    byId("shortcut-name").value = draft.name;
+    byId("shortcut-action").value = draft.action;
+    byId("shortcut-box-profile").value = draft.box?.profile_id || "";
+    byId("shortcut-box-instance").value = draft.box?.instance_id || "";
+    byId("shortcut-detected-box").value = "";
+    for (const stage of ["start", "end"]) {
+      byId(`shortcut-navigate-${stage}-enabled`).checked = !!draft[`navigate_${stage}`]?.enabled;
+      byId(`shortcut-navigate-${stage}-preset`).value = "";
+      byId(`shortcut-carry-${stage}-enabled`).checked = !!draft[`carry_${stage}`]?.enabled;
+      byId(`shortcut-carry-${stage}-pose`).value = draft[`carry_${stage}`]?.pose || "a";
+    }
+    for (const [field, key] of [["dock", "dock"], ["posture", "posture"], ["return", "return_posture"], ["undock", "undock"]]) {
+      byId(`shortcut-${field}-enabled`).checked = draft[key].enabled;
+      if (["dock", "undock"].includes(field)) {
+        byId(`shortcut-${field}-profile`).value = "";
+      } else {
+        byId(`shortcut-${field}-height`).value = draft[key].height;
+        byId(`shortcut-${field}-yaw`).value = draft[key].waist_yaw;
+      }
+    }
+    byId("shortcut-place-mode").value = draft.place?.mode || "automatic";
+    renderShortcutChoices();
+    for (const stage of ["start", "end"]) {
+      const select = byId(`shortcut-navigate-${stage}-preset`);
+      select.value = draft[`navigate_${stage}`]?.preset_id || "";
+      // Retain a saved destination even when it has been removed from the catalog.
+      if (draft[`navigate_${stage}`]?.preset_id && !select.value) {
+        const option = document.createElement("option"); option.value = draft[`navigate_${stage}`].preset_id;
+        option.textContent = `${option.value} (unavailable)`; select.appendChild(option); select.value = option.value;
+      }
+    }
+    if (state.status?.visible_boxes?.fresh && state.status.visible_boxes.boxes.some(
+        (item) => item.instance_id === draft.box?.instance_id)) {
+      byId("shortcut-detected-box").value = draft.box.instance_id;
+    }
+    for (const [field, value] of [["dock-profile", draft.dock.profile_id], ["undock-profile", draft.undock.profile_id],
+        ["table-profile", draft.place?.table_profile_id || ""]]) {
+      byId(`shortcut-${field}`).value = value;
+    }
+    const pose = draft.place?.pose || { frame_id: "base_link", x: 0.35, y: 0, z: 0.29, yaw: 0 };
+    byId("shortcut-place-frame").value = pose.frame_id;
+    for (const key of ["x", "y", "z", "yaw"]) byId(`shortcut-place-${key}`).value = pose[key];
+  }
+
+  async function saveTaskShortcut(event) {
+    event.preventDefault();
+    const draft = state.shortcutDraft;
+    if (state.shortcutSaving || !draft) return;
+    state.shortcutSaving = true;
+    renderTaskShortcuts();
+    try {
+      const item = { ...(draft.id ? { id: draft.id, revision: draft.revision } : {}),
+        name: byId("shortcut-name").value.trim(), action: byId("shortcut-action").value };
+      const profile = byId("shortcut-box-profile").value.trim(), instance = byId("shortcut-box-instance").value.trim();
+      item.box = profile || instance ? { profile_id: profile, instance_id: instance } : null;
+      for (const stage of ["start", "end"]) {
+        item[`navigate_${stage}`] = { enabled: byId(`shortcut-navigate-${stage}-enabled`).checked,
+          preset_id: byId(`shortcut-navigate-${stage}-preset`).value };
+        item[`carry_${stage}`] = { enabled: byId(`shortcut-carry-${stage}-enabled`).checked,
+          pose: byId(`shortcut-carry-${stage}-pose`).value };
+      }
+      for (const field of ["dock", "undock"]) item[field] = {
+        enabled: byId(`shortcut-${field}-enabled`).checked, profile_id: byId(`shortcut-${field}-profile`).value.trim() };
+      for (const [field, key] of [["posture", "posture"], ["return", "return_posture"]]) item[key] = {
+        enabled: byId(`shortcut-${field}-enabled`).checked, height: finiteField(`shortcut-${field}-height`), waist_yaw: finiteField(`shortcut-${field}-yaw`) };
+      item.place = item.action === "place" ? (byId("shortcut-place-mode").value === "automatic"
+        ? { mode: "automatic", table_profile_id: byId("shortcut-table-profile").value.trim() }
+        : { mode: "manual", pose: { frame_id: byId("shortcut-place-frame").value,
+          ...Object.fromEntries(["x", "y", "z", "yaw"].map((key) => [key, finiteField(`shortcut-place-${key}`)])) } }) : null;
+      const response = await api("/api/task-shortcuts/save", { method: "POST", body: JSON.stringify(item) });
+      state.taskShortcuts = response;
+      if (state.shortcutDraft === draft) {
+        state.shortcutDraft = null;
+        byId("task-shortcut-editor").hidden = true;
+      }
+      renderTaskShortcuts(); byId("task-shortcut-select").value = response.shortcut.id;
+      renderTaskShortcuts(); setError("");
+    } catch (error) { setError(error.message); }
+    finally { state.shortcutSaving = false; renderTaskShortcuts(); }
+  }
+
+  async function deleteTaskShortcut() {
+    const item = shortcutSelected();
+    if (!item || !window.confirm(`Delete shortcut ${item.name}?`)) return;
+    try {
+      state.taskShortcuts = await api("/api/task-shortcuts/delete", { method: "POST", body: JSON.stringify({ id: item.id, revision: item.revision }) });
+      byId("task-shortcut-select").value = "";
+      renderTaskShortcuts(); setError("");
+    } catch (error) { setError(error.message); }
+  }
+
+  function validateShortcutReferences(workflow) {
+    const item = workflow.shortcut;
+    for (const stage of ["navigate_start", "navigate_end"]) {
+      if (!item[stage]?.enabled) continue;
+      const preset = state.presets?.find((entry) => entry.id === item[stage].preset_id);
+      if (!preset) throw new Error(`Navigation destination ${item[stage].preset_id} is unavailable.`);
+      const expected = workflow.navigationTargets?.[stage];
+      if (expected && ["x", "y", "yaw"].some((key) => preset.pose[key] !== expected.pose[key])) {
+        throw new Error("The shortcut navigation destination changed; review the route before restarting.");
+      }
+    }
+    for (const [key, signature] of [["dock", "dockSignature"], ["undock", "undockSignature"]]) {
+      if (item[key].enabled) comboDock(item[key].profile_id, workflow[signature]);
+    }
+    if (workflow.requiresTable) {
+      const catalog = state.status?.table_profiles;
+      const table = catalog?.available && catalog.profiles.find((entry) => entry.id === workflow.tableId);
+      if (!table) throw new Error("The shortcut table profile is unavailable.");
+      if (workflow.tableSignature && JSON.stringify(table) !== workflow.tableSignature) throw new Error("The shortcut table calibration changed; verify robot state before restarting.");
+    }
+    const visible = state.status?.visible_boxes;
+    const box = visible?.fresh && visible.boxes.find((entry) => entry.instance_id === workflow.instanceId);
+    if (box && item.box && box.profile_id !== item.box.profile_id) throw new Error("The fixed box now has a different profile; verify the shortcut target.");
+    if (box && workflow.boxTarget && !box.docking_profile_ids?.includes(workflow.profileId)) throw new Error("The fixed box no longer supports the shortcut docking profile.");
+  }
+
+  function pauseShortcutConnection() {
+    state.statusConnected = false;
+    state.connectionGeneration = (state.connectionGeneration || 0) + 1;
+    const workflow = state.guidedWorkflow;
+    if (workflow?.shortcut && !workflow.completed) {
+      workflow.reconnectUnlockRequired = true;
+      failGuidedWorkflow(workflow, "Shortcut paused: live status disconnected. Reconnect, verify the current operation, unlock and Continue.", workflow.resumeBlocked);
+    }
+    renderGuidedWorkflow();
+  }
+
+  async function runTaskShortcut() {
+    if (state.guidedSubmitting || (state.guidedWorkflow && !state.guidedWorkflow.failed && !state.guidedWorkflow.completed)) return;
+    const selected = shortcutSelected();
+    if (!selected) return;
+    state.guidedSubmitting = true;
+    try {
+      const [catalog, status, destinations] = await Promise.all([api("/api/task-shortcuts"), api("/api/status"), api("/api/presets")]);
+      state.presets = destinations.presets;
+      state.taskShortcuts = catalog; applyStatus(status);
+      const item = catalog.available && catalog.shortcuts.find((entry) => entry.id === selected.id);
+      if (!item) throw new Error("The shortcut is unavailable; refresh the list.");
+      if (!state.statusConnected || state.authenticated === false) throw new Error("Connect live status before starting a shortcut.");
+      if (byId("plan-only").checked || !(executionUnlockRemaining() > 0)) throw new Error("Turn off Plan only and unlock physical motion before running a shortcut.");
+      const expected = item.action === "pick" ? "EMPTY" : "HOLDING";
+      if (status.manipulation_state?.state !== expected) throw new Error(`This shortcut requires manipulation state ${expected}.`);
+      if (status.task_admission?.blocked || status.navigation?.goal_status?.active ||
+          ["running", "retrying", "paused"].includes(status.manipulation_task?.status) ||
+          (status.operations || []).some((operation) => activeStatuses.includes(operation.status))) throw new Error("Wait for the active operation to finish.");
+      const snapshot = JSON.parse(JSON.stringify(item));
+      if ((item.action === "pick" && item.carry_start?.enabled) ||
+          (item.action === "place" && item.carry_end?.enabled)) throw new Error("Carry poses require a held box: enable before Place or after Pick.");
+      const dock = item.dock.enabled && status.docking_profiles?.profiles?.find((entry) => entry.id === item.dock.profile_id);
+      const workflow = { shortcut: snapshot, kind: item.action, label: `${item.name} (${item.action === "pick" ? "Pick" : "Place"})`,
+        instanceId: item.box?.instance_id || null, fixedInstance: true, boxTarget: dock?.target_source === "box",
+        profileId: item.dock.enabled ? item.dock.profile_id : "", undockProfileId: item.undock.enabled ? item.undock.profile_id : "",
+        posture: { height: item.posture.height, waist_yaw: item.posture.waist_yaw, wait_for_settle: true },
+        returnPosture: { height: item.return_posture.height, waist_yaw: item.return_posture.waist_yaw, wait_for_settle: true },
+        placeTarget: snapshot.place?.mode === "manual" ? snapshot.place.pose : null,
+        requiresTable: item.action === "place" && item.place.mode === "automatic", tableId: item.place?.table_profile_id || "",
+        steps: shortcutSteps(snapshot), navigationTargets: {},
+        step: 0, operationId: null, useManualUnlock: true, confirmNav2Idle: !status.navigation?.goal_status?.available };
+      if (workflow.boxTarget && !item.box) throw new Error("Box docking requires a fixed box profile and instance.");
+      validateShortcutReferences(workflow);
+      for (const stage of ["navigate_start", "navigate_end"]) {
+        if (snapshot[stage]?.enabled) workflow.navigationTargets[stage] = JSON.parse(JSON.stringify(
+          state.presets.find((entry) => entry.id === snapshot[stage].preset_id)));
+      }
+      workflow.dockSignature = item.dock.enabled ? comboDock(item.dock.profile_id) : null;
+      workflow.undockSignature = item.undock.enabled ? comboDock(item.undock.profile_id) : null;
+      workflow.tableSignature = workflow.requiresTable ? JSON.stringify(status.table_profiles.profiles.find((table) => table.id === workflow.tableId)) : null;
+      if (!window.confirm(`Run physical shortcut ${item.name}: ${shortcutDescription(item)}? Remaining stages run automatically.${workflow.confirmNav2Idle ? " Confirm Nav2 is idle." : ""}`)) return;
+      state.guidedWorkflow = workflow; setError("");
+    } catch (error) { setError(error.message); }
+    finally { state.guidedSubmitting = false; renderGuidedWorkflow(); }
+    if (state.guidedWorkflow?.shortcut && !state.guidedWorkflow.failed) await runGuidedStep();
+  }
 
   function tableProfileSelection() {
     const id = byId("table-profile").value || "";
@@ -913,7 +1211,10 @@
     if (workflow.boxTarget && operation.result?.instance_id !== workflow.instanceId) {
       throw new Error("Dock reported a different box instance; verify robot state before restarting.");
     }
-    if (workflow.requiresTable) comboTable(resolved, workflow.tableId, workflow.tableSignature);
+    if (workflow.shortcut && resolved !== workflow.profileId) {
+      throw new Error("Dock reported a different shortcut profile; verify robot state before restarting.");
+    }
+    if (workflow.requiresTable && !workflow.shortcut) comboTable(resolved, workflow.tableId, workflow.tableSignature);
     workflow.profileId = resolved;
   }
 
@@ -1015,8 +1316,11 @@
   const activeStatuses = ["SUBMITTING", "ACTIVE", "CANCEL_REQUESTED"];
 
   function guidedStepLabel(step, label) {
-    return ({ fine_align: "Dock", set_height: "Set Height", manipulate: label,
-      default_height: "Default Height", undock: "Undock" })[step];
+    const shortcut = state.guidedWorkflow?.shortcut;
+    return ({ fine_align: "Dock", set_height: shortcut ? "Set posture" : "Set Height", manipulate: label,
+      default_height: shortcut ? "Return posture" : "Default Height", undock: "Undock",
+      navigate_start: "Navigate before combo", navigate_end: "Navigate after combo",
+      carry_start: "Carry pose before combo", carry_end: "Carry pose after combo" })[step];
   }
 
   function failGuidedWorkflow(workflow, message, resumeBlocked = false) {
@@ -1039,21 +1343,21 @@
       }
       workflow.operationSeen = true;
       if (activeStatuses.includes(operation.status)) return;
-      if (guidedSteps[workflow.step] === "fine_align" && operation.status === "SUCCEEDED" &&
+      if (workflowSteps(workflow)[workflow.step] === "fine_align" && operation.status === "SUCCEEDED" &&
           operation.result?.success !== false && (!state.status?.docking_profiles?.available ||
           (workflow.requiresTable && !state.status?.table_profiles?.available))) return;
       workflow.operationId = null;
       if (operation.status !== "SUCCEEDED" || operation.result?.success === false) {
-        failGuidedWorkflow(workflow, `${workflow.label} stopped at ${guidedStepLabel(guidedSteps[workflow.step], workflow.label)}: ${operation.result?.message || operation.detail || operation.status}`,
+        failGuidedWorkflow(workflow, `${workflow.label} stopped at ${guidedStepLabel(workflowSteps(workflow)[workflow.step], workflow.label)}: ${operation.result?.message || operation.detail || operation.status}`,
           ["OUTCOME_UNKNOWN", "ERROR"].includes(operation.status));
         return;
       }
-      if (guidedSteps[workflow.step] === "fine_align") {
+      if (workflowSteps(workflow)[workflow.step] === "fine_align") {
         try { bindCompletedDock(workflow, operation); }
         catch (error) { failGuidedWorkflow(workflow, error.message, true); return; }
       }
       workflow.step += 1;
-      if (workflow.step === guidedSteps.length) {
+      if (workflow.step === workflowSteps(workflow).length) {
         workflow.message = `${workflow.label} sequence completed.`;
         workflow.completed = true;
       }
@@ -1081,7 +1385,8 @@
   }
 
   function guidedWaitReason(workflow) {
-    const step = guidedSteps[workflow.step];
+    const step = workflowSteps(workflow)[workflow.step];
+    if (workflow.shortcut && !state.statusConnected) return "Reconnect live status before continuing the shortcut.";
     if (state.status?.task_admission?.blocked) return state.status.task_admission.detail;
     if (["running", "retrying", "paused"].includes(state.status?.manipulation_task?.status)) {
       return "Waiting for the active manipulation task to finish.";
@@ -1089,11 +1394,14 @@
     if (["fine_align", "undock"].includes(step) && !state.status?.docking_profiles?.available) {
       return "Waiting for docking profile configuration.";
     }
-    if (["fine_align", "manipulate", "undock"].includes(step)) {
+    if (workflow.shortcut) {
+      try { validateShortcutReferences(workflow); }
+      catch (error) { return error.message; }
+    } else if (["fine_align", "manipulate", "undock"].includes(step)) {
       try { comboDock(workflow.profileId, workflow.dockSignature); }
       catch (error) { return error.message; }
     }
-    if (workflow.requiresTable && ["fine_align", "manipulate", "undock"].includes(step)) {
+    if (!workflow.shortcut && workflow.requiresTable && ["fine_align", "manipulate", "undock"].includes(step)) {
       try { comboTable(workflow.profileId, workflow.tableId, workflow.tableSignature); }
       catch (error) { return error.message; }
     }
@@ -1102,15 +1410,24 @@
       return "Waiting for the active operation to finish.";
     }
     const expectedState = workflow.kind === "pick"
-      ? (workflow.step <= guidedSteps.indexOf("manipulate") ? "EMPTY" : "HOLDING")
-      : (workflow.step <= guidedSteps.indexOf("manipulate") ? "HOLDING" : "EMPTY");
+      ? (workflow.step <= workflowSteps(workflow).indexOf("manipulate") ? "EMPTY" : "HOLDING")
+      : (workflow.step <= workflowSteps(workflow).indexOf("manipulate") ? "HOLDING" : "EMPTY");
     if (state.status?.manipulation_state?.state !== expectedState) {
       return `Waiting for manipulation state ${expectedState}.`;
     }
     if (["set_height", "default_height"].includes(step) && !state.status?.locomanipulation_posture?.ready) {
       return state.status?.locomanipulation_posture?.detail || "Waiting for posture service.";
     }
-    if (step === "manipulate" && workflow.kind === "pick" && !guidedPickId(workflow)) {
+    if (["carry_start", "carry_end"].includes(step)) {
+      if (state.status?.manipulation_state?.state !== "HOLDING") return "Carry poses require a held box.";
+      if (!state.status?.servers?.move_carry_pose) return "Waiting for carry-pose action server.";
+    }
+    if (["navigate_start", "navigate_end"].includes(step)) {
+      if (!state.status?.servers?.navigate) return "Waiting for navigation action server.";
+      if (!state.status?.map_pose?.available || !state.status.map_pose.fresh) return "Waiting for fresh map localization before navigation.";
+    }
+    if (((step === "manipulate" && workflow.kind === "pick") ||
+        (workflow.shortcut && step === "fine_align" && workflow.boxTarget)) && !guidedPickId(workflow)) {
       if (workflow.instanceId) return `Waiting for a fresh detection of ${workflow.instanceId}.`;
       const visible = state.status?.visible_boxes;
       return visible?.fresh && visible.boxes?.length > 1
@@ -1121,6 +1438,7 @@
   }
 
   function renderGuidedWorkflow() {
+    renderTaskShortcuts();
     const button = byId("dock-manipulate-undock");
     const message = byId("guided-workflow-status");
     const workflow = state.guidedWorkflow;
@@ -1134,19 +1452,20 @@
     const unlocked = executionUnlockRemaining() > 0;
     byId("stop-guided-workflow").disabled = !running || workflow.cancelRequested;
     const continueButton = byId("continue-guided-workflow");
-    continueButton.disabled = !workflow?.failed || workflow.resumeBlocked || active || state.guidedSubmitting || byId("plan-only").checked || !unlocked;
+    continueButton.disabled = !workflow?.failed || workflow.resumeBlocked || workflow.reconnectUnlockRequired ||
+      (workflow.shortcut && !state.statusConnected) || active || state.guidedSubmitting || byId("plan-only").checked || !unlocked;
     continueButton.title = workflow?.resumeBlocked ? "Command outcome is unknown; verify robot state before restarting."
       : "Resume at the failed stage after verifying robot state";
     if (running) {
-      const stepLabel = guidedStepLabel(guidedSteps[workflow.step], workflow.label);
-      button.textContent = `Running ${workflow.label}: ${stepLabel} (${workflow.profileId || "server default"}${workflow.requiresTable ? `, table ${workflow.tableId}` : ", no table tag required"})`;
+      const stepLabel = guidedStepLabel(workflowSteps(workflow)[workflow.step], workflow.label);
+      button.textContent = `Running ${workflow.label}: ${stepLabel} (${workflow.profileId || (workflow.shortcut ? "Dock disabled" : "server default")}${workflow.requiresTable ? `, table ${workflow.tableId}` : ", no table tag required"})`;
       button.disabled = true;
       message.textContent = workflow.cancelRequested ? "Stopping sequence; no further steps will start."
-        : workflow.operationId && guidedSteps[workflow.step] === "fine_align" &&
+        : workflow.operationId && workflowSteps(workflow)[workflow.step] === "fine_align" &&
           (!state.status?.docking_profiles?.available || (workflow.requiresTable && !state.status?.table_profiles?.available))
           ? "Waiting for docking and table profile configuration before advancing."
         : workflow.operationId ? `Waiting for ${stepLabel} to finish.`
-          : guidedWaitReason(workflow) || `Starting ${stepLabel} automatically (${workflow.step + 1}/${guidedSteps.length}).`;
+          : guidedWaitReason(workflow) || `Starting ${stepLabel} automatically (${workflow.step + 1}/${workflowSteps(workflow).length}).`;
     } else {
       button.textContent = `Dock → Set Height → ${label} → Default Height → Undock`;
       let tableProblem = "";
@@ -1216,17 +1535,23 @@
     if (!workflow || workflow.failed || workflow.completed || workflow.cancelRequested || workflow.operationId || state.guidedSubmitting) return;
     if (state.authenticated === false) return;
     if (guidedWaitReason(workflow)) return;
-    const step = guidedSteps[workflow.step];
+    const step = workflowSteps(workflow)[workflow.step];
     if (step === "manipulate" && workflow.kind === "pick" && !workflow.instanceId) {
       // Bind the physical target when Pick is ready, after docking and height adjustment.
       workflow.instanceId = guidedPickId(workflow);
     }
     const postureStep = ["set_height", "default_height"].includes(step);
-    const posture = step === "set_height" ? workflow.posture : { height: 0.64, waist_yaw: 0.0, wait_for_settle: true };
+    const posture = step === "set_height" ? workflow.posture :
+      workflow.returnPosture || { height: 0.64, waist_yaw: 0.0, wait_for_settle: true };
     const payload = postureStep ? { ...posture, confirmed: true }
+      : ["navigate_start", "navigate_end"].includes(step) ? { kind: "navigate",
+        preset_id: workflow.navigationTargets[step].id, expected_preset_pose: workflow.navigationTargets[step].pose,
+        confirmed: true, confirm_nav2_idle: workflow.confirmNav2Idle }
+      : ["carry_start", "carry_end"].includes(step) ? { kind: "move_carry_pose",
+        target_pose: workflow.shortcut[step].pose === "a" ? 0 : 1, plan_only: false, confirmed: true }
       : step === "fine_align" ? { kind: "fine_align", profile_id: workflow.profileId || "", ...(workflow.boxTarget ? { instance_id: workflow.instanceId } : {}), execute: true, confirmed: true, confirm_nav2_idle: workflow.confirmNav2Idle }
-      : step === "undock" ? { kind: "undock", profile_id: workflow.profileId || "", confirmed: true, confirm_nav2_idle: workflow.confirmNav2Idle }
-      : { kind: workflow.kind, table_profile_id: workflow.tableId, docking_profile_id: workflow.profileId, plan_only: false, confirmed: true,
+      : step === "undock" ? { kind: "undock", profile_id: workflow.undockProfileId || workflow.profileId || "", confirmed: true, confirm_nav2_idle: workflow.confirmNav2Idle }
+      : { kind: workflow.kind, table_profile_id: workflow.tableId, ...(workflow.profileId ? { docking_profile_id: workflow.profileId } : {}), plan_only: false, confirmed: true,
           ...(workflow.kind === "pick" ? { instance_id: workflow.instanceId } : {}),
           ...(workflow.placeTarget ? { place_pose: workflow.placeTarget } : {}) };
     state.guidedSubmitting = true;
@@ -1238,14 +1563,14 @@
       if (!workflow.useManualUnlock) {
         await api("/api/unlock/execution", { method: "POST", body: JSON.stringify({ confirmed: true }) });
       }
-      if (workflow.cancelRequested || state.guidedWorkflow !== workflow || state.authenticated === false) return;
+      if (workflow.failed || workflow.cancelRequested || state.guidedWorkflow !== workflow || state.authenticated === false) return;
       if (step === "manipulate" && workflow.kind === "pick") {
         // The browser snapshot can outlive the detection freshness window.
         applyStatus(await api("/api/status"));
-        if (workflow.cancelRequested || state.guidedWorkflow !== workflow || state.authenticated === false) return;
+        if (workflow.failed || workflow.cancelRequested || state.guidedWorkflow !== workflow || state.authenticated === false) return;
       }
       if (guidedWaitReason(workflow)) {
-        if (step === "manipulate" && workflow.kind === "pick" && !workflow.boxTarget && !guidedPickId(workflow)) {
+        if (step === "manipulate" && workflow.kind === "pick" && !workflow.boxTarget && !workflow.fixedInstance && !guidedPickId(workflow)) {
           // No Pick has been sent yet, so a new detection can be selected.
           workflow.instanceId = null;
         }
@@ -1267,6 +1592,8 @@
     } catch (error) {
       const staleSelection = error.message === "The selected box is no longer a fresh visible detection; select it again";
       const profileRejected = error.message === "Docking profile configuration is unavailable" ||
+        error.message === "Navigation preset changed; review the shortcut destination" ||
+        error.message === "Choose a navigation preset or map goal" ||
         error.message.startsWith("Unknown docking profile:") ||
         error.message === "The selected table profile is unavailable" ||
         error.message === "Combo docking profile is unavailable" ||
@@ -1289,8 +1616,13 @@
     if (!workflow?.failed || workflow.resumeBlocked || state.guidedSubmitting) return;
     state.guidedSubmitting = true;
     try {
+      if (workflow.shortcut && !state.statusConnected) throw new Error("Reconnect live status before continuing the shortcut.");
+      if (workflow.reconnectUnlockRequired) throw new Error("Unlock physical motion again after reconnecting before continuing the shortcut.");
       applyStatus(await api("/api/status"));
       if (state.guidedWorkflow !== workflow || state.authenticated === false) return;
+      if (workflow.shortcut && (!state.statusConnected || workflow.reconnectUnlockRequired)) {
+        throw new Error("Reconnect live status and unlock physical motion again before continuing the shortcut.");
+      }
       if (!(executionUnlockRemaining() > 0)) {
         throw new Error("Unlock physical motion before continuing the combo sequence");
       }
@@ -1309,7 +1641,7 @@
           throw new Error("Command outcome is unknown; verify robot state before restarting");
         }
         if (operation.status === "SUCCEEDED" && operation.result?.success !== false) {
-          if (guidedSteps[nextStep] === "fine_align") {
+          if (workflowSteps(workflow)[nextStep] === "fine_align") {
             try { bindCompletedDock(workflow, operation); }
             catch (error) {
               workflow.resumeBlocked = !!(state.status?.docking_profiles?.available && state.status?.table_profiles?.available);
@@ -1320,14 +1652,16 @@
         }
       }
       const expectedState = workflow.kind === "pick"
-        ? (nextStep <= guidedSteps.indexOf("manipulate") ? "EMPTY" : "HOLDING")
-        : (nextStep <= guidedSteps.indexOf("manipulate") ? "HOLDING" : "EMPTY");
+        ? (nextStep <= workflowSteps(workflow).indexOf("manipulate") ? "EMPTY" : "HOLDING")
+        : (nextStep <= workflowSteps(workflow).indexOf("manipulate") ? "HOLDING" : "EMPTY");
       if (state.status?.manipulation_state?.state !== expectedState) {
         throw new Error(`Cannot retry this stage in the current manipulation state; expected ${expectedState}`);
       }
       const missingNavStatus = !state.status?.navigation?.goal_status?.available;
-      const label = guidedStepLabel(guidedSteps[nextStep], workflow.label) || "completion";
-      if (!window.confirm(`Continue ${workflow.label} from ${label} using docking profile ${workflow.profileId || "server default"} and table ${workflow.tableId}? Verify robot state before retrying. Remaining steps will run automatically.${missingNavStatus ? " Confirm Nav2 is idle." : ""}`)) return;
+      const label = guidedStepLabel(workflowSteps(workflow)[nextStep], workflow.label) || "completion";
+      const configuration = workflow.shortcut ? shortcutDescription(workflow.shortcut)
+        : `docking profile ${workflow.profileId || "server default"} and table ${workflow.tableId}`;
+      if (!window.confirm(`Continue ${workflow.label} from ${label} using ${configuration}? Verify robot state before retrying. Remaining steps will run automatically.${missingNavStatus ? " Confirm Nav2 is idle." : ""}`)) return;
       workflow.step = nextStep;
       workflow.failed = false;
       workflow.cancelRequested = false;
@@ -1336,8 +1670,8 @@
       workflow.message = "";
       workflow.confirmNav2Idle = missingNavStatus;
       workflow.useManualUnlock = true;
-      workflow.completed = nextStep === guidedSteps.length;
-      if (guidedSteps[nextStep] === "manipulate" && workflow.kind === "pick" && !workflow.boxTarget) workflow.instanceId = null;
+      workflow.completed = nextStep === workflowSteps(workflow).length;
+      if (workflowSteps(workflow)[nextStep] === "manipulate" && workflow.kind === "pick" && !workflow.boxTarget && !workflow.fixedInstance) workflow.instanceId = null;
       setError("");
     } catch (error) { setError(error.message); }
     finally {
@@ -1460,7 +1794,7 @@
     const task = state.status?.manipulation_task;
     if (!task?.task_id || !["running", "retrying", "paused"].includes(task.status)) return;
     const workflow = state.guidedWorkflow;
-    if (workflow && !workflow.failed && !workflow.completed && guidedSteps[workflow.step] === "manipulate") {
+    if (workflow && !workflow.failed && !workflow.completed && workflowSteps(workflow)[workflow.step] === "manipulate") {
       await stopGuidedWorkflow();
       return;
     }
@@ -1557,9 +1891,16 @@
   }
   async function unlockExecution() {
     if (!window.confirm("Temporarily unlock one physical motion command?")) return;
+    const reconnectWorkflow = state.statusConnected ? state.guidedWorkflow : null;
+    const connectionGeneration = state.connectionGeneration;
     try {
       await api("/api/unlock/execution", { method: "POST", body: JSON.stringify({ confirmed: true }) });
       applyStatus(await api("/api/status"));
+      if (state.statusConnected && state.guidedWorkflow === reconnectWorkflow &&
+          state.connectionGeneration === connectionGeneration && reconnectWorkflow?.shortcut) {
+        state.guidedWorkflow.reconnectUnlockRequired = false;
+        renderGuidedWorkflow();
+      }
       setError("");
     } catch (error) { setError(error.message); }
   }
@@ -1574,7 +1915,7 @@
   async function cancelDockingMotion() {
     if (!window.confirm("Cancel the active docking motion?")) return;
     const workflow = state.guidedWorkflow;
-    if (workflow && !workflow.failed && !workflow.completed && ["fine_align", "undock"].includes(guidedSteps[workflow.step])) {
+    if (workflow && !workflow.failed && !workflow.completed && ["fine_align", "undock"].includes(workflowSteps(workflow)[workflow.step])) {
       await stopGuidedWorkflow();
       return;
     }
@@ -1592,6 +1933,38 @@
   }
 
   byId("login-form").addEventListener("submit", login);
+  byId("task-shortcut-select").addEventListener("change", renderTaskShortcuts);
+  byId("task-shortcut-new").addEventListener("click", () => editTaskShortcut("new"));
+  byId("task-shortcut-edit").addEventListener("click", () => editTaskShortcut("edit"));
+  byId("task-shortcut-duplicate").addEventListener("click", () => editTaskShortcut("duplicate"));
+  byId("task-shortcut-delete").addEventListener("click", deleteTaskShortcut);
+  byId("task-shortcut-refresh").addEventListener("click", loadTaskShortcuts);
+  byId("task-shortcut-run").addEventListener("click", runTaskShortcut);
+  byId("task-shortcut-editor").addEventListener("submit", saveTaskShortcut);
+  byId("task-shortcut-editor-close").addEventListener("click", () => {
+    byId("task-shortcut-editor").hidden = true; state.shortcutDraft = null;
+  });
+  for (const id of ["shortcut-action", "shortcut-place-mode"]) byId(id).addEventListener("change", renderShortcutChoices);
+  byId("shortcut-detected-box").addEventListener("change", (event) => {
+    const box = state.status?.visible_boxes?.boxes?.find((item) => item.instance_id === event.target.value);
+    if (!box) return;
+    byId("shortcut-box-profile").value = box.profile_id;
+    byId("shortcut-box-instance").value = box.instance_id;
+    if (state.shortcutDraft && !state.shortcutDraft.id && box.default_docking_profile) {
+      if (byId("shortcut-undock-profile").value === byId("shortcut-dock-profile").value) {
+        byId("shortcut-undock-profile").value = box.default_docking_profile;
+      }
+      byId("shortcut-dock-profile").value = box.default_docking_profile;
+      state.shortcutDraft.dock.profile_id = box.default_docking_profile;
+    }
+  });
+  byId("shortcut-dock-profile").addEventListener("change", (event) => {
+    if (state.shortcutDraft && !state.shortcutDraft.id &&
+        byId("shortcut-undock-profile").value === state.shortcutDraft.dock.profile_id) {
+      byId("shortcut-undock-profile").value = event.target.value;
+    }
+    if (state.shortcutDraft) state.shortcutDraft.dock.profile_id = event.target.value;
+  });
   document.querySelectorAll("[data-command]").forEach((button) => button.addEventListener("click", () => submitManipulation(button.dataset.command)));
   byId("visible-box-select").addEventListener("change", (event) => {
     state.selectedBoxId = event.target.value || null;

@@ -29,6 +29,7 @@ from websockets.exceptions import ConnectionClosed
 from .auth import LoginAttemptLimiter, SessionStore
 from .map_model import MapAsset, load_map_asset
 from .ros_gateway import OperatorPanelNode, PanelCommandError
+from .task_shortcuts import ShortcutConflict, ShortcutError, TaskShortcutStore
 
 
 _MAX_REQUEST_BYTES = 64 * 1024
@@ -390,6 +391,7 @@ class WebsocketHub:
 class PanelApplication:
     def __init__(self, node: OperatorPanelNode) -> None:
         self.node = node
+        self.task_shortcuts = TaskShortcutStore(node.task_shortcuts_file)
         self.bind_address = node.bind_address
         self.allow_lan_access = node.allow_lan_access
         _validate_bind_address(self.bind_address, self.allow_lan_access)
@@ -610,6 +612,8 @@ def _make_request_handler(application: PanelApplication) -> type[BaseHTTPRequest
                     self._bytes(HTTPStatus.OK, application.map_asset.png, "image/png")
                 elif path == "/api/presets":
                     self._json(HTTPStatus.OK, {"presets": application.node.presets()})
+                elif path == "/api/task-shortcuts":
+                    self._json(HTTPStatus.OK, application.task_shortcuts.snapshot())
                 elif path in {"/api/cameras/front-center", "/api/cameras/throttled"}:
                     camera_name = path.rsplit("/", 1)[-1].replace("-", "_")
                     self._camera_image(camera_name)
@@ -674,7 +678,16 @@ def _make_request_handler(application: PanelApplication) -> type[BaseHTTPRequest
                 self._json_error(HTTPStatus.FORBIDDEN, "Invalid request origin")
                 return
             try:
-                if path == "/api/unlock/execution":
+                if path in {"/api/task-shortcuts/save", "/api/task-shortcuts/delete"}:
+                    if path.endswith("/save"):
+                        response = application.task_shortcuts.save(payload)
+                    else:
+                        response = application.task_shortcuts.delete(payload.get("id"), payload.get("revision"))
+                    application.audit.add("task_shortcut", "saved" if path.endswith("/save") else "deleted",
+                                          str(payload.get("name", payload.get("id", ""))))
+                    self._json(HTTPStatus.OK, response)
+                    return
+                elif path == "/api/unlock/execution":
                     if payload.get("confirmed") is not True:
                         raise PanelCommandError("Execution unlock requires confirmation")
                     response = application.node.enable_execution_unlock()
@@ -709,7 +722,10 @@ def _make_request_handler(application: PanelApplication) -> type[BaseHTTPRequest
                 else:
                     self._json_error(HTTPStatus.NOT_FOUND, "Unknown API endpoint")
                     return
-            except PanelCommandError as error:
+            except ShortcutConflict as error:
+                self._json_error(HTTPStatus.CONFLICT, str(error))
+                return
+            except (PanelCommandError, ShortcutError) as error:
                 self._json_error(HTTPStatus.BAD_REQUEST, str(error))
                 return
             except TimeoutError:

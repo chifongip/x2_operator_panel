@@ -78,6 +78,11 @@ def generate_launch_description():
                 description="Absolute box-profile catalog reloaded by the operator panel.",
             ),
             DeclareLaunchArgument("session_ttl_sec", default_value="1800.0"),
+            DeclareLaunchArgument(
+                "task_shortcuts_file",
+                default_value=str(Path.home() / ".local/share/x2_operator_panel/task_shortcuts.json"),
+                description="Writable JSON file for panel-edited task shortcuts.",
+            ),
             DeclareLaunchArgument("execution_unlock_sec", default_value="30.0"),
             DeclareLaunchArgument("box_pose_freshness_sec", default_value="0.5"),
             DeclareLaunchArgument(
@@ -204,6 +209,7 @@ def generate_launch_description():
                             "navigation_presets_file"
                         ),
                         "box_profiles_file": LaunchConfiguration("box_profiles_file"),
+                        "task_shortcuts_file": LaunchConfiguration("task_shortcuts_file"),
                         "session_ttl_sec": LaunchConfiguration("session_ttl_sec"),
                         "execution_unlock_sec": LaunchConfiguration("execution_unlock_sec"),
                         "box_pose_freshness_sec": LaunchConfiguration(

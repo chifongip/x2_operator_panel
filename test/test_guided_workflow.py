@@ -5,6 +5,16 @@ import unittest
 
 
 class GuidedWorkflowTest(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("node"), "Node.js is needed for browser tests")
+    def test_task_shortcut_editor_sequence_and_disconnects(self):
+        root = Path(__file__).parents[1]
+        result = subprocess.run(
+            ["node", str(root / "test/test_task_shortcuts.js"),
+             str(root / "x2_operator_panel/static/app.js")],
+            capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     @unittest.skipUnless(shutil.which("node"), "Node.js is needed for docking selector tests")
     def test_docking_profile_selectors_and_action_payloads(self):
         root = Path(__file__).parents[1]

@@ -105,3 +105,8 @@ h3 { grid-column: 1 / -1; font-size: .82rem; font-weight: 650; }
 
 .manipulation-task { margin-top: 1rem; padding: 0.8rem; border: 1px solid #cbd5e1; border-radius: 8px; }
 #manipulation-task-warning { color: #b45309; overflow-wrap: anywhere; }
+
+.task-shortcuts { display: grid; gap: 10px; border-top: 1px solid #d8e0e1; padding-top: 12px; }
+.task-shortcuts form { display: grid; gap: 10px; }
+.task-shortcuts fieldset { margin: 0; padding: 10px; border: 1px solid #d8e0e1; border-radius: 4px; }
+.shortcut-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(135px, 1fr)); gap: 8px; }

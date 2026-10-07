@@ -61,7 +61,7 @@ from tf2_ros import Buffer, TransformException, TransformListener
 import yaml
 
 from x2_operator_panel.docking_profiles import DockingProfileMonitor, unavailable_catalog
-from x2_operator_panel.table_profiles import TableProfileMonitor, matching_table
+from x2_operator_panel.table_profiles import TableProfileMonitor
 from x2_operator_panel.manipulation_timing import ManipulationTiming
 from x2_operator_panel.navigation_status import ActionGoalStatus, NavigationGoalStatus
 
@@ -338,6 +338,9 @@ class OperatorPanelNode(Node):
         ).value
         self.presets_file = self.declare_parameter(
             "navigation_presets_file", str(package_share / "config" / "navigation_presets.yaml")
+        ).value
+        self.task_shortcuts_file = self.declare_parameter(
+            "task_shortcuts_file", str(Path.home() / ".local/share/x2_operator_panel/task_shortcuts.json")
         ).value
         self.box_profiles_file = self.declare_parameter(
             "box_profiles_file",
@@ -1236,12 +1239,8 @@ class OperatorPanelNode(Node):
                          if profile["id"] == dock_id), None) if docking["available"] else None
             if dock is None:
                 raise PanelCommandError("Combo docking profile is unavailable")
-            try:
-                table = matching_table(dock, catalog)
-            except ValueError as error:
-                raise PanelCommandError(str(error)) from error
-            if selected != table["id"]:
-                raise PanelCommandError("Combo table profile does not match the docking tag and frame")
+            if not selected:
+                raise PanelCommandError("Select an explicit table profile for this docking approach")
         return selected
 
     def _docking_profile_id(self, payload: dict[str, Any]) -> str:
@@ -1567,6 +1566,10 @@ class OperatorPanelNode(Node):
         if preset_id is not None and map_goal is not None:
             raise PanelCommandError("Choose either a navigation preset or a map goal")
         preset = self._presets.get(preset_id) if preset_id is not None else None
+        if "expected_preset_pose" in payload:
+            expected = self._parse_map_target(payload["expected_preset_pose"], "expected navigation preset")
+            if preset is None or expected != (preset.x, preset.y, preset.yaw):
+                raise PanelCommandError("Navigation preset changed; review the shortcut destination")
         if preset is not None:
             x, y, yaw = preset.x, preset.y, preset.yaw
             target_label = preset.identifier

@@ -457,10 +457,82 @@ box instance before consuming the execution unlock. Manipulation geometry
 continues to come from the box profile; navigation offsets are not grasp offsets.
 
 Guided Pick and manual-pose Place do not require a matching table profile or a
-visible table tag. Automatic Place still requires exactly one matching table
-profile and a fresh stable observation. Guided workflows retain the docking
+visible table tag. The original guided combo selects the automatic Place table
+by matching the docking tag ID and frame. Task shortcuts select an explicit
+table independently of the docking profile; automatic Place still requires a
+fresh stable table-tag observation. Guided workflows retain the docking
 calibration and mode; changes during a sequence require operator review.
 Existing execution unlock, confirmations, and server motion authority apply.
+
+### Editable task shortcuts
+
+In **Task shortcuts**, choose **New**, name the shortcut, select **Pick** or
+**Place held box**, and configure the optional stages around the combo:
+
+**Navigation → Carry Pose → Combo Task → Carry Pose → Navigation**
+
+Each navigation and carry stage has its own enable checkbox and target.
+Navigation destinations come from `navigation_presets_file`; Carry Pose offers
+Carry A or Carry B. Navigation before the combo runs before its carry pose;
+navigation after the combo runs after its carry pose. The combo itself is:
+
+1. Dock with a named docking profile, such as `grey_box_dock`.
+2. Set posture with the required height and waist yaw.
+3. Pick the saved box instance, or Place the currently held box.
+4. Return posture (initially 0.64 m and 0.0 rad, both editable).
+5. Undock with a named profile (initially copied from Dock, then independently editable).
+
+Dock, both posture stages, and Undock can each be disabled. Pick/Place is always
+required. Carry poses require a held box, so the editor enables the initial
+carry stage for Place and the final carry stage for Pick. Invalid combinations
+are rejected when saving. The navigation stages work for either action.
+Existing saved shortcuts load with all four added stages disabled.
+
+Select a detected box or enter its profile and exact instance, such
+as `grey_box` / `tag:180`. A shortcut never substitutes another tag of the same
+box type. For Place, the box fields only identify a box-based docking reference;
+Place always operates on the held object. An automatic Place target names its
+table profile explicitly; a manual target specifies frame, XYZ, and yaw without
+requiring a table tag. Docking and table profiles may reference different tags.
+
+**Save shortcut**, **Edit**, **Duplicate**, **Delete**, and **Refresh** manage
+the server's saved definitions without commanding motion. Profiles can also
+be entered while ROS discovery is offline; execution validates the configured
+profiles and fixed target. Saving edits uses revisions and rejects stale edits
+from another browser instead of overwriting them. Edits to saved definitions,
+selectors, or manual poses do not change an active sequence.
+The runner captures each navigation destination's map pose before confirmation
+and rejects a changed preset at submission. A fixed box need not be visible
+before the initial navigation; the sequence waits for its detection before
+box-based Dock or Pick. Navigation uses the existing localization, Nav2-idle,
+Collision Monitor, and task-admission checks. A failed or canceled navigation or
+carry move stops progression just like a failed combo stage.
+
+To execute, connect live status, turn off **Plan only**, unlock physical motion,
+and select **Run shortcut**. One confirmation lists all enabled stages; each
+stage uses the existing ROS action or posture service and advances only after
+success. A status disconnect pauses progression. An already submitted command
+may finish; after reconnecting, verify its outcome, unlock again, and use
+**Continue sequence**. Unknown outcomes block continuation. Reloading the page
+does not resume a task automatically. The browser must remain open to advance
+the sequence; this is not a server-side job queue.
+
+Shortcuts persist across panel restarts in the JSON file configured by the
+`task_shortcuts_file` ROS parameter and launch argument, defaulting to
+`~/.local/share/x2_operator_panel/task_shortcuts.json` for the panel user. Use an
+absolute writable path when overriding it. A missing file starts an empty
+catalog. An invalid file is reported in the panel and preserved until repaired;
+saves use atomic file replacement. Keep this operator data outside the source
+repository.
+
+Authenticated shortcut endpoints are `GET /api/task-shortcuts`,
+`POST /api/task-shortcuts/save`, and `POST /api/task-shortcuts/delete`. Save
+accepts the edited definition plus `id` and `revision` when updating; Delete
+requires both identifiers. Stale revisions return HTTP 409. Mutation endpoints
+use the panel's existing same-origin checks.
+For shortcut navigation, `POST /api/actions` uses `kind: navigate`, `preset_id`,
+and `expected_preset_pose: {x, y, yaw}`. The gateway compares that pose to the
+configured preset before submitting a Nav2 goal.
 
 If discovery is unavailable, automatic manual selections remain usable; explicit
 selections are blocked until the catalog is available. A missing or disconnected
