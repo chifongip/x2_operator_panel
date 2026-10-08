@@ -171,7 +171,16 @@
           <div class="task-panels">
             <section class="task-shortcuts" aria-labelledby="shortcuts-heading">
               <h3 id="shortcuts-heading">Saved shortcuts</h3>
-              <div id="task-shortcut-buttons" class="shortcut-buttons" aria-label="Run a saved shortcut">No saved shortcuts</div>
+              <div id="task-shortcut-buttons" class="shortcut-groups">
+                <section class="shortcut-group" aria-labelledby="pick-shortcuts-heading">
+                  <h4 id="pick-shortcuts-heading">Pick</h4>
+                  <div id="task-shortcut-pick-buttons" class="shortcut-buttons" aria-label="Run a saved Pick shortcut">No saved Pick shortcuts</div>
+                </section>
+                <section class="shortcut-group" aria-labelledby="place-shortcuts-heading">
+                  <h4 id="place-shortcuts-heading">Place</h4>
+                  <div id="task-shortcut-place-buttons" class="shortcut-buttons" aria-label="Run a saved Place shortcut">No saved Place shortcuts</div>
+                </section>
+              </div>
               <p id="task-shortcut-status" class="muted" role="status">Loading shortcuts…</p>
               <p id="task-shortcut-preview" class="muted"></p>
               <details id="task-shortcut-management" class="command-details">

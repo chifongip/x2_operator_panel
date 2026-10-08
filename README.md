@@ -562,7 +562,8 @@ box-based Dock or Pick. Navigation uses the existing localization, Nav2-idle,
 Collision Monitor, and task-admission checks. A failed or canceled navigation or
 carry move stops progression just like a failed combo stage.
 
-Each saved shortcut appears as a named amber button, in saved order. The
+Each saved shortcut appears as a named amber button in a separate **Pick** or
+**Place** row, preserving saved order within each action. The
 selector inside **Manage shortcuts** is used for editing, duplicating, or
 deleting definitions; running a button uses that button's shortcut ID.
 

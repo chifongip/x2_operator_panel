@@ -972,30 +972,33 @@
     const item = shortcutSelected();
     byId("task-shortcut-preview").textContent = item ? shortcutDescription(item) : "Choose a shortcut button to review and run its sequence.";
     byId("task-shortcut-status").textContent = catalog.available ? `${catalog.shortcuts.length} saved shortcut(s).` : catalog.detail;
-    const list = byId("task-shortcut-buttons");
-    const signature = JSON.stringify(catalog.shortcuts.map((entry) => entry.id));
-    if (list.dataset.shortcuts !== signature) {
-      list.replaceChildren(...catalog.shortcuts.map((entry) => {
-        const button = document.createElement("button");
-        button.type = "button"; button.className = "requires-unlock";
-        button.addEventListener("click", () => {
-          byId("task-shortcut-select").value = entry.id;
-          renderTaskShortcuts();
-          runTaskShortcut(entry.id);
-        });
-        return button;
-      }));
-      list.dataset.shortcuts = signature;
+    for (const action of ["pick", "place"]) {
+      const entries = catalog.shortcuts.filter((entry) => entry.action === action);
+      const list = byId(`task-shortcut-${action}-buttons`);
+      const signature = JSON.stringify(entries.map((entry) => entry.id));
+      if (list.dataset.shortcuts !== signature) {
+        list.replaceChildren(...entries.map((entry) => {
+          const button = document.createElement("button");
+          button.type = "button"; button.className = "requires-unlock";
+          button.addEventListener("click", () => {
+            byId("task-shortcut-select").value = entry.id;
+            renderTaskShortcuts();
+            runTaskShortcut(entry.id);
+          });
+          return button;
+        }));
+        list.dataset.shortcuts = signature;
+      }
+      if (!entries.length) list.textContent = catalog.available
+        ? `No saved ${action === "pick" ? "Pick" : "Place"} shortcuts. Open Manage shortcuts to create one.` : "Shortcuts unavailable.";
+      entries.forEach((entry, index) => {
+        const button = list.children[index];
+        const reason = shortcutUnavailableReason(entry);
+        button.textContent = entry.name;
+        button.disabled = !!reason;
+        button.title = reason || shortcutDescription(entry);
+      });
     }
-    if (!catalog.shortcuts.length) list.textContent = catalog.available
-      ? "No saved shortcuts. Open Manage shortcuts to create one." : "Shortcuts unavailable.";
-    catalog.shortcuts.forEach((entry, index) => {
-      const button = list.children[index];
-      const reason = shortcutUnavailableReason(entry);
-      button.textContent = entry.name;
-      button.disabled = !!reason;
-      button.title = reason || shortcutDescription(entry);
-    });
     for (const id of ["edit", "duplicate", "delete"]) byId(`task-shortcut-${id}`).disabled = !item || !catalog.available;
     byId("task-shortcut-new").disabled = !catalog.available;
     byId("task-shortcut-save").disabled = state.shortcutSaving || !state.shortcutDraft;

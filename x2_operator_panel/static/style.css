@@ -96,6 +96,10 @@ h3 { grid-column: 1 / -1; font-size: .82rem; font-weight: 650; }
 .task-panels { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
 .task-shortcuts, .quick-combo { min-width: 0; display: grid; align-content: start; gap: 10px; padding: 14px; border: 1px solid #d8e0e1; border-radius: 5px; background: #f8fafb; }
 .shortcut-buttons { font-size: .82rem; color: #63747a; }.quick-combo > button { justify-self: start; text-align: left; }
+.shortcut-groups { display: grid; gap: 12px; }
+.shortcut-group { min-width: 0; display: grid; gap: 8px; }
+.shortcut-group + .shortcut-group { padding-top: 12px; border-top: 1px solid #d8e0e1; }
+.shortcut-group h4 { margin: 0; font-size: .85rem; color: #30474a; }
 .guided-workflow { display: grid; gap: 10px; padding-top: 12px; border-top: 1px solid #d8e0e1; }
 .visible-box-picker, .saved-plan-controls { min-width: 0; display: grid; gap: 6px; }
 .visible-box-picker label { color: #30474a; font-weight: 600; }.commands-header .visible-box-picker { max-width: 660px; }

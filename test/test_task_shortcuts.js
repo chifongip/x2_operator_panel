@@ -296,10 +296,14 @@ async function shortcutButtonChecks() {
   const f = fixture();
   const second = { ...shortcut(), id: "shortcut-2", name: "Pick second box",
     box: { profile_id: "grey_box", instance_id: "tag:181" } };
-  f.state.taskShortcuts.shortcuts.push(second);
+  const place = { ...shortcut("place"), id: "place-1", name: "Place grey box" };
+  f.state.taskShortcuts.shortcuts.push(place, second);
   f.context.renderTaskShortcuts();
-  const list = f.byId("task-shortcut-buttons");
+  const list = f.byId("task-shortcut-pick-buttons");
+  const placeList = f.byId("task-shortcut-place-buttons");
   assert.deepEqual(list.children.map((button) => button.textContent), ["Grey box task", "Pick second box"]);
+  assert.deepEqual(placeList.children.map((button) => button.textContent), ["Place grey box"]);
+  assert.equal(placeList.children[0].disabled, true, "Place still requires a held box");
   const originalButton = list.children[0];
   f.state.taskShortcuts.shortcuts[0].name = "<img src=x onerror=alert(1)>";
   f.context.renderTaskShortcuts();
@@ -310,8 +314,9 @@ async function shortcutButtonChecks() {
   const requested = [];
   const runner = f.context.runTaskShortcut;
   f.context.runTaskShortcut = (id) => requested.push(id);
+  placeList.children[0].listeners.click();
   list.children[1].listeners.click();
-  assert.deepEqual(requested, ["shortcut-2"]);
+  assert.deepEqual(requested, ["place-1", "shortcut-2"]);
   assert.equal(f.byId("task-shortcut-select").value, "shortcut-2");
   f.context.runTaskShortcut = runner;
   f.byId("task-shortcut-select").value = "shortcut-1";
@@ -333,13 +338,15 @@ async function shortcutButtonChecks() {
     [/unavailable/, (f) => { f.state.taskShortcuts.available = false; }],
   ]) {
     const gated = fixture(); change(gated); gated.context.renderTaskShortcuts();
-    const button = gated.byId("task-shortcut-buttons").children[0];
+    const button = gated.byId("task-shortcut-pick-buttons").children[0];
     assert.equal(button.disabled, true);
     assert.match(button.title, reason);
   }
   const holding = fixture(shortcut("place"));
   holding.context.renderTaskShortcuts();
-  assert.equal(holding.byId("task-shortcut-buttons").children[0].disabled, false);
+  assert.equal(holding.byId("task-shortcut-place-buttons").children[0].disabled, false);
+  assert.equal(holding.byId("task-shortcut-pick-buttons").children.length, 0);
+  assert.match(holding.byId("task-shortcut-pick-buttons").textContent, /No saved Pick shortcuts/);
   holding.context.window.confirm = () => false;
   await holding.context.runTaskShortcut("shortcut-1");
   assert.equal(holding.commands().length, 0);
@@ -351,16 +358,22 @@ async function shortcutButtonChecks() {
   await stale.context.runTaskShortcut("shortcut-1");
   assert.equal(stale.commands().length, 0);
   assert.match(stale.context.error, /unavailable/);
-  assert.equal(stale.byId("task-shortcut-buttons").children.length, 0);
+  assert.equal(stale.byId("task-shortcut-pick-buttons").children.length, 0);
+  assert.equal(stale.byId("task-shortcut-place-buttons").children.length, 0);
 
   const removed = fixture();
   removed.context.renderTaskShortcuts();
   removed.state.taskShortcuts.shortcuts = [];
   removed.context.renderTaskShortcuts();
-  assert.equal(removed.byId("task-shortcut-buttons").children.length, 0);
+  assert.equal(removed.byId("task-shortcut-pick-buttons").children.length, 0);
   removed.state.taskShortcuts.shortcuts = [second];
   removed.context.renderTaskShortcuts();
-  assert.equal(removed.byId("task-shortcut-buttons").children[0].textContent, second.name);
+  assert.equal(removed.byId("task-shortcut-pick-buttons").children[0].textContent, second.name);
+  removed.state.taskShortcuts.shortcuts[0].action = "place";
+  removed.context.renderTaskShortcuts();
+  assert.equal(removed.byId("task-shortcut-pick-buttons").children.length, 0,
+    "Editing an action must remove the shortcut from its old group");
+  assert.equal(removed.byId("task-shortcut-place-buttons").children[0].textContent, second.name);
 }
 
 async function editorChecks() {
