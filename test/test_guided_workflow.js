@@ -528,6 +528,31 @@ async function boxBindingChecks() {
   assert.equal(cancel.commands()[1].path, "/api/posture",
     "A stopped command that subsequently succeeded must not be replayed");
 
+  const invisible = fixture("pick");
+  await invisible.context.advanceGuidedWorkflow();
+  const docking = invisible.state.status.operations[0];
+  docking.stage = "Reacquiring target";
+  docking.feedback = { tag_visible: false, current_error: { x: null, y: null, yaw: null } };
+  invisible.state.status.task_admission = { blocked: true, detail: "Active docking task" };
+  await invisible.context.stopGuidedWorkflow();
+  assert.equal(invisible.calls.at(-1).path, "/api/cancel");
+  invisible.context.renderGuidedWorkflow();
+  assert.equal(invisible.fields["dock-manipulate-undock"].disabled, true,
+    "Keep new tasks blocked until cancellation is confirmed");
+  await invisible.finish("CANCELED", false);
+  docking.result.final_error = { x: null, y: null, yaw: null };
+  invisible.state.status.task_admission = { blocked: false };
+  invisible.state.status.execution_unlock_remaining_sec = 30;
+  invisible.context.renderGuidedWorkflow();
+  assert.equal(invisible.commands().length, 1, "A stopped Pick combo must not proceed to posture or Pick");
+  assert.equal(invisible.fields["dock-manipulate-undock"].disabled, false,
+    "Confirmed cancellation and a fresh unlock must permit a new combo");
+  await invisible.context.advanceGuidedWorkflow();
+  await flush();
+  assert.equal(invisible.commands().length, 2);
+  assert.equal(invisible.commands()[1].payload.kind, "fine_align",
+    "A new combo starts from docking after the previous docking action was canceled");
+
   const inFlight = fixture("pick");
   let release;
   const originalApi = inFlight.context.api;

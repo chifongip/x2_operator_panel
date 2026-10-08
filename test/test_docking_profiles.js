@@ -34,6 +34,8 @@ vm.runInContext(source.slice(source.indexOf("  function escapeHtml("),
   source.indexOf("  function escapeHtml(") + source.slice(source.indexOf("  function escapeHtml(")).indexOf("\n  }\n") + 5), context);
 vm.runInContext(source.slice(source.indexOf("  function renderOperations("),
   source.indexOf("  function renderAudit(")), context);
+vm.runInContext(source.slice(source.indexOf("  function formatPlanarError("),
+  source.indexOf("  function formatUndockDistance(")), context);
 
 (async () => {
   state.status.table_profiles = { available: true, default_profile: "default", profiles: [
@@ -105,6 +107,17 @@ vm.runInContext(source.slice(source.indexOf("  function renderOperations("),
   context.renderOperations([{ id: "place", kind: "place", status: "SUCCEEDED",
     table_profile_id: "default", result: { table_profile_id: "second", success: true } }]);
   assert.match(field("operations").innerHTML, /Table: second/);
+  context.renderOperations([{ id: "missing-target", kind: "fine_align", status: "ACTIVE",
+    stage: "Reacquiring target", feedback: {
+      tag_visible: false, current_error: { x: 0, y: 0, yaw: 0 },
+    } }]);
+  assert.match(field("operations").innerHTML, /error —/,
+    "An invisible tag's default zero error must not look like successful alignment");
+  context.renderOperations([{ id: "stopped-target", kind: "fine_align", status: "CANCELED",
+    result: { final_error: { x: null, y: null, yaw: null } } }]);
+  assert.match(field("operations").innerHTML, /CANCELED.*error —/);
+  assert.equal(context.formatPlanarError({ x: 0.1, y: -0.2, yaw: 0.3 }),
+    "error x 0.100 m, y -0.200 m, yaw 0.300 rad");
 })().catch((error) => { console.error(error); process.exitCode = 1; });
 
 

@@ -10,6 +10,7 @@ from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import ipaddress
 import json
+from math import isfinite
 import os
 import signal
 import socket
@@ -38,6 +39,21 @@ _RFC1918_NETWORKS = (
     ipaddress.ip_network("172.16.0.0/12"),
     ipaddress.ip_network("192.168.0.0/16"),
 )
+
+
+def _json_safe(value: Any) -> Any:
+    """Represent unavailable ROS numeric values as JSON null, without mutation."""
+    if isinstance(value, float) and not isfinite(value):
+        return None
+    if isinstance(value, dict):
+        return {key: _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    return value
+
+
+def _json_dumps(value: Any) -> str:
+    return json.dumps(_json_safe(value), separators=(",", ":"), allow_nan=False)
 
 
 def _status_delta(
@@ -239,6 +255,9 @@ class WebsocketHub:
     def broadcast(self, snapshot: dict[str, Any]) -> None:
         if self._loop is None:
             return
+        # Compare the values the browser receives, including null for unavailable
+        # errors, so repeated NaN feedback does not create spurious deltas.
+        snapshot = _json_safe(snapshot)
         with self._broadcast_lock:
             if not self._clients:
                 return
@@ -255,7 +274,7 @@ class WebsocketHub:
                     return
                 message = {"type": "status_delta", "payload": delta}
             self._previous_snapshot = snapshot
-        payload = json.dumps(message, separators=(",", ":"))
+        payload = _json_dumps(message)
         with self._broadcast_lock:
             if not self._clients:
                 return
@@ -315,16 +334,13 @@ class WebsocketHub:
         if at_capacity:
             await connection.close(code=1013, reason="Panel WebSocket limit reached")
             return
-        initial_snapshot = self._application.status()
+        initial_snapshot = _json_safe(self._application.status())
         with self._broadcast_lock:
             self._previous_snapshot = initial_snapshot
         try:
             await asyncio.wait_for(
                 connection.send(
-                    json.dumps(
-                        {"type": "status", "payload": initial_snapshot},
-                        separators=(",", ":"),
-                    )
+                    _json_dumps({"type": "status", "payload": initial_snapshot})
                 ),
                 timeout=self._application.websocket_send_timeout_sec,
             )
@@ -773,7 +789,7 @@ def _make_request_handler(application: PanelApplication) -> type[BaseHTTPRequest
                     "websocketUrl": application.websocket_url,
                     "cameraRefreshPeriodMs": application.camera_refresh_period_ms,
                 }
-                body = f"window.X2_PANEL_CONFIG={json.dumps(config)};\n".encode("utf-8")
+                body = f"window.X2_PANEL_CONFIG={_json_dumps(config)};\n".encode("utf-8")
                 self._bytes(
                     HTTPStatus.OK, body, "application/javascript; charset=utf-8"
                 )
@@ -792,7 +808,7 @@ def _make_request_handler(application: PanelApplication) -> type[BaseHTTPRequest
         def _json(self, status: HTTPStatus, value: dict[str, Any]) -> None:
             self._bytes(
                 status,
-                json.dumps(value, separators=(",", ":")).encode("utf-8"),
+                _json_dumps(value).encode("utf-8"),
                 "application/json; charset=utf-8",
             )
 
@@ -829,7 +845,7 @@ def _make_request_handler(application: PanelApplication) -> type[BaseHTTPRequest
         ) -> None:
             self._bytes(
                 status,
-                json.dumps({"error": message}, separators=(",", ":")).encode("utf-8"),
+                _json_dumps({"error": message}).encode("utf-8"),
                 "application/json; charset=utf-8",
                 headers,
             )

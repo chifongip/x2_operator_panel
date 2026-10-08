@@ -629,8 +629,9 @@
   function renderDiagnostics(diagnostics) {
     byId("diagnostics").textContent = diagnostics?.length ? diagnostics.map((item) => `${item.name}: ${item.message}`).join("\n") : "No diagnostics received";
   }
-  function formatPlanarError(error) {
-    if (!error || ![error.x, error.y, error.yaw].every(Number.isFinite)) return "";
+  function formatPlanarError(error, available = true) {
+    if (!error) return "";
+    if (!available || ![error.x, error.y, error.yaw].every(Number.isFinite)) return "error —";
     return `error x ${error.x.toFixed(3)} m, y ${error.y.toFixed(3)} m, yaw ${error.yaw.toFixed(3)} rad`;
   }
   function formatUndockDistance(operation) {
@@ -706,7 +707,9 @@
     renderSavedPlans();
     byId("operations").innerHTML = (operations || []).slice(0, 15).map((operation) => {
       const message = operation.result?.message || operation.result?.error_msg || operation.detail || "--";
-      const planarError = formatPlanarError(operation.result?.final_error || operation.feedback?.current_error);
+      const planarError = formatPlanarError(
+        operation.result?.final_error || operation.feedback?.current_error,
+        operation.result?.final_error != null || operation.feedback?.tag_visible !== false);
       const motionDetail = planarError || formatUndockDistance(operation);
       const profileId = operation.result?.profile_id || operation.feedback?.profile_id || operation.profile_id;
       const profileDetail = ["fine_align", "undock"].includes(operation.kind)
