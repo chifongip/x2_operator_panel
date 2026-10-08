@@ -936,27 +936,30 @@
 
   function shortcutProfileOptions(field, preferredValue = null) {
     const label = field === "box" ? "box" : field === "table" ? "table" : "docking";
-    const catalog = field === "table" ? state.status?.table_profiles : state.status?.docking_profiles;
+    const catalog = field === "box" ? state.status?.box_profiles
+      : field === "table" ? state.status?.table_profiles : state.status?.docking_profiles;
     const knownBoxes = [...new Set([
       ...(state.status?.visible_boxes?.boxes || []).map((box) => box.profile_id),
       ...(state.taskShortcuts?.shortcuts || []).map((item) => item.box?.profile_id),
     ].filter(Boolean))].sort();
-    const choices = field === "box" ? knownBoxes.map((id) => [id, id])
-      : (catalog?.available ? catalog.profiles : []).map((item) => [item.id, item.id]);
-    choices.push([":manual", "Enter a profile name…"]);
+    const choices = catalog?.available ? catalog.profiles.map((item) => [item.id, item.id])
+      : field === "box" ? knownBoxes.map((id) => [id, id]) : [];
+    // A dot cannot occur in a box profile ID (one ROS parameter component).
+    choices.push([".manual", "Enter a profile name…"]);
     shortcutOptions(`shortcut-${field}-profile`, choices, `Choose a ${label} profile`, preferredValue);
     const select = byId(`shortcut-${field}-profile`);
-    if (select.value !== ":manual") select.dataset.profileValue = select.value;
+    if (select.value !== ".manual") select.dataset.profileValue = select.value;
   }
 
   function shortcutProfileSelection(field) {
     const select = byId(`shortcut-${field}-profile`);
-    if (select.value === ":manual") {
+    if (select.value === ".manual") {
       const label = field === "box" ? "box" : field === "table" ? "table" : "docking";
       const name = window.prompt(`Enter a named ${label} profile (also available while discovery is offline):`, "");
-      const value = name?.trim();
-      if (value && !/^[A-Za-z0-9_]{1,128}$/.test(value)) setError(`Enter a valid ${label} profile name.`);
-      shortcutProfileOptions(field, value && /^[A-Za-z0-9_]{1,128}$/.test(value) ? value : (select.dataset.profileValue || ""));
+      const value = field === "box" ? name : name?.trim();
+      const valid = value && (field === "box" ? !value.includes(".") : /^[A-Za-z0-9_]{1,128}$/.test(value));
+      if (value && !valid) setError(`Enter a valid ${label} profile name.`);
+      shortcutProfileOptions(field, valid ? value : (select.dataset.profileValue || ""));
     }
     select.dataset.profileValue = select.value;
     return select.value;
@@ -1101,7 +1104,7 @@
     try {
       const item = { ...(draft.id ? { id: draft.id, revision: draft.revision } : {}),
         name: byId("shortcut-name").value.trim(), action: byId("shortcut-action").value };
-      const profile = byId("shortcut-box-profile").value.trim();
+      const profile = byId("shortcut-box-profile").value;
       let instance = null;
       if (byId("shortcut-box-selection").value === "fixed") {
         const id = byId("shortcut-box-instance").value.trim();

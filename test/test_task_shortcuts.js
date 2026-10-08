@@ -45,6 +45,7 @@ function fixture(item = shortcut(), fast = false) {
       table_profiles: { available: true, default_profile: "other_table", profiles: [
         { id: "other_table", tag_id: 20, tag_frame: "tag20", dimensions: [0.6, 0.4, 0.6] },
       ] },
+      box_profiles: { available: true, profile_version: 0, profiles: [{ id: "grey_box" }] },
       visible_boxes: { fresh: true, boxes: [
         { instance_id: "tag:180", profile_id: "grey_box", default_docking_profile: "grey_box_dock", docking_profile_ids: ["grey_box_dock"] },
         { instance_id: "tag:181", profile_id: "grey_box", default_docking_profile: "grey_box_dock", docking_profile_ids: ["grey_box_dock"] },
@@ -605,7 +606,7 @@ async function dockingDropdownChecks() {
   assert.equal(f.byId("shortcut-undock-profile").value, "independent_retreat");
   assert.match(f.byId("shortcut-undock-profile").options.at(-1).textContent, /unavailable/);
   f.context.window.prompt = () => "offline_retreat";
-  f.byId("shortcut-undock-profile").value = ":manual";
+  f.byId("shortcut-undock-profile").value = ".manual";
   f.byId("shortcut-undock-profile").listeners.change();
   assert.equal(f.byId("shortcut-undock-profile").value, "offline_retreat");
   await f.context.saveTaskShortcut({ preventDefault() {} });
@@ -617,15 +618,25 @@ async function boxAndTableDropdownChecks() {
   f.state.status.visible_boxes.boxes.push({ profile_id: "blue_box", instance_id: "tag:190" });
   f.state.taskShortcuts.shortcuts.push({ ...shortcut(), id: "saved-red", box: { profile_id: "red_box", instance_id: null } });
   f.state.status.table_profiles.profiles.push({ id: "large_table" });
+  f.state.status.box_profiles.profiles.push({ id: "unseen_box" });
   f.context.editTaskShortcut("edit");
   const boxes = f.byId("shortcut-box-profile");
   const tables = f.byId("shortcut-table-profile");
-  assert.deepEqual(boxes.options.filter((option) => option.value && option.value !== ":manual").map((option) => option.value),
-    ["blue_box", "grey_box", "red_box"], "Box choices include detected and saved profiles without duplicate tags");
-  assert.deepEqual(tables.options.filter((option) => option.value && option.value !== ":manual").map((option) => option.value),
+  assert.deepEqual(boxes.options.filter((option) => option.value && option.value !== ".manual").map((option) => option.value),
+    ["grey_box", "unseen_box"], "Box choices come from the loaded configuration, including unseen boxes");
+  assert.deepEqual(tables.options.filter((option) => option.value && option.value !== ".manual").map((option) => option.value),
     ["other_table", "large_table"], "All discovered tables are offered");
   assert.equal(boxes.value, "grey_box");
   assert.equal(tables.value, "other_table");
+  f.state.status.box_profiles = { available: true, profile_version: 1, profiles: [{ id: "replacement_box" }] };
+  f.context.renderShortcutChoices();
+  assert.equal(boxes.value, "grey_box", "Reload must preserve an open editor's removed selection");
+  assert.deepEqual(boxes.options.map((option) => option.value), ["", "replacement_box", ".manual", "grey_box"]);
+  assert.match(boxes.options.at(-1).textContent, /unavailable/);
+  f.state.status.box_profiles.available = false;
+  f.context.renderShortcutChoices();
+  assert.deepEqual(boxes.options.filter((option) => option.value && option.value !== ".manual").map((option) => option.value),
+    ["blue_box", "grey_box", "red_box"], "Detected and saved names are a fallback while catalog discovery is offline");
   f.state.status.visible_boxes = { fresh: false, boxes: [] };
   f.state.status.table_profiles.available = false;
   f.context.renderShortcutChoices();
@@ -634,11 +645,11 @@ async function boxAndTableDropdownChecks() {
   assert.match(tables.options.at(-1).textContent, /unavailable/);
   for (const [field, expected] of [["box", "offline_box"], ["table", "offline_table"]]) {
     f.context.window.prompt = () => expected;
-    f.byId(`shortcut-${field}-profile`).value = ":manual";
+    f.byId(`shortcut-${field}-profile`).value = ".manual";
     f.byId(`shortcut-${field}-profile`).listeners.change();
     assert.equal(f.byId(`shortcut-${field}-profile`).value, expected);
     f.context.window.prompt = () => null;
-    f.byId(`shortcut-${field}-profile`).value = ":manual";
+    f.byId(`shortcut-${field}-profile`).value = ".manual";
     f.byId(`shortcut-${field}-profile`).listeners.change();
     assert.equal(f.byId(`shortcut-${field}-profile`).value, expected, "Canceling manual entry preserves the selection");
   }
@@ -651,6 +662,50 @@ async function boxAndTableDropdownChecks() {
   f.context.editTaskShortcut("edit");
   assert.equal(f.byId("shortcut-box-profile").value, "offline_box");
   assert.equal(f.byId("shortcut-table-profile").value, "offline_table");
+}
+
+async function boxProfileNameChecks() {
+  for (const name of ["box-a", "Box B", "箱A", ":manual", " box ", "x".repeat(129)]) {
+    const item = shortcut();
+    item.box = { profile_id: name, instance_id: null };
+    const f = fixture(item);
+    f.state.status.box_profiles.profiles.push({ id: name });
+    f.state.status.visible_boxes.boxes.forEach((box) => { box.profile_id = name; });
+    f.context.editTaskShortcut("edit");
+    const select = f.byId("shortcut-box-profile");
+    assert.equal(select.value, name, "Editing must preserve the server's exact box ID");
+    assert.ok(select.options.some((option) => option.value === name));
+    f.context.window.prompt = () => { throw new Error("Selecting a configured box must not prompt for manual entry"); };
+    select.listeners.change();
+    assert.equal(select.value, name, "The previous :manual sentinel can be a real box ID");
+    await f.context.saveTaskShortcut({ preventDefault() {} });
+    assert.equal(f.calls.find((call) => call.path.endsWith("/save")).payload.box.profile_id, name);
+    await f.context.runTaskShortcut();
+    await f.finish();
+    await f.finish();
+    assert.equal(f.commands()[2].payload.kind, "pick");
+    assert.equal(f.commands()[2].payload.instance_id, "tag:180", "Profile matching uses the preserved ID");
+    assert.equal(f.state.taskShortcuts.shortcuts[0].box.profile_id, name);
+
+    const manual = fixture();
+    manual.context.editTaskShortcut("new");
+    manual.context.window.prompt = () => name;
+    manual.byId("shortcut-box-profile").value = ".manual";
+    manual.byId("shortcut-box-profile").listeners.change();
+    assert.equal(manual.byId("shortcut-box-profile").value, name, "Manual box names follow the server's naming rules");
+    await manual.context.saveTaskShortcut({ preventDefault() {} });
+    assert.equal(manual.calls.find((call) => call.path.endsWith("/save")).payload.box.profile_id, name);
+  }
+  for (const field of ["box", "dock", "undock", "table"]) {
+    const f = fixture();
+    f.context.editTaskShortcut("new");
+    const select = f.byId(`shortcut-${field}-profile`), previous = select.value;
+    f.context.window.prompt = () => field === "box" ? "nested.box" : "unsupported-profile";
+    select.value = ".manual";
+    select.listeners.change();
+    assert.equal(select.value, previous);
+    assert.match(f.context.error, /Enter a valid .* profile name/);
+  }
 }
 
 async function navigationCarryChecks() {
@@ -753,5 +808,5 @@ async function navigationCarryChecks() {
   assert.equal(editor.byId("shortcut-carry-start-enabled").disabled, false);
 }
 
-(async () => { await sequenceChecks(); await failureChecks(); await overlappingSaveChecks(); await shortcutButtonChecks(); await editorChecks(); await profileTargetChecks(); await provisionalTargetChecks(); await numericBoxIdChecks(); await dockingDropdownChecks(); await boxAndTableDropdownChecks(); await navigationCarryChecks(); })()
+(async () => { await sequenceChecks(); await failureChecks(); await overlappingSaveChecks(); await shortcutButtonChecks(); await editorChecks(); await profileTargetChecks(); await provisionalTargetChecks(); await numericBoxIdChecks(); await dockingDropdownChecks(); await boxAndTableDropdownChecks(); await boxProfileNameChecks(); await navigationCarryChecks(); })()
   .catch((error) => { console.error(error); process.exitCode = 1; });

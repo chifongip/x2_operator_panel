@@ -10,6 +10,8 @@ import tempfile
 import threading
 from uuid import uuid4
 
+from x2_operator_panel.box_profile_ids import is_box_profile_id
+
 
 class ShortcutError(ValueError):
     """Invalid shortcut or unavailable storage."""
@@ -83,7 +85,10 @@ def validate_shortcut(value):
                 not isinstance(instance, str) or not re.fullmatch(r"tag:(0|[1-9][0-9]{0,9})", instance)
                 or int(instance[4:]) > 2147483647):
             raise ShortcutError("Box instance must be tag:<nonnegative ID>")
-        box = {"profile_id": _profile(box.get("profile_id"), "Box"), "instance_id": instance}
+        profile_id = box.get("profile_id")
+        if not is_box_profile_id(profile_id):
+            raise ShortcutError("Box requires a named profile")
+        box = {"profile_id": profile_id, "instance_id": instance}
     if action == "pick" and box is None:
         raise ShortcutError("Pick requires a box profile")
     result["box"] = box

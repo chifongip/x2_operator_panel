@@ -543,11 +543,16 @@ requiring a table tag. Docking and table profiles may reference different tags.
 the server's saved definitions without commanding motion. Profiles can also
 be entered while ROS discovery is offline using **Enter a profile name…**.
 The Dock and Undock dropdowns list every discovered docking profile and preserve
-unavailable saved selections. Box Profile also uses a dropdown, combining profile
-names from detections and saved shortcuts; Table Profile lists the discovered
-table profiles. Both preserve saved selections and support manual profile entry
-when the profile is not listed. Execution validates the configured profiles and
-resolved target. Saving edits uses revisions and rejects stale edits
+unavailable saved selections. Box Profile lists every profile loaded by the
+manipulation server from its box-profile configuration, even without detections.
+Box profile IDs are preserved exactly, including hyphens, as single components
+in `box_profiles.<id>.<field>` parameters.
+The panel reads `/get_box_profiles` and refreshes the catalog every five seconds,
+including after a successful profile reload. Table Profile lists the discovered
+table profiles. If box-profile discovery is unavailable, detected and saved box
+names remain available as a fallback. Both preserve saved selections and support
+manual profile entry when the profile is not listed. Execution validates the
+configured profiles and resolved target. Saving edits uses revisions and rejects stale edits
 from another browser instead of overwriting them. Edits to saved definitions,
 selectors, or manual poses do not change an active sequence.
 The runner captures each navigation destination's map pose before confirmation

@@ -34,6 +34,7 @@ from agibot_x2_manipulation_msgs.msg import (
 from agibot_x2_manipulation_msgs.srv import (
     ClearLocomanipulationPostureTarget,
     ContinueManipulation,
+    GetBoxProfiles,
     RecoverManipulationState,
     ReloadBoxProfiles,
     SetLocomanipulationPosture,
@@ -61,6 +62,7 @@ from tf2_ros import Buffer, TransformException, TransformListener
 import yaml
 
 from x2_operator_panel.docking_profiles import DockingProfileMonitor, unavailable_catalog
+from x2_operator_panel.box_profiles import BoxProfileMonitor
 from x2_operator_panel.table_profiles import TableProfileMonitor
 from x2_operator_panel.manipulation_timing import ManipulationTiming
 from x2_operator_panel.navigation_status import ActionGoalStatus, NavigationGoalStatus
@@ -673,6 +675,11 @@ class OperatorPanelNode(Node):
             self.service_timeout_sec,
         )
         self.create_timer(0.20, self._table_profile_monitor.poll)
+        self._box_profile_monitor = BoxProfileMonitor(
+            self.create_client(GetBoxProfiles, "/get_box_profiles"),
+            self.service_timeout_sec,
+        )
+        self.create_timer(0.20, self._box_profile_monitor.poll)
         self._profile_reload_client = self.create_client(
             ReloadBoxProfiles, "/reload_box_profiles"
         )
@@ -912,6 +919,7 @@ class OperatorPanelNode(Node):
                 },
                 "docking_profiles": self._docking_catalog(),
                 "table_profiles": self._table_catalog(),
+                "box_profiles": self._box_catalog(),
                 "recovery_service_ready": self._recovery_client.service_is_ready(),
                 "box_profiles_reload": {
                     "service_ready": profile_reload_service_ready,
@@ -1221,6 +1229,10 @@ class OperatorPanelNode(Node):
     def _table_catalog(self) -> dict[str, Any]:
         monitor = getattr(self, "_table_profile_monitor", None)
         return monitor.snapshot() if monitor else unavailable_catalog("Waiting for table profiles")
+
+    def _box_catalog(self) -> dict[str, Any]:
+        monitor = getattr(self, "_box_profile_monitor", None)
+        return monitor.snapshot() if monitor else unavailable_catalog("Waiting for box profiles")
 
     def _table_profile_id(self, payload: dict[str, Any]) -> str:
         selected = payload.get("table_profile_id", "")

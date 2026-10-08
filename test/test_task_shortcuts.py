@@ -72,6 +72,35 @@ def test_stale_edits_and_deletes_do_not_overwrite(tmp_path):
         store.save(updated)
 
 
+@pytest.mark.parametrize("name", ["box-a", "Box B", "箱A", ":manual", " box ", "x" * 129])
+def test_server_box_profile_ids_round_trip_without_normalization(tmp_path, name):
+    store = TaskShortcutStore(tmp_path / "shortcuts.json")
+    value = pick_shortcut()
+    value["box"] = {"profile_id": name, "instance_id": None}
+    saved = store.save(value)["shortcut"]
+    assert saved["box"]["profile_id"] == name
+    assert TaskShortcutStore(store.path).snapshot()["shortcuts"] == [saved]
+
+
+@pytest.mark.parametrize("name", [None, 9, "", "nested.box", ".manual"])
+def test_box_profile_requires_one_nonempty_parameter_component(name):
+    value = pick_shortcut()
+    value["box"]["profile_id"] = name
+    with pytest.raises(ShortcutError, match="Box requires a named profile"):
+        validate_shortcut(value)
+
+
+@pytest.mark.parametrize("field", ["dock", "undock", "table"])
+def test_box_naming_support_does_not_change_other_profile_rules(field):
+    value = pick_shortcut()
+    if field == "table":
+        value.update(action="place", place={"mode": "automatic", "table_profile_id": "table-a"})
+    else:
+        value[field]["profile_id"] = "dock-a"
+    with pytest.raises(ShortcutError, match="requires a named profile"):
+        validate_shortcut(value)
+
+
 @pytest.mark.parametrize("contents", ["{broken", '{"version":2,"shortcuts":[]}',
                                        '{"version":1,"shortcuts":[{}]}'])
 def test_corrupt_storage_is_visible_and_preserved(tmp_path, contents):
