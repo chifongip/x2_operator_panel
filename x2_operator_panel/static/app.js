@@ -760,7 +760,7 @@
     state.destinationCatalog = catalog;
     state.presets = catalog.presets;
     renderPresets();
-    if (state.shortcutDraft) renderShortcutChoices();
+    renderTaskShortcuts();
     drawMap();
   }
 
@@ -1008,7 +1008,8 @@
 
   function shortcutDescription(item) {
     const steps = [];
-    if (item.navigate_start?.enabled) steps.push(`Navigate to ${item.navigate_start.preset_id}`);
+    const destinationName = (id) => state.presets?.find((preset) => preset.id === id)?.label || "unavailable destination";
+    if (item.navigate_start?.enabled) steps.push(`Navigate to ${destinationName(item.navigate_start.preset_id)}`);
     if (item.carry_start?.enabled) steps.push(`Carry ${item.carry_start.pose.toUpperCase()}`);
     const boxTarget = item.box ? `${item.box.profile_id} (${item.box.instance_id ? `ID ${item.box.instance_id.replace(/^tag:/, "")}` : "visible tag at run time"})` : "";
     if (item.dock.enabled) steps.push(`Dock ${item.dock.profile_id}${item.action === "place" && item.box ? `; box reference ${boxTarget}` : ""}`);
@@ -1019,7 +1020,7 @@
     if (item.return_posture.enabled) steps.push(`Return posture ${item.return_posture.height} m / ${item.return_posture.waist_yaw} rad`);
     if (item.undock.enabled) steps.push(`Undock ${item.undock.profile_id}`);
     if (item.carry_end?.enabled) steps.push(`Carry ${item.carry_end.pose.toUpperCase()}`);
-    if (item.navigate_end?.enabled) steps.push(`Navigate to ${item.navigate_end.preset_id}`);
+    if (item.navigate_end?.enabled) steps.push(`Navigate to ${destinationName(item.navigate_end.preset_id)}`);
     return steps.join(" → ");
   }
 

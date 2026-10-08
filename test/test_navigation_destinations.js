@@ -30,6 +30,7 @@ function fixture() {
     setError: (message) => { context.error = message; },
     drawMap: () => { context.mapRendered = true; },
     renderShortcutChoices: () => { context.choicesRendered = true; },
+    renderTaskShortcuts: () => { context.shortcutsRendered = true; context.renderShortcutChoices(); },
     confirmNav2IdleWithoutStatus: () => false,
     api: async (path, options = {}) => {
       const payload = JSON.parse(options.body || "{}"); calls.push({ path, payload });
@@ -82,7 +83,7 @@ async function checks() {
   const save = f.calls.find((call) => call.path === "/api/presets/save");
   assert.deepEqual(save.payload, { id: "bay", label: "<img src=x>", revision: 1, pose: { x: -3, y: -4, yaw: -1 } });
   assert.equal(byId("preset-list").children[0].textContent, "<img src=x>");
-  assert.ok(c.mapRendered && c.choicesRendered);
+  assert.ok(c.mapRendered && c.choicesRendered && c.shortcutsRendered);
   assert.equal(s.destinationDraft, null);
   assert.equal(f.calls.some((call) => call.path === "/api/actions"), false, "Editing must not navigate");
 

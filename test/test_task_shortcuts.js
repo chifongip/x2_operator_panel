@@ -722,6 +722,24 @@ async function boxProfileNameChecks() {
 }
 
 async function navigationCarryChecks() {
+  const named = shortcut();
+  const destinationId = "a4ba4a18-2c77-4bcd-9e7c-c7d4d3bf9510";
+  named.navigate_start = { enabled: true, preset_id: destinationId };
+  named.navigate_end = { enabled: true, preset_id: "dropoff" };
+  const preview = fixture(named);
+  preview.state.presets[0].id = destinationId;
+  preview.context.renderTaskShortcuts();
+  assert.match(preview.byId("task-shortcut-preview").textContent, /^Navigate to Loading bay →/);
+  assert.match(preview.byId("task-shortcut-preview").textContent, /→ Navigate to Drop off$/);
+  assert.ok(!preview.byId("task-shortcut-preview").textContent.includes(destinationId));
+  preview.state.presets[0].label = "Renamed loading bay";
+  preview.context.renderTaskShortcuts();
+  assert.match(preview.byId("task-shortcut-preview").textContent, /^Navigate to Renamed loading bay →/);
+  assert.equal(preview.state.taskShortcuts.shortcuts[0].navigate_start.preset_id, destinationId);
+  preview.state.presets = [];
+  preview.context.renderTaskShortcuts();
+  assert.match(preview.byId("task-shortcut-preview").textContent, /^Navigate to unavailable destination →/);
+
   for (const action of ["pick", "place"]) {
     for (const before of [false, true]) for (const after of [false, true]) for (const carry of [false, true]) {
       const item = shortcut(action);
