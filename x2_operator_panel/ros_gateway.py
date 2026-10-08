@@ -59,13 +59,13 @@ from rclpy.time import Time
 from sensor_msgs.msg import Image, JointState, LaserScan
 from std_msgs.msg import Float32
 from tf2_ros import Buffer, TransformException, TransformListener
-import yaml
 
 from x2_operator_panel.docking_profiles import DockingProfileMonitor, unavailable_catalog
 from x2_operator_panel.box_profiles import BoxProfileMonitor
 from x2_operator_panel.table_profiles import TableProfileMonitor
 from x2_operator_panel.manipulation_timing import ManipulationTiming
 from x2_operator_panel.navigation_status import ActionGoalStatus, NavigationGoalStatus
+from x2_operator_panel.navigation_destinations import NavigationDestinationStore, DestinationError
 
 
 _ACTIVE_STATUSES = {"SUBMITTING", "ACTIVE", "CANCEL_REQUESTED"}
@@ -250,49 +250,6 @@ def encode_camera_image_as_jpeg(message: Image, quality: int) -> bytes:
         source.close()
 
 
-def load_navigation_presets(path: str | Path) -> list[NavigationPreset]:
-    presets_path = Path(path)
-    if not presets_path.is_file():
-        raise ValueError(f"Navigation preset file does not exist: {presets_path}")
-    try:
-        document = yaml.safe_load(presets_path.read_text(encoding="utf-8")) or {}
-    except yaml.YAMLError as error:
-        raise ValueError(f"Invalid navigation preset YAML: {error}") from error
-    entries = document.get("presets")
-    if not isinstance(entries, list):
-        raise ValueError("Navigation preset YAML requires a presets list")
-
-    presets: list[NavigationPreset] = []
-    identifiers: set[str] = set()
-    for entry in entries:
-        if not isinstance(entry, dict):
-            raise ValueError("Each navigation preset must be a mapping")
-        identifier = entry.get("id")
-        label = entry.get("label")
-        if not isinstance(identifier, str) or not identifier.replace(
-            "_", ""
-        ).replace("-", "").isalnum():
-            raise ValueError("Navigation preset id must contain only letters, digits, _ or -")
-        if not isinstance(label, str) or not label.strip() or len(label) > 80:
-            raise ValueError("Navigation preset label must be 1-80 characters")
-        if identifier in identifiers:
-            raise ValueError(f"Duplicate navigation preset id: {identifier}")
-        identifiers.add(identifier)
-        pose = entry.get("pose")
-        if not isinstance(pose, dict):
-            raise ValueError(f"Navigation preset {identifier} requires a pose")
-        presets.append(
-            NavigationPreset(
-                identifier=identifier,
-                label=label.strip(),
-                x=_finite_number(pose.get("x"), f"preset {identifier} x"),
-                y=_finite_number(pose.get("y"), f"preset {identifier} y"),
-                yaw=_finite_number(pose.get("yaw"), f"preset {identifier} yaw"),
-            )
-        )
-    return presets
-
-
 def _finite_number(value: object, field_name: str) -> float:
     if not isinstance(value, (int, float)) or isinstance(value, bool):
         raise PanelCommandError(f"{field_name} must be numeric")
@@ -331,15 +288,15 @@ class OperatorPanelNode(Node):
     def __init__(self) -> None:
         super().__init__("x2_operator_panel")
         navigation_share = Path(get_package_share_directory("x2_navigation"))
-        package_share = Path(get_package_share_directory("x2_operator_panel"))
         manipulation_share = Path(
             get_package_share_directory("agibot_x2_manipulation")
         )
         self.map_yaml = self.declare_parameter(
             "map_yaml", str(navigation_share / "map" / "2026-08-18-Lab_voxel_0_05m.yaml")
         ).value
-        self.presets_file = self.declare_parameter(
-            "navigation_presets_file", str(package_share / "config" / "navigation_presets.yaml")
+        self.navigation_destinations_file = self.declare_parameter(
+            "navigation_destinations_file",
+            str(Path.home() / ".local/share/x2_operator_panel/navigation_destinations.json"),
         ).value
         self.task_shortcuts_file = self.declare_parameter(
             "task_shortcuts_file", str(Path.home() / ".local/share/x2_operator_panel/task_shortcuts.json")
@@ -521,10 +478,7 @@ class OperatorPanelNode(Node):
         self._commands: Queue[QueuedCommand] = Queue()
         self._operations: dict[str, Operation] = {}
         self._operation_history: deque[str] = deque(maxlen=operation_history_limit)
-        self._presets = {
-            preset.identifier: preset
-            for preset in load_navigation_presets(self.presets_file)
-        }
+        self.navigation_destinations = NavigationDestinationStore(self.navigation_destinations_file)
         self._execution_unlocked_until = 0.0
         self._status_sink: Callable[[], None] | None = None
         self._audit_sink: Callable[[str, str, str], None] | None = None
@@ -776,7 +730,7 @@ class OperatorPanelNode(Node):
         self._audit_sink = sink
 
     def presets(self) -> list[dict[str, Any]]:
-        return [preset.as_dict() for preset in self._presets.values()]
+        return self.navigation_destinations.records()
 
     def camera_frame(self, camera_name: str) -> CameraFrame | None:
         """Renew browser demand and return the latest encoded preview."""
@@ -1577,7 +1531,14 @@ class OperatorPanelNode(Node):
         map_goal = payload.get("goal")
         if preset_id is not None and map_goal is not None:
             raise PanelCommandError("Choose either a navigation preset or a map goal")
-        preset = self._presets.get(preset_id) if preset_id is not None else None
+        preset = None
+        if preset_id is not None:
+            try:
+                record = next((item for item in self.presets() if item["id"] == preset_id), None)
+            except DestinationError as error:
+                raise PanelCommandError(str(error)) from error
+            if record:
+                preset = NavigationPreset(record["id"], record["label"], **record["pose"])
         if "expected_preset_pose" in payload:
             expected = self._parse_map_target(payload["expected_preset_pose"], "expected navigation preset")
             if preset is None or expected != (preset.x, preset.y, preset.yaw):

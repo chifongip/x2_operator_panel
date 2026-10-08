@@ -9,7 +9,6 @@ from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description():
-    panel_share = Path(get_package_share_directory("x2_operator_panel"))
     navigation_share = Path(get_package_share_directory("x2_navigation"))
     manipulation_share = Path(get_package_share_directory("agibot_x2_manipulation"))
     return LaunchDescription(
@@ -68,9 +67,9 @@ def generate_launch_description():
                 description="Nav2 static map YAML served locally by the panel.",
             ),
             DeclareLaunchArgument(
-                "navigation_presets_file",
-                default_value=str(panel_share / "config" / "navigation_presets.yaml"),
-                description="Surveyed, map-frame navigation presets available to operators.",
+                "navigation_destinations_file",
+                default_value=str(Path.home() / ".local/share/x2_operator_panel/navigation_destinations.json"),
+                description="Writable JSON file for panel-edited navigation destinations.",
             ),
             DeclareLaunchArgument(
                 "box_profiles_file",
@@ -205,9 +204,7 @@ def generate_launch_description():
                         "websocket_url": LaunchConfiguration("websocket_url"),
                         "allowed_origin": LaunchConfiguration("allowed_origin"),
                         "map_yaml": LaunchConfiguration("map_yaml"),
-                        "navigation_presets_file": LaunchConfiguration(
-                            "navigation_presets_file"
-                        ),
+                        "navigation_destinations_file": LaunchConfiguration("navigation_destinations_file"),
                         "box_profiles_file": LaunchConfiguration("box_profiles_file"),
                         "task_shortcuts_file": LaunchConfiguration("task_shortcuts_file"),
                         "session_ttl_sec": LaunchConfiguration("session_ttl_sec"),

@@ -3,7 +3,6 @@ from math import pi
 import unittest
 
 from x2_operator_panel.map_model import MapAsset, load_map_asset
-from x2_operator_panel.ros_gateway import load_navigation_presets
 
 
 def write_map(tmp_path: Path) -> Path:
@@ -66,30 +65,6 @@ class MapModelTest(unittest.TestCase):
 
         self.assertAlmostEqual(asset.map_to_pixel(10.0, 6.0)[0], 1.0)
         self.assertAlmostEqual(asset.map_to_pixel(9.0, 5.0)[1], 19.0)
-
-    def test_navigation_presets_require_unique_finite_poses(self):
-        with self._temporary_directory() as tmp_path:
-            preset_path = Path(tmp_path) / "presets.yaml"
-            preset_path.write_text(
-                "presets:\n"
-                "  - id: loading_bay\n"
-                "    label: Loading bay\n"
-                "    pose: {x: 1.0, y: -2.0, yaw: 1.57}\n",
-                encoding="utf-8",
-            )
-
-            presets = load_navigation_presets(preset_path)
-
-            self.assertEqual(
-                [preset.as_dict() for preset in presets],
-                [
-                    {
-                        "id": "loading_bay",
-                        "label": "Loading bay",
-                        "pose": {"x": 1.0, "y": -2.0, "yaw": 1.57},
-                    }
-                ],
-            )
 
     def _temporary_directory(self):
         import tempfile

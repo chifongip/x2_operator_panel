@@ -9,13 +9,16 @@ import pytest
 
 from x2_operator_panel.panel_server import _make_request_handler
 from x2_operator_panel.task_shortcuts import TaskShortcutStore
+from x2_operator_panel.navigation_destinations import NavigationDestinationStore
 from test.test_task_shortcuts import pick_shortcut
 
 
 @pytest.fixture
 def shortcut_http(tmp_path):
     application = SimpleNamespace(
-        node=SimpleNamespace(http_request_timeout_sec=2.0, get_logger=Mock(return_value=Mock())),
+        node=SimpleNamespace(http_request_timeout_sec=2.0, get_logger=Mock(return_value=Mock()),
+                             navigation_destinations=NavigationDestinationStore(tmp_path / "destinations.json")),
+        configuration_lock=threading.RLock(),
         source_address_is_allowed=lambda address: address == "127.0.0.1",
         request_is_authenticated=lambda headers: headers.get("Cookie") == "session=test",
         unsafe_request_has_same_origin=lambda headers: headers.get("Origin") == "http://panel.test",

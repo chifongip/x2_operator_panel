@@ -3,6 +3,7 @@ from concurrent.futures import Future, TimeoutError as FutureTimeoutError
 from math import inf, nan, pi
 from queue import Queue
 import threading
+import tempfile
 import time
 from types import SimpleNamespace
 import unittest
@@ -21,7 +22,6 @@ from sensor_msgs.msg import Image
 from x2_operator_panel.ros_gateway import (
     Operation,
     OperatorPanelNode,
-    NavigationPreset,
     PanelCommandError,
     _diagnostic_level_as_int,
     _display_telemetry_qos,
@@ -29,6 +29,7 @@ from x2_operator_panel.ros_gateway import (
 )
 from x2_operator_panel.manipulation_timing import ManipulationTiming
 from x2_operator_panel.navigation_status import ActionGoalStatus, NavigationGoalStatus
+from x2_operator_panel.navigation_destinations import NavigationDestinationStore
 from rclpy.qos import DurabilityPolicy, ReliabilityPolicy
 from x2_navigation.action import FineAlign, Undock
 
@@ -708,13 +709,18 @@ class RosGatewayTest(unittest.TestCase):
         node._map_pose = {"available": True, "fresh": True}
         node._nav_goal_status_locked = Mock(return_value={"available": True, "active": False})
         node._initial_pose_status_locked = Mock(return_value={"state": "NOT_REQUESTED"})
-        node._presets = {"bay": NavigationPreset("bay", "Loading bay", 1.0, 2.0, 0.5)}
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        node.navigation_destinations = NavigationDestinationStore(temporary.name + "/destinations.json")
+        preset = node.navigation_destinations.save(
+            {"label": "Loading bay", "pose": {"x": 1.0, "y": 2.0, "yaw": 0.5}}
+        )["preset"]
         node._action_clients = {"navigate": Mock()}
         node.goal_admission_timeout_sec = 5.0
         node._register_operation = Mock()
         node._audit = Mock()
         node.get_clock = lambda: SimpleNamespace(now=lambda: SimpleNamespace(to_msg=lambda: Time()))
-        payload = {"confirmed": True, "preset_id": "bay",
+        payload = {"confirmed": True, "preset_id": preset["id"],
                    "expected_preset_pose": {"x": 1.0, "y": 2.0, "yaw": 0.5}}
         for changed in ({"x": 9.0, "y": 2.0, "yaw": 0.5}, None,
                         {"x": nan, "y": 2.0, "yaw": 0.5}):
@@ -722,7 +728,13 @@ class RosGatewayTest(unittest.TestCase):
                 node._submit_navigation(dict(payload, expected_preset_pose=changed))
             node._action_clients["navigate"].send_goal_async.assert_not_called()
         operation = node._submit_navigation(payload)
-        self.assertEqual(operation.preset_id, "bay")
+        self.assertEqual(operation.preset_id, preset["id"])
+        self.assertEqual(operation.target_pose, payload["expected_preset_pose"])
+        node._action_clients["navigate"].send_goal_async.assert_called_once()
+        saved = node.presets()[0]
+        node.navigation_destinations.save(dict(saved, pose={"x": 9.0, "y": 2.0, "yaw": 0.5}))
+        with self.assertRaisesRegex(PanelCommandError, "Navigation preset changed"):
+            node._submit_navigation(payload)
         self.assertEqual(operation.target_pose, payload["expected_preset_pose"])
         node._action_clients["navigate"].send_goal_async.assert_called_once()
 

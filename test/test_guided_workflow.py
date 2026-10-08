@@ -6,6 +6,16 @@ import unittest
 
 class GuidedWorkflowTest(unittest.TestCase):
     @unittest.skipUnless(shutil.which("node"), "Node.js is needed for browser tests")
+    def test_navigation_destination_editor_and_persistence_requests(self):
+        root = Path(__file__).parents[1]
+        result = subprocess.run(
+            ["node", str(root / "test/test_navigation_destinations.js"),
+             str(root / "x2_operator_panel/static/app.js")],
+            capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is needed for browser tests")
     def test_task_shortcut_editor_sequence_and_disconnects(self):
         root = Path(__file__).parents[1]
         result = subprocess.run(

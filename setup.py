@@ -12,7 +12,6 @@ setup(
         ("share/ament_index/resource_index/packages", ["resource/" + package_name]),
         ("share/" + package_name, ["package.xml", "README.md"]),
         ("share/" + package_name + "/launch", ["launch/operator_panel.launch.py"]),
-        ("share/" + package_name + "/config", ["config/navigation_presets.yaml"]),
         ("share/" + package_name + "/static", [
             "x2_operator_panel/static/index.html",
             "x2_operator_panel/static/app.js",

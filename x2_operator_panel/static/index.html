@@ -396,6 +396,42 @@
             <div class="command-row">
               <button id="clear-costmaps" class="secondary" type="button" disabled>Clear costmaps</button>
             </div>
+            <details id="destination-management" class="command-details">
+              <summary>Manage destinations</summary>
+              <div class="details-content">
+                <label>Saved destination<select id="destination-select"><option value="">Choose a destination</option></select></label>
+                <div class="command-row">
+                  <button id="destination-new" type="button" class="secondary">New</button>
+                  <button id="destination-edit" type="button" class="secondary" disabled>Edit</button>
+                  <button id="destination-duplicate" type="button" class="secondary" disabled>Duplicate</button>
+                  <button id="destination-delete" type="button" class="danger" disabled>Delete</button>
+                  <button id="destination-refresh" type="button" class="secondary">Refresh</button>
+                </div>
+                <p id="destination-status" class="muted" role="status">Loading destinations…</p>
+                <form id="destination-editor" hidden>
+                  <fieldset id="destination-fields" class="destination-fields">
+                    <legend>Map-frame destination</legend>
+                    <div class="shortcut-fields">
+                      <label>Name<input id="destination-name" maxlength="80" required></label>
+                    </div>
+                    <div class="shortcut-fields">
+                      <label>X (m)<input id="destination-x" type="number" step="any" required></label>
+                      <label>Y (m)<input id="destination-y" type="number" step="any" required></label>
+                      <label>Yaw (rad)<input id="destination-yaw" type="number" step="any" required></label>
+                    </div>
+                    <div class="command-row">
+                      <button id="destination-use-robot" type="button" class="secondary">Use current robot pose</button>
+                      <button id="destination-use-map" type="button" class="secondary">Use selected map goal</button>
+                    </div>
+                    <p class="muted">Saving updates the destination without moving the robot.</p>
+                    <div class="command-row">
+                      <button id="destination-save" type="submit">Save destination</button>
+                      <button id="destination-editor-close" type="button" class="secondary">Close editor</button>
+                    </div>
+                  </fieldset>
+                </form>
+              </div>
+            </details>
           </section>
         </div>
       </section>

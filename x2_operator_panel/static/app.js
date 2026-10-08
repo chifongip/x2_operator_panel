@@ -3,6 +3,10 @@
     map: null,
     mapImage: null,
     presets: [],
+    destinationCatalog: { available: false, detail: "Loading destinations…" },
+    destinationDraft: null,
+    destinationSaving: false,
+    destinationLoadSequence: 0,
     status: null,
     poseTrail: [],
     socket: null,
@@ -140,6 +144,7 @@
       const [map, presets, status] = await Promise.all([api("/api/map"), api("/api/presets"), api("/api/status")]);
       state.map = map;
       state.presets = presets.presets;
+      state.destinationCatalog = presets;
       await loadMapImage(map.image_url);
       renderPresets();
       applyStatus(status);
@@ -726,8 +731,113 @@
   }
   function renderPresets() {
     const list = byId("preset-list"); list.textContent = "";
-    if (!state.presets.length) { list.textContent = "No configured destinations"; return; }
+    if (!state.presets.length) list.textContent = state.destinationCatalog.available ? "No configured destinations" : state.destinationCatalog.detail;
     state.presets.forEach((preset) => { const button = document.createElement("button"); button.type = "button"; button.className = "navigation"; button.textContent = preset.label; button.addEventListener("click", () => navigate(preset)); list.appendChild(button); });
+    const select = byId("destination-select"), selected = select.value;
+    const prompt = document.createElement("option"); prompt.value = ""; prompt.textContent = "Choose a destination";
+    select.replaceChildren(prompt, ...state.presets.map((preset) => {
+      const option = document.createElement("option"); option.value = preset.id;
+      option.textContent = preset.label; return option;
+    }));
+    select.value = state.presets.some((item) => item.id === selected) ? selected : "";
+    renderDestinationControls();
+  }
+
+  function renderDestinationControls() {
+    const available = state.destinationCatalog.available && !state.destinationSaving;
+    const selected = state.presets.some((item) => item.id === byId("destination-select").value);
+    for (const action of ["edit", "duplicate", "delete"]) byId(`destination-${action}`).disabled = !available || !selected;
+    byId("destination-new").disabled = !available;
+    byId("destination-refresh").disabled = state.destinationSaving;
+    byId("destination-select").disabled = state.destinationSaving;
+    byId("destination-fields").disabled = state.destinationSaving;
+    byId("destination-save").disabled = !available || !state.destinationDraft;
+    byId("destination-status").textContent = state.destinationCatalog.available
+      ? `${state.presets.length} saved destination(s).` : state.destinationCatalog.detail;
+  }
+
+  function applyDestinations(catalog) {
+    state.destinationCatalog = catalog;
+    state.presets = catalog.presets;
+    renderPresets();
+    if (state.shortcutDraft) renderShortcutChoices();
+    drawMap();
+  }
+
+  async function loadDestinations() {
+    const sequence = ++state.destinationLoadSequence;
+    try {
+      const catalog = await api("/api/presets");
+      if (sequence === state.destinationLoadSequence && !state.destinationSaving) applyDestinations(catalog);
+    } catch (error) {
+      if (sequence === state.destinationLoadSequence && !state.destinationSaving) {
+        applyDestinations({ available: false, presets: [], detail: error.message });
+        setError(error.message);
+      }
+    }
+  }
+
+  function editDestination(mode) {
+    if (state.destinationSaving || !state.destinationCatalog.available) return;
+    const selected = state.presets.find((item) => item.id === byId("destination-select").value);
+    if (mode !== "new" && !selected) return;
+    const draft = mode === "new" ? { label: "", pose: { x: 0, y: 0, yaw: 0 } }
+      : JSON.parse(JSON.stringify(selected));
+    if (mode === "duplicate") { delete draft.id; draft.label = `${draft.label} copy`.slice(0, 80); delete draft.revision; }
+    state.destinationDraft = draft;
+    byId("destination-name").value = draft.label;
+    for (const key of ["x", "y", "yaw"]) byId(`destination-${key}`).value = draft.pose[key];
+    byId("destination-editor").hidden = false;
+    renderDestinationControls();
+  }
+
+  function copyDestinationPose(source) {
+    if (!state.destinationDraft || state.destinationSaving) return;
+    const pose = source === "robot" ? state.status?.map_pose : state.mapSelection;
+    const valid = source === "robot" ? state.statusConnected && pose?.available && pose.fresh : pose?.kind === "navigate";
+    if (!valid || !["x", "y", "yaw"].every((key) => Number.isFinite(pose[key]))) {
+      setError(source === "robot" ? "A fresh robot pose in the map frame is required." : "Select a navigation goal on the map first."); return;
+    }
+    for (const key of ["x", "y", "yaw"]) byId(`destination-${key}`).value = pose[key];
+    setError("");
+  }
+
+  async function saveDestination(event) {
+    event.preventDefault();
+    const draft = state.destinationDraft;
+    if (!draft || state.destinationSaving) return;
+    try {
+      const payload = {
+        label: byId("destination-name").value.trim(),
+        pose: Object.fromEntries(["x", "y", "yaw"].map((key) => [key, finiteField(`destination-${key}`)])),
+        ...(draft.id ? { id: draft.id, revision: draft.revision } : {}),
+      };
+      state.destinationSaving = true; ++state.destinationLoadSequence; renderDestinationControls();
+      const catalog = await api("/api/presets/save", { method: "POST", body: JSON.stringify(payload) });
+      // Discard refreshes started while the save was in flight.
+      ++state.destinationLoadSequence;
+      applyDestinations(catalog);
+      byId("destination-select").value = catalog.preset.id;
+      state.destinationDraft = null; byId("destination-editor").hidden = true;
+      setError("");
+    } catch (error) { setError(error.message); }
+    finally { state.destinationSaving = false; renderDestinationControls(); }
+  }
+
+  async function deleteDestination() {
+    const selected = state.presets.find((item) => item.id === byId("destination-select").value);
+    if (!selected || state.destinationSaving || !window.confirm(`Delete destination ${selected.label}?`)) return;
+    state.destinationSaving = true; ++state.destinationLoadSequence; renderDestinationControls();
+    try {
+      const catalog = await api("/api/presets/delete", { method: "POST", body: JSON.stringify({ id: selected.id, revision: selected.revision }) });
+      ++state.destinationLoadSequence;
+      applyDestinations(catalog);
+      if (state.destinationDraft?.id === selected.id) {
+        state.destinationDraft = null; byId("destination-editor").hidden = true;
+      }
+      setError("");
+    } catch (error) { setError(error.message); }
+    finally { state.destinationSaving = false; renderDestinationControls(); }
   }
 
   function setMapMode(mode) {
@@ -1029,7 +1139,7 @@
     byId("shortcut-box-instance").disabled = !fixed;
     byId("shortcut-box-instance").required = fixed;
     for (const stage of ["start", "end"]) {
-      shortcutOptions(`shortcut-navigate-${stage}-preset`, (state.presets || []).map((item) => [item.id, `${item.label} (${item.id})`]), "Choose a destination");
+      shortcutOptions(`shortcut-navigate-${stage}-preset`, (state.presets || []).map((item) => [item.id, item.label]), "Choose a destination");
       const incompatible = stage === "start" ? !place : place;
       const enabled = byId(`shortcut-carry-${stage}-enabled`);
       enabled.disabled = incompatible;
@@ -1777,7 +1887,8 @@
     if (!window.confirm(`Navigate to ${preset.label}?`)) return;
     const confirmNav2Idle = confirmNav2IdleWithoutStatus();
     if (!state.status?.navigation?.goal_status?.available && !confirmNav2Idle) return;
-    try { await api("/api/actions", { method: "POST", body: JSON.stringify({ kind: "navigate", preset_id: preset.id, confirmed: true, confirm_nav2_idle: confirmNav2Idle }) }); setError(""); } catch (error) { setError(error.message); }
+    try { await api("/api/actions", { method: "POST", body: JSON.stringify({ kind: "navigate", preset_id: preset.id, expected_preset_pose: preset.pose, confirmed: true, confirm_nav2_idle: confirmNav2Idle }) }); setError(""); }
+    catch (error) { await loadDestinations(); setError(error.message); }
   }
   async function fineAlign(execute) {
     let profileId, instanceId;
@@ -2012,6 +2123,17 @@
   }
 
   byId("login-form").addEventListener("submit", login);
+  byId("destination-select").addEventListener("change", renderDestinationControls);
+  for (const mode of ["new", "edit", "duplicate"]) byId(`destination-${mode}`).addEventListener("click", () => editDestination(mode));
+  byId("destination-delete").addEventListener("click", deleteDestination);
+  byId("destination-refresh").addEventListener("click", loadDestinations);
+  byId("destination-editor").addEventListener("submit", saveDestination);
+  byId("destination-editor-close").addEventListener("click", () => {
+    if (state.destinationSaving) return;
+    state.destinationDraft = null; byId("destination-editor").hidden = true; renderDestinationControls();
+  });
+  byId("destination-use-robot").addEventListener("click", () => copyDestinationPose("robot"));
+  byId("destination-use-map").addEventListener("click", () => copyDestinationPose("map"));
   byId("task-shortcut-select").addEventListener("change", renderTaskShortcuts);
   byId("task-shortcut-new").addEventListener("click", () => editTaskShortcut("new"));
   byId("task-shortcut-edit").addEventListener("click", () => editTaskShortcut("edit"));

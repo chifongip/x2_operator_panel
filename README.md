@@ -18,18 +18,10 @@ ros2 run x2_operator_panel operator_panel_hash_password
 export X2_OPERATOR_PANEL_PASSWORD_HASH='pbkdf2_sha256$...'
 ```
 
-Add only surveyed and collision-reviewed `map`-frame navigation destinations to
-`config/navigation_presets.yaml` before exposing navigation controls:
-
-```yaml
-presets:
-  - id: loading_bay
-    label: Loading bay
-    pose: {x: 1.20, y: -2.40, yaw: 1.57}
-```
-
-The shipped preset file is intentionally empty; this repository has no
-verified destinations to preconfigure.
+Create surveyed, collision-reviewed `map`-frame navigation destinations in
+**Navigation → Manage destinations**. The panel starts with an empty list when
+`navigation_destinations_file` does not exist and creates that file on the first
+save. This single file is used for both loading and saving destinations.
 
 ## Run
 
@@ -493,6 +485,37 @@ middle, and Navigation at the bottom. Columns stack
 on smaller screens. Shortcut management and posture options start collapsed;
 task warnings and cancellation controls remain visible.
 
+### Editable navigation destinations
+
+In **Navigation → Manage destinations**, use **New**, **Edit**, **Duplicate**,
+**Delete**, or **Refresh**. Enter a name and X/Y in metres and yaw in radians,
+all in the `map` frame. Destination IDs are generated automatically on creation
+or duplication, like shortcut IDs. Renaming or editing preserves the ID and
+existing shortcut references, including destinations saved with older named IDs.
+**Use current robot pose** copies a fresh, connected map-frame robot pose.
+**Use selected map goal** copies the position and heading selected in the map's
+navigation mode. Both buttons only fill the form; **Save destination** persists it.
+
+Saving updates destination buttons, map markers, and the open shortcut editor
+without commanding motion. A destination referenced by a saved shortcut cannot
+be deleted; edit or remove those references first. Conflicting edits from other
+browser sessions are rejected; refresh and reopen the destination before retrying.
+An already submitted navigation goal retains its captured pose. Standalone
+navigation and shortcut navigation reject a destination pose changed after
+selection or confirmation, requiring the operator to review the destination.
+
+Destinations persist in `navigation_destinations_file`, a ROS parameter and launch
+argument defaulting to `~/.local/share/x2_operator_panel/navigation_destinations.json`.
+An absent file starts an empty catalog. Existing saved destinations retain their
+IDs, poses, and revisions. Use **Refresh** to read edits from another browser.
+A malformed or unreadable saved catalog reports an error and is not overwritten.
+
+Authenticated destination endpoints are `GET /api/presets`,
+`POST /api/presets/save`, and `POST /api/presets/delete`. Saves contain
+`label` and `pose: {x, y, yaw}`. New destinations omit `id` and `revision`;
+the server generates a UUID. Edits include the record's `id` and `revision`;
+deletes require both as well.
+
 ### Editable task shortcuts
 
 In **Tasks → Saved shortcuts → Manage shortcuts**, choose **New**, name the shortcut, select **Pick** or
@@ -501,7 +524,7 @@ In **Tasks → Saved shortcuts → Manage shortcuts**, choose **New**, name the 
 **Navigation → Carry Pose → Combo Task → Carry Pose → Navigation**
 
 Each navigation and carry stage has its own enable checkbox and target.
-Navigation destinations come from `navigation_presets_file`; Carry Pose offers
+Navigation destinations come from the editable destination catalog; Carry Pose offers
 Carry A or Carry B. Navigation before the combo runs before its carry pose;
 navigation after the combo runs after its carry pose. The combo itself is:
 

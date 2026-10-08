@@ -46,7 +46,7 @@ def test_command_cards_separate_controls_without_duplicate_ids_or_nested_forms()
                                   "reset-manipulation", "recover-empty", "recover-holding", "reload-box-profiles",
                                   "manipulation-task-warning", "continue-manipulation", "cancel-manipulation"],
         "posture-commands": ["posture-form", "move-carry-a", "move-carry-b"],
-        "navigation-commands": ["preset-list", "clear-costmaps"],
+        "navigation-commands": ["preset-list", "clear-costmaps", "destination-management", "destination-editor"],
         "docking-commands": ["docking-profile", "undocking-profile", "check-fine-align", "execute-fine-align",
                              "execute-undock", "cancel-docking-motion"],
     }
@@ -55,6 +55,7 @@ def test_command_cards_separate_controls_without_duplicate_ids_or_nested_forms()
             assert layout.inside(identifier, group), identifier
             assert not any(layout.inside(identifier, other) for other in groups if other != group)
     assert "task-shortcut-run" not in layout.nodes
+    assert "destination-id" not in layout.nodes
     assert layout.inside("manipulation-commands", "task-command-column")
     assert not layout.inside("tasks-commands", "task-command-column")
     assert not layout.inside("tasks-commands", "motion-command-column")

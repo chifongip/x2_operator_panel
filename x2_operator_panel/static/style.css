@@ -100,6 +100,7 @@ h3 { grid-column: 1 / -1; font-size: .82rem; font-weight: 650; }
 .shortcut-group { min-width: 0; display: grid; gap: 8px; }
 .shortcut-group + .shortcut-group { padding-top: 12px; border-top: 1px solid #d8e0e1; }
 .shortcut-group h4 { margin: 0; font-size: .85rem; color: #30474a; }
+.destination-fields { min-width: 0; margin: 0; padding: 12px 0 0; border: 0; border-top: 1px solid #d8e0e1; display: grid; gap: 12px; }
 .guided-workflow { display: grid; gap: 10px; padding-top: 12px; border-top: 1px solid #d8e0e1; }
 .visible-box-picker, .saved-plan-controls { min-width: 0; display: grid; gap: 6px; }
 .visible-box-picker label { color: #30474a; font-weight: 600; }.commands-header .visible-box-picker { max-width: 660px; }
