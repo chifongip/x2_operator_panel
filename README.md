@@ -470,8 +470,9 @@ A full-width **Execution controls** section directly above Commands contains
 the physical-motion unlock, its status badge, and **Cancel active goals**.
 
 The Commands header contains the shared **Plan only** toggle and **Visible box**
-selection. The selected box applies to standalone actions and the quick combo;
-saved shortcuts use their configured fixed target.
+selection. The selected box applies to standalone actions and the quick combo.
+Profile-based saved shortcuts use it when it matches their configured box profile;
+fixed-instance shortcuts retain their saved tag.
 
 - **Tasks** presents saved shortcut buttons and the quick combo side by side,
   with shared sequence status, Stop, and Continue controls below.
@@ -506,7 +507,7 @@ navigation after the combo runs after its carry pose. The combo itself is:
 
 1. Dock with a named docking profile, such as `grey_box_dock`.
 2. Set posture with the required height and waist yaw.
-3. Pick the saved box instance, or Place the currently held box.
+3. Pick the resolved box instance, or Place the currently held box.
 4. Return posture (initially 0.64 m and 0.0 rad, both editable).
 5. Undock with a named profile (initially copied from Dock, then independently editable).
 
@@ -516,21 +517,41 @@ carry stage for Place and the final carry stage for Pick. Invalid combinations
 are rejected when saving. The navigation stages work for either action.
 Existing saved shortcuts load with all four added stages disabled.
 
-Select a detected box or enter its profile and exact instance, such
-as `grey_box` / `tag:180`. A shortcut never substitutes another tag of the same
-box type. For Place, the box fields only identify a box-based docking reference;
+Choose a box profile from the dropdown, or enter a profile name such as
+`grey_box`. **Box selection → Visible tag matching profile** is the default:
+the saved shortcut does not require one particular tag. When the run first
+needs a box for Dock or Pick, it uses the selected matching **Visible box**, or
+the sole matching detection if there is only one. Box docking also requires
+that the detection supports the chosen docking profile. Multiple matching tags
+require an explicit Visible box selection; no match leaves the sequence waiting.
+This resolution happens after initial navigation, so the box need not be visible
+before navigating to its location. Until the first box command is submitted,
+a tag lost during preflight can be replaced by another matching detection.
+After submission, each run keeps its resolved tag through Dock and Pick, even
+if another tag of the same profile becomes visible later.
+The shortcut itself remains reusable with other tags on subsequent runs.
+
+**Box selection → Fixed tag instance** uses a numeric **Fixed box ID**, such
+as `180` for `grey_box`; the panel adds the internal `tag:` prefix automatically.
+Existing saved shortcuts display their numeric IDs and retain their fixed instances
+until edited. For Place, the box fields only identify a box-based docking reference;
 Place always operates on the held object. An automatic Place target names its
 table profile explicitly; a manual target specifies frame, XYZ, and yaw without
 requiring a table tag. Docking and table profiles may reference different tags.
 
 **Save shortcut**, **Edit**, **Duplicate**, **Delete**, and **Refresh** manage
 the server's saved definitions without commanding motion. Profiles can also
-be entered while ROS discovery is offline; execution validates the configured
-profiles and fixed target. Saving edits uses revisions and rejects stale edits
+be entered while ROS discovery is offline using **Enter a profile name…**.
+The Dock and Undock dropdowns list every discovered docking profile and preserve
+unavailable saved selections. Box Profile also uses a dropdown, combining profile
+names from detections and saved shortcuts; Table Profile lists the discovered
+table profiles. Both preserve saved selections and support manual profile entry
+when the profile is not listed. Execution validates the configured profiles and
+resolved target. Saving edits uses revisions and rejects stale edits
 from another browser instead of overwriting them. Edits to saved definitions,
 selectors, or manual poses do not change an active sequence.
 The runner captures each navigation destination's map pose before confirmation
-and rejects a changed preset at submission. A fixed box need not be visible
+and rejects a changed preset at submission. A box need not be visible
 before the initial navigation; the sequence waits for its detection before
 box-based Dock or Pick. Navigation uses the existing localization, Nav2-idle,
 Collision Monitor, and task-admission checks. A failed or canceled navigation or

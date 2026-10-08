@@ -77,12 +77,15 @@ def validate_shortcut(value):
     if box is not None:
         box = _mapping(box, "Box")
         instance = box.get("instance_id")
-        if (not isinstance(instance, str) or not re.fullmatch(r"tag:(0|[1-9][0-9]{0,9})", instance)
+        if instance == "":
+            instance = None
+        if instance is not None and (
+                not isinstance(instance, str) or not re.fullmatch(r"tag:(0|[1-9][0-9]{0,9})", instance)
                 or int(instance[4:]) > 2147483647):
             raise ShortcutError("Box instance must be tag:<nonnegative ID>")
         box = {"profile_id": _profile(box.get("profile_id"), "Box"), "instance_id": instance}
     if action == "pick" and box is None:
-        raise ShortcutError("Pick requires a fixed box profile and tag instance")
+        raise ShortcutError("Pick requires a box profile")
     result["box"] = box
     for stage in ("dock", "posture", "return_posture", "undock"):
         settings = _mapping(value.get(stage), stage)

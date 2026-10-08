@@ -163,7 +163,7 @@
             </select>
             <p id="visible-box-status" class="muted">Waiting for /box_states</p>
           </div>
-          <p class="muted">Visible box is shared by standalone actions and the quick combo. Saved shortcuts use their own fixed target.</p>
+          <p class="muted">Visible box is shared by standalone actions, the quick combo, and shortcuts configured to select a matching profile at run time. Fixed-tag shortcuts retain their saved target.</p>
         </header>
 
         <section id="tasks-commands" class="command-group tasks-card" aria-labelledby="tasks-heading">
@@ -209,14 +209,11 @@
             <div class="shortcut-fields">
               <label>Name<input id="shortcut-name" maxlength="80" required></label>
               <label>Action<select id="shortcut-action"><option value="pick">Pick</option><option value="place">Place held box</option></select></label>
-              <label>Detected box<select id="shortcut-detected-box"><option value="">Enter a fixed target below</option></select></label>
-              <label>Box profile<input id="shortcut-box-profile" placeholder="grey_box" list="shortcut-box-profiles"></label>
-              <datalist id="shortcut-box-profiles"></datalist>
-              <label>Fixed box instance<input id="shortcut-box-instance" placeholder="tag:180"></label>
+              <label>Box profile<select id="shortcut-box-profile"><option value="">Choose a box profile</option></select></label>
+              <label>Box selection<select id="shortcut-box-selection"><option value="profile">Visible tag matching profile</option><option value="fixed">Fixed tag instance</option></select></label>
+              <label>Fixed box ID<input id="shortcut-box-instance" type="number" min="0" max="2147483647" step="1" inputmode="numeric" placeholder="180" disabled></label>
             </div>
-            <p class="muted">Pick and box-based Dock use this exact instance. For Place, it is only the docking reference; Place operates on the held box.</p>
-            <datalist id="shortcut-docking-profiles"></datalist>
-            <datalist id="shortcut-table-profiles"></datalist>
+            <p class="muted">Profile selection uses the selected matching Visible box, or the sole matching tag. If several match, select one. Each run keeps its chosen tag through Dock and Pick. For Place, the box is only a docking reference.</p>
             <fieldset><legend><label class="plan-toggle"><input id="shortcut-navigate-start-enabled" type="checkbox">Navigation before combo</label></legend>
               <label>Destination<select id="shortcut-navigate-start-preset"><option value="">Choose a destination</option></select></label>
             </fieldset>
@@ -225,7 +222,7 @@
               <p class="muted">Available before Place, when a box is held.</p>
             </fieldset>
             <p class="muted">Combo task</p>
-            <fieldset><legend><label class="plan-toggle"><input id="shortcut-dock-enabled" type="checkbox" checked>1. Dock</label></legend><label>Profile<input id="shortcut-dock-profile" list="shortcut-docking-profiles" placeholder="grey_box_dock"></label></fieldset>
+            <fieldset><legend><label class="plan-toggle"><input id="shortcut-dock-enabled" type="checkbox" checked>1. Dock</label></legend><label>Profile<select id="shortcut-dock-profile"><option value="">Choose a docking profile</option></select></label></fieldset>
             <fieldset><legend><label class="plan-toggle"><input id="shortcut-posture-enabled" type="checkbox" checked>2. Set posture</label></legend><div class="shortcut-fields">
               <label>Height (m)<input id="shortcut-posture-height" type="number" step="any" value="0.64" min="0.30" max="0.64"></label>
               <label>Waist yaw (rad)<input id="shortcut-posture-yaw" type="number" step="any" value="0" min="-1.5708" max="1.5708"></label>
@@ -233,7 +230,7 @@
             <fieldset id="shortcut-place-fields" hidden>
               <legend>3. Place target</legend>
               <label>Target<select id="shortcut-place-mode"><option value="automatic">Automatic from table tag</option><option value="manual">Manual pose</option></select></label>
-              <label id="shortcut-table-field">Table profile<input id="shortcut-table-profile" list="shortcut-table-profiles"></label>
+              <label id="shortcut-table-field">Table profile<select id="shortcut-table-profile"><option value="">Choose a table profile</option></select></label>
               <div id="shortcut-manual-fields" class="shortcut-fields" hidden>
                 <label>Frame<select id="shortcut-place-frame"><option value="base_link">base_link</option><option value="map">map</option></select></label>
                 <label>X (m)<input id="shortcut-place-x" type="number" step="any" value="0.35" ></label>
@@ -246,7 +243,7 @@
               <label>Height (m)<input id="shortcut-return-height" type="number" step="any" value="0.64" min="0.30" max="0.64"></label>
               <label>Waist yaw (rad)<input id="shortcut-return-yaw" type="number" step="any" value="0" min="-1.5708" max="1.5708"></label>
             </div></fieldset>
-            <fieldset><legend><label class="plan-toggle"><input id="shortcut-undock-enabled" type="checkbox" checked>5. Undock</label></legend><label>Profile<input id="shortcut-undock-profile" list="shortcut-docking-profiles"></label></fieldset>
+            <fieldset><legend><label class="plan-toggle"><input id="shortcut-undock-enabled" type="checkbox" checked>5. Undock</label></legend><label>Profile<select id="shortcut-undock-profile"><option value="">Choose a docking profile</option></select></label></fieldset>
             <fieldset><legend><label class="plan-toggle"><input id="shortcut-carry-end-enabled" type="checkbox">Carry pose after combo</label></legend>
               <label>Pose<select id="shortcut-carry-end-pose"><option value="a">Carry A</option><option value="b">Carry B</option></select></label>
               <p class="muted">Available after Pick, while holding the box.</p>

@@ -43,6 +43,21 @@ def test_create_restart_update_and_delete(tmp_path):
     assert json.loads(path.read_text())["version"] == 1
 
 
+@pytest.mark.parametrize("instance", [None, "", "missing"])
+def test_profile_target_can_be_saved_without_a_fixed_tag(tmp_path, instance):
+    value = pick_shortcut()
+    value["box"] = {"profile_id": "grey_box"}
+    if instance != "missing":
+        value["box"]["instance_id"] = instance
+    store = TaskShortcutStore(tmp_path / "shortcuts.json")
+    saved = store.save(value)["shortcut"]
+    assert saved["box"] == {"profile_id": "grey_box", "instance_id": None}
+    assert TaskShortcutStore(store.path).snapshot()["shortcuts"] == [saved]
+    fixed = store.save(dict(saved, box={"profile_id": "grey_box", "instance_id": "tag:181"}))["shortcut"]
+    assert fixed["box"]["instance_id"] == "tag:181"
+    assert store.save(dict(fixed, box={"profile_id": "grey_box"}))["shortcut"]["box"]["instance_id"] is None
+
+
 def test_stale_edits_and_deletes_do_not_overwrite(tmp_path):
     store = TaskShortcutStore(tmp_path / "shortcuts.json")
     original = store.save(pick_shortcut())["shortcut"]
@@ -98,6 +113,8 @@ def test_atomic_write_failure_preserves_previous_file(tmp_path):
 
 @pytest.mark.parametrize("field,value", [
     ("action", "automatic"), ("name", " "), ("box", None),
+    ("box", {"instance_id": None}),
+    ("box", {"profile_id": "grey_box", "instance_id": False}),
     ("box", {"profile_id": "grey_box", "instance_id": "tag:0180"}),
     ("box", {"profile_id": "grey_box", "instance_id": "tag:2147483648"}),
     ("dock", {"enabled": True, "profile_id": ""}),

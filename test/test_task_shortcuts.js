@@ -365,7 +365,8 @@ async function shortcutButtonChecks() {
 async function editorChecks() {
   const f = fixture();
   f.context.editTaskShortcut("edit");
-  assert.equal(f.byId("shortcut-detected-box").value, "tag:180");
+  assert.equal(f.byId("shortcut-box-instance").value, "180", "Legacy saved instances are displayed as numeric IDs");
+  assert.match(f.context.shortcutDescription(f.state.taskShortcuts.shortcuts[0]), /ID 180/);
   assert.equal(f.byId("shortcut-undock-profile").value, "independent_retreat");
   f.byId("shortcut-name").value = "New name";
   f.byId("shortcut-undock-profile").value = "offline_retreat";
@@ -388,11 +389,268 @@ async function editorChecks() {
   f.byId("shortcut-dock-profile").listeners.change({target: f.byId("shortcut-dock-profile")});
   assert.equal(f.byId("shortcut-undock-profile").value, "initial_retreat");
   f.byId("shortcut-undock-profile").value = "explicit_retreat";
-  f.state.status.visible_boxes.boxes[1].default_docking_profile = "second_dock";
-  f.byId("shortcut-detected-box").listeners.change({target: {value: "tag:181"}});
+  f.byId("shortcut-dock-profile").value = "second_dock";
+  f.byId("shortcut-dock-profile").listeners.change();
   assert.equal(f.byId("shortcut-dock-profile").value, "second_dock");
   assert.equal(f.byId("shortcut-undock-profile").value, "explicit_retreat",
-    "Changing the box must preserve an independently edited retreat");
+    "Changing Dock must preserve an independently edited retreat");
+}
+
+async function profileTargetChecks() {
+  const item = shortcut();
+  item.box.instance_id = null;
+  for (const tag of ["tag:180", "tag:181"]) {
+    const f = fixture(item);
+    f.state.status.visible_boxes.boxes = f.state.status.visible_boxes.boxes.filter((box) => box.instance_id === tag);
+    f.state.selectedBoxId = null;
+    await f.context.runTaskShortcut();
+    assert.equal(f.commands()[0].payload.instance_id, tag, "The same shortcut can dock using either profile tag");
+    assert.equal(f.state.taskShortcuts.shortcuts[0].box.instance_id, null, "Runtime binding must not edit the saved shortcut");
+    await f.finish();
+    await f.finish();
+    assert.equal(f.commands()[2].payload.instance_id, tag, "Pick must reuse the box chosen for Dock");
+    assert.equal(f.commands()[2].payload.docking_profile_id, "grey_box_dock");
+  }
+
+  const multiple = fixture(item);
+  multiple.state.selectedBoxId = null;
+  await multiple.context.runTaskShortcut();
+  assert.equal(multiple.commands().length, 0, "Ambiguous profile tags must require a selection");
+  assert.match(multiple.context.guidedWaitReason(multiple.state.guidedWorkflow), /Select.*grey_box/);
+  multiple.state.selectedBoxId = "tag:181";
+  multiple.context.scheduleGuidedStep();
+  await flush();
+  assert.equal(multiple.commands()[0].payload.instance_id, "tag:181");
+  await multiple.finish();
+  multiple.state.status.visible_boxes.boxes = multiple.state.status.visible_boxes.boxes.filter((box) => box.instance_id !== "tag:181");
+  multiple.state.selectedBoxId = "tag:180";
+  await multiple.finish();
+  assert.equal(multiple.commands().length, 2, "Losing a bound tag must not redirect Pick to another tag");
+  assert.match(multiple.context.guidedWaitReason(multiple.state.guidedWorkflow), /tag:181/);
+
+  const filtered = fixture(item);
+  filtered.state.status.visible_boxes.boxes[0].profile_id = "another_box";
+  filtered.state.selectedBoxId = "tag:180";
+  await filtered.context.runTaskShortcut();
+  assert.equal(filtered.commands()[0].payload.instance_id, "tag:181", "Only the saved box profile can match");
+  const unsupported = fixture(item);
+  unsupported.state.status.visible_boxes.boxes[0].docking_profile_ids = ["another_dock"];
+  await unsupported.context.runTaskShortcut();
+  assert.equal(unsupported.commands()[0].payload.instance_id, "tag:181", "Only compatible docking targets can match");
+
+  const pickOnly = clone(item);
+  for (const stage of ["dock", "posture", "return_posture", "undock"]) pickOnly[stage].enabled = false;
+  const pick = fixture(pickOnly);
+  pick.state.selectedBoxId = "tag:181";
+  await pick.context.runTaskShortcut();
+  assert.equal(pick.commands()[0].payload.kind, "pick");
+  assert.equal(pick.commands()[0].payload.instance_id, "tag:181");
+
+  const placeItem = shortcut("place");
+  placeItem.box.instance_id = null;
+  const place = fixture(placeItem);
+  place.state.selectedBoxId = "tag:181";
+  await place.context.runTaskShortcut();
+  assert.equal(place.commands()[0].payload.instance_id, "tag:181", "Place can choose a docking reference by box profile");
+
+  const navigateItem = clone(item);
+  navigateItem.navigate_start = { enabled: true, preset_id: "loading-bay" };
+  const navigate = fixture(navigateItem);
+  navigate.state.status.visible_boxes.fresh = false;
+  await navigate.context.runTaskShortcut();
+  assert.equal(navigate.commands()[0].payload.kind, "navigate");
+  await navigate.finish();
+  assert.equal(navigate.commands().length, 1, "Resolve the box after arrival, rather than before navigation");
+  navigate.state.status.visible_boxes.fresh = true;
+  navigate.state.selectedBoxId = "tag:181";
+  navigate.context.scheduleGuidedStep();
+  await flush();
+  assert.equal(navigate.commands()[1].payload.instance_id, "tag:181");
+
+  const editor = fixture(item);
+  editor.context.editTaskShortcut("edit");
+  assert.equal(editor.byId("shortcut-box-selection").value, "profile");
+  assert.equal(editor.byId("shortcut-box-instance").disabled, true);
+  assert.match(editor.context.shortcutDescription(item), /visible tag at run time/);
+  await editor.context.saveTaskShortcut({ preventDefault() {} });
+  assert.equal(editor.calls.find((call) => call.path.endsWith("/save")).payload.box.instance_id, null);
+  editor.context.editTaskShortcut("new");
+  assert.equal(editor.byId("shortcut-box-selection").value, "profile", "New shortcuts should reuse their box profile by default");
+  editor.byId("shortcut-box-selection").value = "fixed";
+  editor.byId("shortcut-box-selection").listeners.change();
+  assert.equal(editor.byId("shortcut-box-instance").disabled, false);
+}
+
+async function provisionalTargetChecks() {
+  const item = shortcut();
+  item.box.instance_id = null;
+  for (const stage of ["dock", "posture", "return_posture", "undock"]) item[stage].enabled = false;
+  for (const fixed of [false, true]) {
+    const pickItem = clone(item);
+    if (fixed) pickItem.box.instance_id = "tag:180";
+    const f = fixture(pickItem);
+    const api = f.context.api;
+    let statusReads = 0;
+    f.context.api = async (path, options) => {
+      if (path === "/api/status" && ++statusReads === 2) {
+        f.state.status.visible_boxes.boxes.shift();
+        f.state.selectedBoxId = "tag:181";
+      }
+      return api(path, options);
+    };
+    await f.context.runTaskShortcut();
+    await flush();
+    if (fixed) {
+      assert.equal(f.commands().length, 0, "Preflight must never replace an explicitly fixed tag");
+      assert.equal(f.state.guidedWorkflow.instanceId, "tag:180");
+    } else {
+      assert.equal(f.commands().length, 1, "A profile target lost during preflight must allow a new detection");
+      assert.equal(f.commands()[0].payload.instance_id, "tag:181");
+      assert.equal(f.state.taskShortcuts.shortcuts[0].box.instance_id, null);
+    }
+  }
+
+  const dockItem = shortcut();
+  dockItem.box.instance_id = null;
+  dockItem.navigate_start = { enabled: true, preset_id: "loading-bay" };
+  const dock = fixture(dockItem);
+  await dock.context.runTaskShortcut();
+  const dockApi = dock.context.api;
+  let releaseUnlock;
+  dock.context.api = (path, options) => {
+    if (path === "/api/unlock/execution" && !releaseUnlock) {
+      return new Promise((resolve) => { releaseUnlock = () => resolve(dockApi(path, options)); });
+    }
+    return dockApi(path, options);
+  };
+  await dock.finish();
+  assert.ok(releaseUnlock, "Dock must be awaiting automatic unlock after navigation");
+  dock.state.status.visible_boxes.boxes.shift();
+  dock.state.selectedBoxId = "tag:181";
+  releaseUnlock();
+  await flush();
+  assert.deepEqual(dock.commands().map((call) => call.payload.kind), ["navigate", "fine_align"]);
+  assert.equal(dock.commands()[1].payload.instance_id, "tag:181", "A lost provisional Dock target must also be released");
+  await dock.finish();
+  dock.state.status.visible_boxes.boxes = [];
+  await dock.finish();
+  assert.equal(dock.commands().length, 3, "After Dock is issued, losing its tag must pause Pick");
+  assert.match(dock.context.guidedWaitReason(dock.state.guidedWorkflow), /tag:181/);
+
+  for (const submitted of [false, true]) {
+    const f = fixture(item);
+    const api = f.context.api;
+    let statusReads = 0;
+    f.context.api = async (path, options) => {
+      if (path === "/api/status" && ++statusReads === 2 && !submitted) throw new Error("Status unavailable");
+      if (path === "/api/actions" && submitted) throw new Error("Command response unavailable");
+      return api(path, options);
+    };
+    await f.context.runTaskShortcut();
+    const workflow = f.state.guidedWorkflow;
+    assert.equal(workflow.failed, true);
+    assert.equal(!!workflow.resumeBlocked, submitted, "Only a submitted command can have an unknown motion outcome");
+    assert.equal(workflow.instanceId, submitted ? "tag:180" : null,
+      "Keep the tag if submission might have moved the robot; release it if preflight failed");
+    assert.equal(workflow.fixedInstance, submitted);
+    if (!submitted) {
+      f.context.api = api;
+      f.state.status.visible_boxes.boxes.shift();
+      f.state.selectedBoxId = "tag:181";
+      await f.context.continueGuidedWorkflow();
+      await flush();
+      assert.equal(f.commands()[0].payload.instance_id, "tag:181", "Continue can resolve another tag after a preflight error");
+    }
+  }
+}
+
+async function numericBoxIdChecks() {
+  for (const [id, expected] of [["0", "tag:0"], ["181", "tag:181"], ["00180", "tag:180"], ["2147483647", "tag:2147483647"]]) {
+    const f = fixture();
+    f.context.editTaskShortcut("edit");
+    f.byId("shortcut-box-instance").value = id;
+    await f.context.saveTaskShortcut({ preventDefault() {} });
+    assert.equal(f.calls.find((call) => call.path.endsWith("/save")).payload.box.instance_id, expected);
+    if (id === "181") {
+      await f.context.runTaskShortcut();
+      assert.equal(f.commands()[0].payload.instance_id, "tag:181", "Dock still uses the ROS instance format");
+    }
+  }
+  for (const id of ["", "-1", "1.5", "1e2", "2147483648", "tag:180", "abc"]) {
+    const f = fixture();
+    f.context.editTaskShortcut("edit");
+    f.byId("shortcut-box-instance").value = id;
+    await f.context.saveTaskShortcut({ preventDefault() {} });
+    assert.match(f.context.error, /Fixed box ID must be a whole number/);
+    assert.equal(f.calls.filter((call) => call.path.endsWith("/save")).length, 0, "Reject invalid IDs before saving");
+    assert.equal(f.commands().length, 0);
+  }
+}
+
+async function dockingDropdownChecks() {
+  const f = fixture();
+  f.context.editTaskShortcut("edit");
+  const profiles = f.state.status.docking_profiles.profiles;
+  profiles.push({ id: "box_b_dock", target_source: "box", standoff: 0.5 });
+  f.context.renderShortcutChoices();
+  for (const field of ["dock", "undock"]) {
+    const select = f.byId(`shortcut-${field}-profile`);
+    assert.deepEqual(select.options.filter((option) => profiles.some((profile) => profile.id === option.value))
+      .map((option) => option.value), profiles.map((profile) => profile.id),
+    "Both dropdowns must include every profile, regardless of the selected box or current value");
+  }
+  assert.equal(f.byId("shortcut-dock-profile").value, "grey_box_dock");
+  f.state.status.docking_profiles.available = false;
+  f.context.renderShortcutChoices();
+  assert.equal(f.byId("shortcut-undock-profile").value, "independent_retreat");
+  assert.match(f.byId("shortcut-undock-profile").options.at(-1).textContent, /unavailable/);
+  f.context.window.prompt = () => "offline_retreat";
+  f.byId("shortcut-undock-profile").value = ":manual";
+  f.byId("shortcut-undock-profile").listeners.change();
+  assert.equal(f.byId("shortcut-undock-profile").value, "offline_retreat");
+  await f.context.saveTaskShortcut({ preventDefault() {} });
+  assert.equal(f.calls.find((call) => call.path.endsWith("/save")).payload.undock.profile_id, "offline_retreat");
+}
+
+async function boxAndTableDropdownChecks() {
+  const f = fixture(shortcut("place"));
+  f.state.status.visible_boxes.boxes.push({ profile_id: "blue_box", instance_id: "tag:190" });
+  f.state.taskShortcuts.shortcuts.push({ ...shortcut(), id: "saved-red", box: { profile_id: "red_box", instance_id: null } });
+  f.state.status.table_profiles.profiles.push({ id: "large_table" });
+  f.context.editTaskShortcut("edit");
+  const boxes = f.byId("shortcut-box-profile");
+  const tables = f.byId("shortcut-table-profile");
+  assert.deepEqual(boxes.options.filter((option) => option.value && option.value !== ":manual").map((option) => option.value),
+    ["blue_box", "grey_box", "red_box"], "Box choices include detected and saved profiles without duplicate tags");
+  assert.deepEqual(tables.options.filter((option) => option.value && option.value !== ":manual").map((option) => option.value),
+    ["other_table", "large_table"], "All discovered tables are offered");
+  assert.equal(boxes.value, "grey_box");
+  assert.equal(tables.value, "other_table");
+  f.state.status.visible_boxes = { fresh: false, boxes: [] };
+  f.state.status.table_profiles.available = false;
+  f.context.renderShortcutChoices();
+  assert.equal(boxes.value, "grey_box", "Losing a detection must not clear the saved box profile");
+  assert.equal(tables.value, "other_table", "Losing table discovery must preserve the selected table");
+  assert.match(tables.options.at(-1).textContent, /unavailable/);
+  for (const [field, expected] of [["box", "offline_box"], ["table", "offline_table"]]) {
+    f.context.window.prompt = () => expected;
+    f.byId(`shortcut-${field}-profile`).value = ":manual";
+    f.byId(`shortcut-${field}-profile`).listeners.change();
+    assert.equal(f.byId(`shortcut-${field}-profile`).value, expected);
+    f.context.window.prompt = () => null;
+    f.byId(`shortcut-${field}-profile`).value = ":manual";
+    f.byId(`shortcut-${field}-profile`).listeners.change();
+    assert.equal(f.byId(`shortcut-${field}-profile`).value, expected, "Canceling manual entry preserves the selection");
+  }
+  await f.context.saveTaskShortcut({ preventDefault() {} });
+  const saved = f.calls.find((call) => call.path.endsWith("/save")).payload;
+  assert.equal(saved.box.profile_id, "offline_box");
+  assert.equal(saved.place.table_profile_id, "offline_table");
+  assert.equal(f.commands().length, 0, "Selecting or saving profiles must never command motion");
+
+  f.context.editTaskShortcut("edit");
+  assert.equal(f.byId("shortcut-box-profile").value, "offline_box");
+  assert.equal(f.byId("shortcut-table-profile").value, "offline_table");
 }
 
 async function navigationCarryChecks() {
@@ -495,5 +753,5 @@ async function navigationCarryChecks() {
   assert.equal(editor.byId("shortcut-carry-start-enabled").disabled, false);
 }
 
-(async () => { await sequenceChecks(); await failureChecks(); await overlappingSaveChecks(); await shortcutButtonChecks(); await editorChecks(); await navigationCarryChecks(); })()
+(async () => { await sequenceChecks(); await failureChecks(); await overlappingSaveChecks(); await shortcutButtonChecks(); await editorChecks(); await profileTargetChecks(); await provisionalTargetChecks(); await numericBoxIdChecks(); await dockingDropdownChecks(); await boxAndTableDropdownChecks(); await navigationCarryChecks(); })()
   .catch((error) => { console.error(error); process.exitCode = 1; });
