@@ -134,3 +134,5 @@ h3 { grid-column: 1 / -1; font-size: .82rem; font-weight: 650; }
 #task-shortcut-editor fieldset { min-width: 0; margin: 0; padding: 10px; border: 1px solid #d8e0e1; border-radius: 4px; }
 #task-shortcut-editor legend { max-width: 100%; }
 .shortcut-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(135px, 1fr)); gap: 10px; }
+
+.shortcut-selection[aria-pressed="true"] { outline: 3px solid var(--button-motion); outline-offset: 2px; font-weight: 700; }

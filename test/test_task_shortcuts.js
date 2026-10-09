@@ -24,6 +24,7 @@ function fixture(item = shortcut(), fast = false) {
     return { get value() { return value; }, set value(next) { value = String(next); },
       checked: false, hidden: false, dataset: {}, options: [], listeners: {},
       get children() { return this.options; },
+      setAttribute(name, value) { this[name] = value; },
       addEventListener(name, callback) { this.listeners[name] = callback; },
       replaceChildren(...children) { this.options = children; } };
   }
@@ -55,8 +56,8 @@ function fixture(item = shortcut(), fast = false) {
     operation.status = status;
     operation.result = { success: status === "SUCCEEDED", profile_id: operation.profile_id,
       instance_id: operation.instance_id };
-    if (status === "SUCCEEDED" && operation.kind === item.action) {
-      state.status.manipulation_state.state = item.action === "pick" ? "HOLDING" : "EMPTY";
+    if (status === "SUCCEEDED" && ["pick", "place"].includes(operation.kind)) {
+      state.status.manipulation_state.state = operation.kind === "pick" ? "HOLDING" : "EMPTY";
     }
   }
   const context = vm.createContext({ state, byId, document: { createElement: element },
@@ -303,21 +304,27 @@ async function shortcutButtonChecks() {
   const placeList = f.byId("task-shortcut-place-buttons");
   assert.deepEqual(list.children.map((button) => button.textContent), ["Grey box task", "Pick second box"]);
   assert.deepEqual(placeList.children.map((button) => button.textContent), ["Place grey box"]);
-  assert.equal(placeList.children[0].disabled, true, "Place still requires a held box");
+  assert.equal(placeList.children[0].disabled, false, "Place can be selected before Pick");
   const originalButton = list.children[0];
   f.state.taskShortcuts.shortcuts[0].name = "<img src=x onerror=alert(1)>";
   f.context.renderTaskShortcuts();
   assert.equal(list.children[0], originalButton, "Status updates and renames must preserve button focus");
   assert.equal(originalButton.textContent, "<img src=x onerror=alert(1)>");
-  assert.equal(originalButton.className, "requires-unlock");
+  assert.equal(originalButton.className, "shortcut-selection");
   assert.equal(originalButton.disabled, false);
   const requested = [];
   const runner = f.context.runTaskShortcut;
   f.context.runTaskShortcut = (id) => requested.push(id);
   placeList.children[0].listeners.click();
   list.children[1].listeners.click();
-  assert.deepEqual(requested, ["place-1", "shortcut-2"]);
-  assert.equal(f.byId("task-shortcut-select").value, "shortcut-2");
+  assert.deepEqual(requested, [], "Selection never commands motion");
+  assert.equal(f.state.selectedShortcuts.pick, "shortcut-2");
+  assert.equal(f.state.selectedShortcuts.place, "place-1");
+  assert.equal(f.byId("task-shortcut-select").value, "shortcut-1", "Management selection is independent");
+  list.children[1].listeners.click();
+  assert.equal(f.state.selectedShortcuts.pick, null);
+  list.children[0].listeners.click();
+  assert.equal(list.children[0]["aria-pressed"], "true");
   f.context.runTaskShortcut = runner;
   f.byId("task-shortcut-select").value = "shortcut-1";
   await Promise.all([runner("shortcut-2"), runner("shortcut-2")]);
@@ -338,7 +345,9 @@ async function shortcutButtonChecks() {
     [/unavailable/, (f) => { f.state.taskShortcuts.available = false; }],
   ]) {
     const gated = fixture(); change(gated); gated.context.renderTaskShortcuts();
-    const button = gated.byId("task-shortcut-pick-buttons").children[0];
+    gated.state.selectedShortcuts.pick = "shortcut-1";
+    gated.context.renderTaskShortcuts();
+    const button = gated.byId("run-selected-shortcuts");
     assert.equal(button.disabled, true);
     assert.match(button.title, reason);
   }
@@ -370,6 +379,7 @@ async function shortcutButtonChecks() {
   removed.context.renderTaskShortcuts();
   assert.equal(removed.byId("task-shortcut-pick-buttons").children[0].textContent, second.name);
   removed.state.taskShortcuts.shortcuts[0].action = "place";
+  removed.state.taskShortcuts.shortcuts[0].place = shortcut("place").place;
   removed.context.renderTaskShortcuts();
   assert.equal(removed.byId("task-shortcut-pick-buttons").children.length, 0,
     "Editing an action must remove the shortcut from its old group");
@@ -728,17 +738,18 @@ async function navigationCarryChecks() {
   named.navigate_end = { enabled: true, preset_id: "dropoff" };
   const preview = fixture(named);
   preview.state.presets[0].id = destinationId;
+  preview.state.selectedShortcuts = { pick: named.id, place: null };
   preview.context.renderTaskShortcuts();
-  assert.match(preview.byId("task-shortcut-preview").textContent, /^Navigate to Loading bay →/);
+  assert.match(preview.byId("task-shortcut-preview").textContent, /^Grey box task: Navigate to Loading bay →/);
   assert.match(preview.byId("task-shortcut-preview").textContent, /→ Navigate to Drop off$/);
   assert.ok(!preview.byId("task-shortcut-preview").textContent.includes(destinationId));
   preview.state.presets[0].label = "Renamed loading bay";
   preview.context.renderTaskShortcuts();
-  assert.match(preview.byId("task-shortcut-preview").textContent, /^Navigate to Renamed loading bay →/);
+  assert.match(preview.byId("task-shortcut-preview").textContent, /^Grey box task: Navigate to Renamed loading bay →/);
   assert.equal(preview.state.taskShortcuts.shortcuts[0].navigate_start.preset_id, destinationId);
   preview.state.presets = [];
   preview.context.renderTaskShortcuts();
-  assert.match(preview.byId("task-shortcut-preview").textContent, /^Navigate to unavailable destination →/);
+  assert.match(preview.byId("task-shortcut-preview").textContent, /^Grey box task: Navigate to unavailable destination →/);
 
   for (const action of ["pick", "place"]) {
     for (const before of [false, true]) for (const after of [false, true]) for (const carry of [false, true]) {
@@ -839,5 +850,110 @@ async function navigationCarryChecks() {
   assert.equal(editor.byId("shortcut-carry-start-enabled").disabled, false);
 }
 
-(async () => { await sequenceChecks(); await failureChecks(); await overlappingSaveChecks(); await shortcutButtonChecks(); await editorChecks(); await profileTargetChecks(); await provisionalTargetChecks(); await numericBoxIdChecks(); await dockingDropdownChecks(); await boxAndTableDropdownChecks(); await boxProfileNameChecks(); await navigationCarryChecks(); })()
+async function pairedShortcutChecks() {
+  function pair(fast = false) {
+    const f = fixture(shortcut(), fast);
+    const place = shortcut("place");
+    place.id = "place-1"; place.name = "Place box";
+    f.state.taskShortcuts.shortcuts.push(place);
+    f.state.selectedShortcuts = { pick: "shortcut-1", place: "place-1" };
+    return f;
+  }
+  for (const fast of [false, true]) {
+    const f = pair(fast);
+    await f.context.runSelectedShortcuts();
+    if (fast) await flush();
+    else {
+      f.state.taskShortcuts.shortcuts[1].posture.height = 0.60;
+      for (let index = 0; index < 10; index++) {
+        assert.equal(f.commands().length, index + 1);
+        await f.finish();
+      }
+    }
+    assert.deepEqual(f.commands().map((call) => call.payload.kind || "posture"),
+      ["fine_align", "posture", "pick", "posture", "undock", "fine_align", "posture", "place", "posture", "undock"]);
+    assert.equal(f.commands()[6].payload.height, 0.48, "Place uses its initial snapshot");
+    assert.equal(f.confirmations.length, 1);
+    assert.equal(f.state.guidedWorkflow.completed, true);
+    assert.equal(f.state.status.manipulation_state.state, "EMPTY");
+  }
+  const extended = pair();
+  extended.state.taskShortcuts.shortcuts[0].carry_end = { enabled: true, pose: "a" };
+  extended.state.taskShortcuts.shortcuts[0].navigate_end = { enabled: true, preset_id: "loading-bay" };
+  extended.state.taskShortcuts.shortcuts[1].navigate_start = { enabled: true, preset_id: "dropoff" };
+  extended.state.taskShortcuts.shortcuts[1].carry_start = { enabled: true, pose: "b" };
+  await extended.context.runSelectedShortcuts();
+  for (let index = 0; index < 14; index++) await extended.finish();
+  assert.deepEqual(extended.commands().map((call) => call.payload.kind || "posture"),
+    ["fine_align", "posture", "pick", "posture", "undock", "move_carry_pose", "navigate",
+      "navigate", "move_carry_pose", "fine_align", "posture", "place", "posture", "undock"]);
+  assert.equal(extended.state.guidedWorkflow.completed, true);
+
+  const waiting = pair();
+  await waiting.context.runSelectedShortcuts();
+  for (let index = 0; index < 4; index++) await waiting.finish();
+  waiting.state.status.manipulation_state.state = "EMPTY";
+  await waiting.finish();
+  assert.equal(waiting.commands().length, 5, "Place waits for HOLDING even after successful Pick stages");
+  waiting.state.status.manipulation_state.state = "HOLDING";
+  waiting.context.updateGuidedWorkflow();
+  await flush();
+  assert.equal(waiting.commands().length, 6);
+  waiting.state.status.docking_profiles.profiles[1].tag_id = 99;
+  await waiting.finish();
+  assert.equal(waiting.commands().length, 6, "Place rejects changed captured calibration");
+
+  const unknown = pair();
+  await unknown.context.runSelectedShortcuts();
+  for (let index = 0; index < 5; index++) await unknown.finish();
+  await unknown.finish("OUTCOME_UNKNOWN");
+  assert.equal(unknown.state.guidedWorkflow.resumeBlocked, true);
+  await unknown.context.continueGuidedWorkflow();
+  assert.equal(unknown.commands().length, 6);
+
+  const invalid = pair();
+  invalid.state.taskShortcuts.shortcuts[1].place.table_profile_id = "missing";
+  await invalid.context.runSelectedShortcuts();
+  assert.equal(invalid.commands().length, 0, "Validate Place before starting Pick");
+
+  const failed = pair();
+  await failed.context.runSelectedShortcuts();
+  await failed.finish("ABORTED");
+  assert.equal(failed.commands().length, 1);
+  failed.state.status.execution_unlock_remaining_sec = 30;
+  await failed.context.continueGuidedWorkflow();
+  for (let index = 0; index < 10; index++) await failed.finish();
+  assert.equal(failed.state.guidedWorkflow.completed, true);
+  assert.equal(failed.commands().filter((call) => call.payload.kind === "pick").length, 1);
+
+  for (const pause of ["stop", "disconnect"]) {
+    const f = pair();
+    await f.context.runSelectedShortcuts();
+    for (let index = 0; index < 4; index++) await f.finish();
+    if (pause === "stop") await f.context.stopGuidedWorkflow();
+    else f.context.pauseShortcutConnection();
+    await f.finish();
+    assert.equal(f.commands().length, 5, "No automatic handoff after interruption");
+    if (pause === "disconnect") {
+      f.state.statusConnected = true;
+      await f.context.unlockExecution();
+    } else f.state.status.execution_unlock_remaining_sec = 30;
+    await f.context.continueGuidedWorkflow();
+    await flush();
+    assert.equal(f.commands().length, 6, "Continue advances past completed Pick");
+    assert.equal(f.state.guidedWorkflow.kind, "place");
+    for (let index = 0; index < 5; index++) await f.finish();
+    assert.equal(f.state.guidedWorkflow.completed, true);
+  }
+  const removed = pair();
+  removed.state.taskShortcuts.shortcuts[0].action = "place";
+  removed.state.taskShortcuts.shortcuts[0].place = shortcut("place").place;
+  removed.context.renderTaskShortcuts();
+  assert.equal(removed.state.selectedShortcuts.pick, null);
+  removed.state.taskShortcuts.shortcuts = [];
+  removed.context.renderTaskShortcuts();
+  assert.equal(removed.state.selectedShortcuts.place, null);
+}
+
+(async () => { await pairedShortcutChecks(); await sequenceChecks(); await failureChecks(); await overlappingSaveChecks(); await shortcutButtonChecks(); await editorChecks(); await profileTargetChecks(); await provisionalTargetChecks(); await numericBoxIdChecks(); await dockingDropdownChecks(); await boxAndTableDropdownChecks(); await boxProfileNameChecks(); await navigationCarryChecks(); })()
   .catch((error) => { console.error(error); process.exitCode = 1; });

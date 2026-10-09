@@ -585,16 +585,25 @@ box-based Dock or Pick. Navigation uses the existing localization, Nav2-idle,
 Collision Monitor, and task-admission checks. A failed or canceled navigation or
 carry move stops progression just like a failed combo stage.
 
-Each saved shortcut appears as a named amber button in a separate **Pick** or
-**Place** row, preserving saved order within each action. The
-selector inside **Manage shortcuts** is used for editing, duplicating, or
-deleting definitions; running a button uses that button's shortcut ID.
+Each saved shortcut appears as a named selection button in a separate **Pick**
+or **Place** row, preserving saved order within each action. Select at most one
+shortcut in each row; clicking the selected button clears it. Selection commands
+no motion and is available while physical motion is locked. The selector inside
+**Manage shortcuts** remains independent and is used for editing, duplicating,
+or deleting definitions.
 
 To execute, connect live status, turn off **Plan only**, unlock physical motion,
-and click the shortcut's button. Buttons are disabled while execution is
-blocked or the manipulation state is incompatible with Pick/Place. One
-confirmation lists all enabled stages; each
-stage uses the existing ROS action or posture service and advances only after
+and click **Run selected**. A single selection runs that shortcut; selecting both
+runs every enabled Pick stage followed automatically by every enabled Place stage.
+A pair requires manipulation state `EMPTY`; a single Place requires `HOLDING`.
+One confirmation lists both shortcuts and their stages. Both definitions and
+referenced configurations are captured before execution; editing them does not
+change the running sequence. Place waits for Pick to finish successfully and for
+manipulation state `HOLDING`. Progress identifies the active shortcut and stage.
+**Stop sequence** prevents further stages, and **Continue sequence** resumes the
+current stage after review without replaying completed shortcuts. Selections
+remain available for another run but are not saved across page reloads.
+Each stage uses the existing ROS action or posture service and advances only after
 success. A status disconnect pauses progression. An already submitted command
 may finish; after reconnecting, verify its outcome, unlock again, and use
 **Continue sequence**. Unknown outcomes block continuation. Reloading the page

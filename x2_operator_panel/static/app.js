@@ -19,6 +19,7 @@
     guidedWorkflow: null,
     guidedSubmitting: false,
     taskShortcuts: { available: false, shortcuts: [], detail: "Loading shortcuts…" },
+    selectedShortcuts: { pick: null, place: null },
     shortcutDraft: null,
     shortcutSaving: false,
     statusConnected: false,
@@ -1076,12 +1077,33 @@
     return select.value;
   }
 
+  function selectedTaskShortcuts() {
+    const selected = state.selectedShortcuts ||= { pick: null, place: null };
+    return ["pick", "place"].flatMap((action) => {
+      const item = state.taskShortcuts.shortcuts.find((entry) => entry.id === selected[action] && entry.action === action);
+      if (!item) selected[action] = null;
+      return item ? [item] : [];
+    });
+  }
+
+  function shortcutSelectionLocked() {
+    const workflow = state.guidedWorkflow;
+    return state.guidedSubmitting || !!(workflow && !workflow.failed && !workflow.completed);
+  }
+
   function renderTaskShortcuts() {
     if (!state.taskShortcuts) return;
     const catalog = state.taskShortcuts;
     shortcutOptions("task-shortcut-select", catalog.shortcuts.map((item) => [item.id, item.name]), "Choose a shortcut");
     const item = shortcutSelected();
-    byId("task-shortcut-preview").textContent = item ? shortcutDescription(item) : "Choose a shortcut button to review and run its sequence.";
+    const selected = selectedTaskShortcuts();
+    byId("task-shortcut-preview").textContent = selected.length
+      ? selected.map((entry) => `${entry.name}: ${shortcutDescription(entry)}`).join(" → ")
+      : "Select one Pick and/or one Place shortcut, then Run selected.";
+    const run = byId("run-selected-shortcuts");
+    const runReason = selected.length ? shortcutUnavailableReason(selected[0]) : "Select a shortcut first.";
+    run.disabled = !!runReason;
+    run.title = runReason || "Run the selected shortcuts in Pick → Place order";
     byId("task-shortcut-status").textContent = catalog.available ? `${catalog.shortcuts.length} saved shortcut(s).` : catalog.detail;
     for (const action of ["pick", "place"]) {
       const entries = catalog.shortcuts.filter((entry) => entry.action === action);
@@ -1090,11 +1112,12 @@
       if (list.dataset.shortcuts !== signature) {
         list.replaceChildren(...entries.map((entry) => {
           const button = document.createElement("button");
-          button.type = "button"; button.className = "requires-unlock";
+          button.type = "button"; button.className = "shortcut-selection";
           button.addEventListener("click", () => {
-            byId("task-shortcut-select").value = entry.id;
+            if (shortcutSelectionLocked()) return;
+            const selected = state.selectedShortcuts;
+            selected[action] = selected[action] === entry.id ? null : entry.id;
             renderTaskShortcuts();
-            runTaskShortcut(entry.id);
           });
           return button;
         }));
@@ -1104,10 +1127,10 @@
         ? `No saved ${action === "pick" ? "Pick" : "Place"} shortcuts. Open Manage shortcuts to create one.` : "Shortcuts unavailable.";
       entries.forEach((entry, index) => {
         const button = list.children[index];
-        const reason = shortcutUnavailableReason(entry);
         button.textContent = entry.name;
-        button.disabled = !!reason;
-        button.title = reason || shortcutDescription(entry);
+        button.disabled = !catalog.available || shortcutSelectionLocked();
+        button.setAttribute("aria-pressed", String(state.selectedShortcuts[action] === entry.id));
+        button.title = shortcutDescription(entry);
       });
     }
     for (const id of ["edit", "duplicate", "delete"]) byId(`task-shortcut-${id}`).disabled = !item || !catalog.available;
@@ -1302,7 +1325,53 @@
     renderGuidedWorkflow();
   }
 
-  async function runTaskShortcut(shortcutId = null) {
+  function createShortcutWorkflow(item, status) {
+    const snapshot = JSON.parse(JSON.stringify(item));
+    if ((item.action === "pick" && item.carry_start?.enabled) ||
+        (item.action === "place" && item.carry_end?.enabled)) throw new Error("Carry poses require a held box: enable before Place or after Pick.");
+    const dock = item.dock.enabled && status.docking_profiles?.profiles?.find((entry) => entry.id === item.dock.profile_id);
+    const workflow = { shortcut: snapshot, kind: item.action, label: `${item.name} (${item.action === "pick" ? "Pick" : "Place"})`,
+      instanceId: item.box?.instance_id || null, fixedInstance: !!item.box?.instance_id, boxTarget: dock?.target_source === "box",
+      profileId: item.dock.enabled ? item.dock.profile_id : "", undockProfileId: item.undock.enabled ? item.undock.profile_id : "",
+      posture: { height: item.posture.height, waist_yaw: item.posture.waist_yaw, wait_for_settle: true },
+      returnPosture: { height: item.return_posture.height, waist_yaw: item.return_posture.waist_yaw, wait_for_settle: true },
+      placeTarget: snapshot.place?.mode === "manual" ? snapshot.place.pose : null,
+      requiresTable: item.action === "place" && item.place.mode === "automatic", tableId: item.place?.table_profile_id || "",
+      steps: shortcutSteps(snapshot), navigationTargets: {},
+      step: 0, operationId: null, useManualUnlock: true, confirmNav2Idle: !status.navigation?.goal_status?.available };
+    if (workflow.boxTarget && !item.box) throw new Error("Box docking requires a box profile.");
+    validateShortcutReferences(workflow);
+    for (const stage of ["navigate_start", "navigate_end"]) {
+      if (snapshot[stage]?.enabled) workflow.navigationTargets[stage] = JSON.parse(JSON.stringify(
+        state.presets.find((entry) => entry.id === snapshot[stage].preset_id)));
+    }
+    workflow.dockSignature = item.dock.enabled ? comboDock(item.dock.profile_id) : null;
+    workflow.undockSignature = item.undock.enabled ? comboDock(item.undock.profile_id) : null;
+    workflow.tableSignature = workflow.requiresTable ? JSON.stringify(status.table_profiles.profiles.find((table) => table.id === workflow.tableId)) : null;
+    return workflow;
+  }
+
+  function completeShortcutWorkflow(workflow) {
+    if (workflow.cancelRequested) return;
+    const remaining = workflow.remainingWorkflows || [];
+    if (remaining.length) {
+      const next = remaining[0];
+      Object.assign(workflow, next, {
+        remainingWorkflows: remaining.slice(1), sequencePosition: workflow.sequencePosition + 1,
+        useManualUnlock: false, operationSeen: false, completed: false, message: "",
+      });
+    } else {
+      workflow.message = workflow.sequenceLength > 1 ? "Pick → Place sequence completed." : `${workflow.label} sequence completed.`;
+      workflow.completed = true;
+    }
+  }
+
+  async function runSelectedShortcuts() {
+    const selected = selectedTaskShortcuts();
+    if (selected.length) await runTaskShortcut(selected[0].id, selected);
+  }
+
+  async function runTaskShortcut(shortcutId = null, selections = null) {
     if (state.guidedSubmitting || (state.guidedWorkflow && !state.guidedWorkflow.failed && !state.guidedWorkflow.completed)) return;
     const selected = shortcutId === null ? shortcutSelected()
       : state.taskShortcuts?.shortcuts.find((item) => item.id === shortcutId);
@@ -1312,8 +1381,12 @@
       const [catalog, status, destinations] = await Promise.all([api("/api/task-shortcuts"), api("/api/status"), api("/api/presets")]);
       state.presets = destinations.presets;
       state.taskShortcuts = catalog; applyStatus(status);
-      const item = catalog.available && catalog.shortcuts.find((entry) => entry.id === selected.id);
-      if (!item) throw new Error("The shortcut is unavailable; refresh the list.");
+      const items = (selections || [selected]).map((selection) => {
+        const item = catalog.available && catalog.shortcuts.find((entry) => entry.id === selection.id && entry.action === selection.action);
+        if (!item) throw new Error("The shortcut is unavailable; refresh the list.");
+        return item;
+      });
+      const item = items[0];
       if (!state.statusConnected || state.authenticated === false) throw new Error("Connect live status before starting a shortcut.");
       if (byId("plan-only").checked || !(executionUnlockRemaining() > 0)) throw new Error("Turn off Plan only and unlock physical motion before running a shortcut.");
       const expected = item.action === "pick" ? "EMPTY" : "HOLDING";
@@ -1321,29 +1394,12 @@
       if (status.task_admission?.blocked || status.navigation?.goal_status?.active ||
           ["running", "retrying", "paused"].includes(status.manipulation_task?.status) ||
           (status.operations || []).some((operation) => activeStatuses.includes(operation.status))) throw new Error("Wait for the active operation to finish.");
-      const snapshot = JSON.parse(JSON.stringify(item));
-      if ((item.action === "pick" && item.carry_start?.enabled) ||
-          (item.action === "place" && item.carry_end?.enabled)) throw new Error("Carry poses require a held box: enable before Place or after Pick.");
-      const dock = item.dock.enabled && status.docking_profiles?.profiles?.find((entry) => entry.id === item.dock.profile_id);
-      const workflow = { shortcut: snapshot, kind: item.action, label: `${item.name} (${item.action === "pick" ? "Pick" : "Place"})`,
-        instanceId: item.box?.instance_id || null, fixedInstance: !!item.box?.instance_id, boxTarget: dock?.target_source === "box",
-        profileId: item.dock.enabled ? item.dock.profile_id : "", undockProfileId: item.undock.enabled ? item.undock.profile_id : "",
-        posture: { height: item.posture.height, waist_yaw: item.posture.waist_yaw, wait_for_settle: true },
-        returnPosture: { height: item.return_posture.height, waist_yaw: item.return_posture.waist_yaw, wait_for_settle: true },
-        placeTarget: snapshot.place?.mode === "manual" ? snapshot.place.pose : null,
-        requiresTable: item.action === "place" && item.place.mode === "automatic", tableId: item.place?.table_profile_id || "",
-        steps: shortcutSteps(snapshot), navigationTargets: {},
-        step: 0, operationId: null, useManualUnlock: true, confirmNav2Idle: !status.navigation?.goal_status?.available };
-      if (workflow.boxTarget && !item.box) throw new Error("Box docking requires a box profile.");
-      validateShortcutReferences(workflow);
-      for (const stage of ["navigate_start", "navigate_end"]) {
-        if (snapshot[stage]?.enabled) workflow.navigationTargets[stage] = JSON.parse(JSON.stringify(
-          state.presets.find((entry) => entry.id === snapshot[stage].preset_id)));
-      }
-      workflow.dockSignature = item.dock.enabled ? comboDock(item.dock.profile_id) : null;
-      workflow.undockSignature = item.undock.enabled ? comboDock(item.undock.profile_id) : null;
-      workflow.tableSignature = workflow.requiresTable ? JSON.stringify(status.table_profiles.profiles.find((table) => table.id === workflow.tableId)) : null;
-      if (!window.confirm(`Run physical shortcut ${item.name}: ${shortcutDescription(item)}? Remaining stages run automatically.${workflow.confirmNav2Idle ? " Confirm Nav2 is idle." : ""}`)) return;
+      const workflows = items.map((entry) => createShortcutWorkflow(entry, status));
+      const workflow = workflows[0];
+      workflow.remainingWorkflows = workflows.slice(1);
+      workflow.sequencePosition = 1;
+      workflow.sequenceLength = workflows.length;
+      if (!window.confirm(`Run physical shortcut sequence: ${items.map((entry) => `${entry.name}: ${shortcutDescription(entry)}`).join(" → ")}? Remaining stages run automatically.${workflow.confirmNav2Idle ? " Confirm Nav2 is idle." : ""}`)) return;
       state.guidedWorkflow = workflow; setError("");
     } catch (error) { setError(error.message); }
     finally { state.guidedSubmitting = false; renderGuidedWorkflow(); }
@@ -1544,8 +1600,7 @@
       }
       workflow.step += 1;
       if (workflow.step === workflowSteps(workflow).length) {
-        workflow.message = `${workflow.label} sequence completed.`;
-        workflow.completed = true;
+        completeShortcutWorkflow(workflow);
       }
     }
     scheduleGuidedStep();
@@ -1651,12 +1706,13 @@
       const stepLabel = guidedStepLabel(workflowSteps(workflow)[workflow.step], workflow.label);
       button.textContent = `Running ${workflow.label}: ${stepLabel} (${workflow.profileId || (workflow.shortcut ? "Dock disabled" : "server default")}${workflow.requiresTable ? `, table ${workflow.tableId}` : ", no table tag required"})`;
       button.disabled = true;
-      message.textContent = workflow.cancelRequested ? "Stopping sequence; no further steps will start."
+      const sequenceProgress = workflow.sequenceLength > 1 ? `${workflow.label} (${workflow.sequencePosition}/${workflow.sequenceLength}): ` : "";
+      message.textContent = sequenceProgress + (workflow.cancelRequested ? "Stopping sequence; no further steps will start."
         : workflow.operationId && workflowSteps(workflow)[workflow.step] === "fine_align" &&
           (!state.status?.docking_profiles?.available || (workflow.requiresTable && !state.status?.table_profiles?.available))
           ? "Waiting for docking and table profile configuration before advancing."
         : workflow.operationId ? `Waiting for ${stepLabel} to finish.`
-          : guidedWaitReason(workflow) || `Starting ${stepLabel} automatically (${workflow.step + 1}/${workflowSteps(workflow).length}).`;
+          : guidedWaitReason(workflow) || `Starting ${stepLabel} automatically (${workflow.step + 1}/${workflowSteps(workflow).length}).`);
     } else {
       button.textContent = `Dock → Set Height → ${label} → Default Height → Undock`;
       let tableProblem = "";
@@ -1860,7 +1916,8 @@
       workflow.message = "";
       workflow.confirmNav2Idle = missingNavStatus;
       workflow.useManualUnlock = true;
-      workflow.completed = nextStep === workflowSteps(workflow).length;
+      workflow.completed = false;
+      if (nextStep === workflowSteps(workflow).length) completeShortcutWorkflow(workflow);
       if (workflowSteps(workflow)[nextStep] === "manipulate" && workflow.kind === "pick" && !workflow.boxTarget && !workflow.fixedInstance) workflow.instanceId = null;
       setError("");
     } catch (error) { setError(error.message); }
@@ -2136,6 +2193,7 @@
   byId("destination-use-robot").addEventListener("click", () => copyDestinationPose("robot"));
   byId("destination-use-map").addEventListener("click", () => copyDestinationPose("map"));
   byId("task-shortcut-select").addEventListener("change", renderTaskShortcuts);
+  byId("run-selected-shortcuts").addEventListener("click", runSelectedShortcuts);
   byId("task-shortcut-new").addEventListener("click", () => editTaskShortcut("new"));
   byId("task-shortcut-edit").addEventListener("click", () => editTaskShortcut("edit"));
   byId("task-shortcut-duplicate").addEventListener("click", () => editTaskShortcut("duplicate"));
