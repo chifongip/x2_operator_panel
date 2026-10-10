@@ -300,7 +300,16 @@ physical `/fine_align`; the middle stage uses `/pick_box` or `/place_box` (with
 the same optional manual place target as the separate Place control); Undock
 uses `/undock`. **Set Height** uses the operator's current **Height** and
 **Waist yaw** fields, which should be set for the object being handled; object
-profiles do not automatically choose a posture. **Default Height** restores the
+profiles do not automatically choose a posture. Quick combo and saved shortcuts
+accept **Delay before Pick/Place (seconds)** from 0 to 300 seconds, including
+fractional seconds; 0 disables the delay. The countdown starts after Set Height
+succeeds (or before Pick/Place when a shortcut disables posture). This adds time
+without verifying that the posture target was reached. Stop sequence cancels the
+wait; Continue restarts the full delay. Settings are captured at sequence start.
+Quick combo resets the delay to 0 on page reload; shortcuts save their own value.
+Status and existing admission checks are refreshed before Pick/Place is sent.
+
+**Default Height** restores the
 policy default (`height=0.64 m`, `waist_yaw=0.0 rad`) after manipulation and before
 undocking. Both posture stages call `/set_locomanipulation_posture` with
 `wait_for_settle=true` and wait for a successful service result. This confirms

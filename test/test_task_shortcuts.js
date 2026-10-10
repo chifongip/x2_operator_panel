@@ -19,6 +19,8 @@ function shortcut(action = "pick") {
 
 function fixture(item = shortcut(), fast = false) {
   const fields = {}, calls = [], confirmations = [];
+  let now = 0, timerId = 0;
+  const timers = new Map();
   function element() {
     let value = "";
     return { get value() { return value; }, set value(next) { value = String(next); },
@@ -62,7 +64,9 @@ function fixture(item = shortcut(), fast = false) {
     }
   }
   const context = vm.createContext({ state, byId, document: { createElement: element },
-    window: { confirm(message) { confirmations.push(message); return true; } },
+    performance: { now: () => now },
+    window: { setTimeout(callback, ms) { const id = ++timerId; timers.set(id, { callback, at: now + ms }); return id; },
+      clearTimeout(id) { timers.delete(id); }, confirm(message) { confirmations.push(message); return true; } },
     executionUnlockRemaining: () => state.status.execution_unlock_remaining_sec,
     manualPlacePoseEnabled: () => false,
     finiteField: (id) => Number(byId(id).value),
@@ -102,7 +106,16 @@ function fixture(item = shortcut(), fast = false) {
     context.updateGuidedWorkflow();
     await flush();
   }
-  return { context, state, byId, calls, commands, confirmations, finish };
+  async function advance(ms) {
+    const end = now + ms;
+    while (true) {
+      const next = [...timers.entries()].filter(([, timer]) => timer.at <= end).sort((a, b) => a[1].at - b[1].at)[0];
+      if (!next) break;
+      now = next[1].at; timers.delete(next[0]); next[1].callback(); await flush();
+    }
+    now = end; await flush();
+  }
+  return { context, state, byId, calls, commands, confirmations, finish, advance, timers };
 }
 
 async function sequenceChecks() {
@@ -1020,5 +1033,69 @@ async function rotationChecks() {
   assert.match(unavailable.context.error, /Rotation limits/);
 }
 
-(async () => { await rotationChecks(); await pairedShortcutChecks(); await sequenceChecks(); await failureChecks(); await overlappingSaveChecks(); await shortcutButtonChecks(); await editorChecks(); await profileTargetChecks(); await provisionalTargetChecks(); await numericBoxIdChecks(); await dockingDropdownChecks(); await boxAndTableDropdownChecks(); await boxProfileNameChecks(); await navigationCarryChecks(); })()
+async function delayChecks() {
+  for (const action of ["pick", "place"]) {
+    const item = shortcut(action);
+    item.pre_manipulation_delay_sec = 2.5;
+    item.posture.enabled = false;
+    const f = fixture(item);
+    await f.context.runTaskShortcut();
+    await f.finish(); // Dock completes; posture disabled.
+    assert.equal(f.commands().length, 1);
+    assert.match(f.byId("guided-workflow-status").textContent, /Waiting .* s before/);
+    f.context.updateGuidedWorkflow();
+    await f.advance(2499);
+    assert.equal(f.commands().length, 1);
+    await f.advance(1);
+    assert.equal(f.commands()[1].payload.kind, action);
+    assert.equal(f.calls.filter((call) => call.path === "/api/status").length, 2);
+    f.context.updateGuidedWorkflow(); await f.advance(5000);
+    assert.equal(f.commands().length, 2);
+  }
+  const item = shortcut(); item.pre_manipulation_delay_sec = 2;
+  const f = fixture(item);
+  await f.context.runTaskShortcut(); await f.finish(); await f.finish();
+  await f.advance(1000);
+  await f.context.stopGuidedWorkflow();
+  assert.equal(f.timers.size, 0);
+  await f.advance(5000); assert.equal(f.commands().length, 2);
+  f.state.status.execution_unlock_remaining_sec = 30;
+  await f.context.continueGuidedWorkflow(); await flush();
+  await f.advance(1999); assert.equal(f.commands().length, 2);
+  await f.advance(1); assert.equal(f.commands()[2].payload.kind, "pick");
+
+  for (const interrupt of ["disconnect", "logout", "replace", "failure"]) {
+    const g = fixture(item);
+    await g.context.runTaskShortcut(); await g.finish(); await g.finish();
+    if (interrupt === "disconnect") g.context.pauseShortcutConnection();
+    if (interrupt === "logout") g.state.authenticated = false;
+    if (interrupt === "replace") g.state.guidedWorkflow = null;
+    if (interrupt === "failure") g.context.failGuidedWorkflow(g.state.guidedWorkflow, "failed");
+    await g.advance(3000);
+    assert.equal(g.commands().length, 2);
+    assert.equal(g.timers.size, 0);
+  }
+  const editor = fixture(item);
+  editor.context.editTaskShortcut("duplicate");
+  assert.equal(editor.byId("shortcut-delay").value, "2");
+  await editor.context.saveTaskShortcut({ preventDefault() {} });
+  assert.equal(editor.calls.find((call) => call.path === "/api/task-shortcuts/save").payload.pre_manipulation_delay_sec, 2);
+  assert.equal(editor.state.taskShortcuts.shortcuts[0].pre_manipulation_delay_sec, 2);
+
+  const stale = fixture(item);
+  await stale.context.runTaskShortcut(); await stale.finish(); await stale.finish();
+  const api = stale.context.api;
+  stale.context.api = async (path, options) => {
+    const result = await api(path, options);
+    if (path === "/api/status") result.visible_boxes.fresh = false;
+    return result;
+  };
+  await stale.advance(2000);
+  assert.equal(stale.commands().length, 2, "Refreshed stale detection prevents Pick");
+  for (const invalid of [-1, 301, NaN, Infinity, true, "2"]) {
+    assert.throws(() => editor.context.manipulationDelaySeconds(invalid), /between 0 and 300/);
+  }
+}
+
+(async () => { await delayChecks(); await rotationChecks(); await pairedShortcutChecks(); await sequenceChecks(); await failureChecks(); await overlappingSaveChecks(); await shortcutButtonChecks(); await editorChecks(); await profileTargetChecks(); await provisionalTargetChecks(); await numericBoxIdChecks(); await dockingDropdownChecks(); await boxAndTableDropdownChecks(); await boxProfileNameChecks(); await navigationCarryChecks(); })()
   .catch((error) => { console.error(error); process.exitCode = 1; });

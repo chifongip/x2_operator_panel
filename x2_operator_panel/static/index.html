@@ -208,6 +208,7 @@
               <h3 id="quick-combo-heading">Quick combo</h3>
               <button id="dock-manipulate-undock" class="requires-unlock" type="button" disabled>Dock → Set Height → Pick → Default Height → Undock</button>
               <p class="muted">Uses the current box, docking profile, posture, and placement settings below. Returns to 0.64 m height and 0 rad waist yaw before undocking.</p>
+              <label>Delay before Pick/Place (seconds)<input id="combo-delay" type="number" min="0" max="300" step="any" value="0"></label>
               <details class="command-details">
                 <summary>Sequence help</summary>
                 <div class="details-content muted">One confirmation runs all stages. Pick waits for a fresh box detection; automatic Place requires a table tag. Unlock again before continuing a stopped sequence.</div>
@@ -249,16 +250,23 @@
               <label>Height (m)<input id="shortcut-posture-height" type="number" step="0.01" value="0.64" min="0.30" max="0.64"></label>
               <label>Waist yaw (rad)<input id="shortcut-posture-yaw" type="number" step="0.1" value="0" data-min="-1.5708" max="1.5708"></label>
             </div></fieldset>
-            <fieldset id="shortcut-place-fields" hidden>
-              <legend>3. Place target</legend>
-              <label>Target<select id="shortcut-place-mode"><option value="automatic">Automatic from table tag</option><option value="manual">Manual pose</option></select></label>
-              <label id="shortcut-table-field">Table profile<select id="shortcut-table-profile"><option value="">Choose a table profile</option></select></label>
-              <div id="shortcut-manual-fields" class="shortcut-fields" hidden>
-                <label>Frame<select id="shortcut-place-frame"><option value="base_link">base_link</option><option value="map">map</option></select></label>
-                <label>X (m)<input id="shortcut-place-x" type="number" step="0.01" value="0.35" ></label>
-                <label>Y (m)<input id="shortcut-place-y" type="number" step="0.01" value="0" ></label>
-                <label>Z (m)<input id="shortcut-place-z" type="number" step="0.01" value="0.29" ></label>
-                <label>Yaw (rad)<input id="shortcut-place-yaw" type="number" step="0.1" value="0" ></label>
+            <fieldset>
+              <legend>Delay before Pick/Place</legend>
+              <label>Duration (s)<input id="shortcut-delay" type="number" min="0" max="300" step="any" value="0" required></label>
+            </fieldset>
+            <fieldset>
+              <legend id="shortcut-manipulation-label">3. Pick</legend>
+              <p id="shortcut-pick-summary" class="muted">Pick the box configured above. This step always runs.</p>
+              <div id="shortcut-place-fields" hidden>
+                <label>Target<select id="shortcut-place-mode"><option value="automatic">Automatic from table tag</option><option value="manual">Manual pose</option></select></label>
+                <label id="shortcut-table-field">Table profile<select id="shortcut-table-profile"><option value="">Choose a table profile</option></select></label>
+                <div id="shortcut-manual-fields" class="shortcut-fields" hidden>
+                  <label>Frame<select id="shortcut-place-frame"><option value="base_link">base_link</option><option value="map">map</option></select></label>
+                  <label>X (m)<input id="shortcut-place-x" type="number" step="0.01" value="0.35" ></label>
+                  <label>Y (m)<input id="shortcut-place-y" type="number" step="0.01" value="0" ></label>
+                  <label>Z (m)<input id="shortcut-place-z" type="number" step="0.01" value="0.29" ></label>
+                  <label>Yaw (rad)<input id="shortcut-place-yaw" type="number" step="0.1" value="0" ></label>
+                </div>
               </div>
             </fieldset>
             <fieldset><legend><label class="plan-toggle"><input id="shortcut-return-enabled" type="checkbox" checked>4. Return posture</label></legend><div class="shortcut-fields">

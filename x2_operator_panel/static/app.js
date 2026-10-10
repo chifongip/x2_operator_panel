@@ -143,7 +143,10 @@
   function returnToLogin(message) {
     if (state.guidedWorkflow?.shortcut) pauseShortcutConnection();
     state.statusConnected = false;
-    if (state.guidedWorkflow) state.guidedWorkflow.cancelRequested = true;
+    if (state.guidedWorkflow) {
+      clearManipulationDelay(state.guidedWorkflow);
+      state.guidedWorkflow.cancelRequested = true;
+    }
     state.authenticated = false;
     invalidateExecutionUnlock();
     stopCameraStreams();
@@ -1114,6 +1117,7 @@
     const boxTarget = item.box ? `${item.box.profile_id} (${item.box.instance_id ? `ID ${item.box.instance_id.replace(/^tag:/, "")}` : "visible tag at run time"})` : "";
     if (item.dock.enabled) steps.push(`Dock ${item.dock.profile_id}${item.action === "place" && item.box ? `; box reference ${boxTarget}` : ""}`);
     if (item.posture.enabled) steps.push(`Posture ${item.posture.height} m / ${item.posture.waist_yaw} rad`);
+    if (item.pre_manipulation_delay_sec) steps.push(`Wait ${item.pre_manipulation_delay_sec} s`);
     steps.push(item.action === "pick" ? `Pick ${boxTarget}`
       : item.place.mode === "automatic" ? `Place on ${item.place.table_profile_id}`
         : `Place at ${item.place.pose.frame_id} (${item.place.pose.x}, ${item.place.pose.y}, ${item.place.pose.z}), yaw ${item.place.pose.yaw}`);
@@ -1271,6 +1275,8 @@
       byId(`shortcut-carry-${stage}-pose`).disabled = incompatible;
     }
     const manual = byId("shortcut-place-mode").value === "manual";
+    byId("shortcut-manipulation-label").textContent = place ? "3. Place" : "3. Pick";
+    byId("shortcut-pick-summary").hidden = place;
     byId("shortcut-place-fields").hidden = !place;
     byId("shortcut-table-field").hidden = manual;
     byId("shortcut-manual-fields").hidden = !manual;
@@ -1294,6 +1300,7 @@
     byId("task-shortcut-management").open = true;
     byId("task-shortcut-save").disabled = state.shortcutSaving;
     byId("task-shortcut-editor").hidden = false;
+    byId("shortcut-delay").value = draft.pre_manipulation_delay_sec ?? 0;
     byId("shortcut-name").value = draft.name;
     byId("shortcut-action").value = draft.action;
     byId("shortcut-box-profile").value = "";
@@ -1345,6 +1352,7 @@
     try {
       const item = { ...(draft.id ? { id: draft.id, revision: draft.revision } : {}),
         name: byId("shortcut-name").value.trim(), action: byId("shortcut-action").value };
+      item.pre_manipulation_delay_sec = manipulationDelaySeconds(finiteField("shortcut-delay"));
       const profile = byId("shortcut-box-profile").value;
       let instance = null;
       if (byId("shortcut-box-selection").value === "fixed") {
@@ -1440,7 +1448,7 @@
     if ((item.action === "pick" && item.carry_start?.enabled) ||
         (item.action === "place" && item.carry_end?.enabled)) throw new Error("Carry poses require a held box: enable before Place or after Pick.");
     const dock = item.dock.enabled && status.docking_profiles?.profiles?.find((entry) => entry.id === item.dock.profile_id);
-    const workflow = { shortcut: snapshot, kind: item.action, label: `${item.name} (${item.action === "pick" ? "Pick" : "Place"})`,
+    const workflow = { preManipulationDelaySec: manipulationDelaySeconds(item.pre_manipulation_delay_sec ?? 0), shortcut: snapshot, kind: item.action, label: `${item.name} (${item.action === "pick" ? "Pick" : "Place"})`,
       instanceId: item.box?.instance_id || null, fixedInstance: !!item.box?.instance_id, boxTarget: dock?.target_source === "box",
       profileId: item.dock.enabled ? item.dock.profile_id : "", undockProfileId: item.undock.enabled ? item.undock.profile_id : "",
       posture: { height: item.posture.height, waist_yaw: item.posture.waist_yaw, wait_for_settle: true },
@@ -1676,7 +1684,51 @@
       rotate_start: "Rotate before combo", rotate_end: "Rotate after combo" })[step];
   }
 
+  function manipulationDelaySeconds(value) {
+    if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > 300) {
+      throw new Error("Delay before Pick/Place must be between 0 and 300 seconds.");
+    }
+    return value;
+  }
+
+  function clearManipulationDelay(workflow) {
+    if (workflow.delayTimer != null) window.clearTimeout(workflow.delayTimer);
+    workflow.delayTimer = null;
+    workflow.delayDeadline = null;
+    workflow.delayComplete = false;
+  }
+
+  function waitForManipulationDelay(workflow) {
+    if (!workflow.preManipulationDelaySec || workflow.delayComplete) return false;
+    if (workflow.delayDeadline == null) {
+      workflow.delayDeadline = performance.now() + workflow.preManipulationDelaySec * 1000;
+    }
+    if (workflow.delayTimer == null) {
+      const tick = () => {
+        workflow.delayTimer = null;
+        if (state.guidedWorkflow !== workflow || workflow.failed || workflow.cancelRequested ||
+            workflow.completed || state.authenticated === false) {
+          clearManipulationDelay(workflow);
+          return;
+        }
+        const remaining = workflow.delayDeadline - performance.now();
+        if (remaining <= 0) {
+          workflow.delayDeadline = null;
+          workflow.delayComplete = true;
+          scheduleGuidedStep();
+        } else {
+          workflow.delayTimer = window.setTimeout(tick, Math.min(250, remaining));
+        }
+        renderGuidedWorkflow();
+      };
+      workflow.delayTimer = window.setTimeout(tick, Math.min(250, Math.max(0, workflow.delayDeadline - performance.now())));
+    }
+    renderGuidedWorkflow();
+    return true;
+  }
+
   function failGuidedWorkflow(workflow, message, resumeBlocked = false) {
+    clearManipulationDelay(workflow);
     workflow.failed = true;
     workflow.message = message;
     workflow.resumeBlocked = resumeBlocked;
@@ -1822,6 +1874,7 @@
         : workflow.operationId && workflowSteps(workflow)[workflow.step] === "fine_align" &&
           (!state.status?.docking_profiles?.available || (workflow.requiresTable && !state.status?.table_profiles?.available))
           ? "Waiting for docking and table profile configuration before advancing."
+        : workflow.delayDeadline != null ? `Waiting ${(Math.max(0, workflow.delayDeadline - performance.now()) / 1000).toFixed(1)} s before ${workflow.kind === "pick" ? "Pick" : "Place"}.`
         : workflow.operationId ? `Waiting for ${stepLabel} to finish.`
           : guidedWaitReason(workflow) || `Starting ${stepLabel} automatically (${workflow.step + 1}/${workflowSteps(workflow).length}).`);
     } else {
@@ -1866,6 +1919,7 @@
       const manipulationState = state.status?.manipulation_state?.state;
       if (!["EMPTY", "HOLDING"].includes(manipulationState)) throw new Error("Verify the manipulation state before starting");
       const kind = manipulationState === "HOLDING" ? "place" : "pick";
+      const delay = manipulationDelaySeconds(finiteField("combo-delay"));
       const posture = { ...postureTarget(), wait_for_settle: true };
       const placeTarget = kind === "place" && manualPlacePoseEnabled() ? placePose() : null;
       const label = kind === "pick" ? "Pick" : "Place";
@@ -1877,8 +1931,8 @@
       const table = requiresTable ? comboTable(profileId) : null;
       const dockSignature = comboDock(profileId);
       const missingNavStatus = !state.status?.navigation?.goal_status?.available;
-      if (!window.confirm(`Run the complete physical sequence using docking profile ${profileId || "server default"}${boxTarget ? ` for box ${instanceId}` : ""} ${table ? `and table ${table.id}` : "without a table tag"}: Dock → Set Height (${posture.height.toFixed(3)} m, waist yaw ${posture.waist_yaw.toFixed(4)} rad) → ${label} → Default Height → Undock? All five steps will run automatically.${missingNavStatus ? " Nav2 status is unavailable: confirm Nav2 is idle before starting." : ""}`)) return;
-      state.guidedWorkflow = { kind, label, posture, placeTarget, profileId, dockSignature, requiresTable, boxTarget, tableId: table?.id || "", tableSignature: table ? JSON.stringify(table) : null, instanceId,
+      if (!window.confirm(`Run the complete physical sequence using docking profile ${profileId || "server default"}${boxTarget ? ` for box ${instanceId}` : ""} ${table ? `and table ${table.id}` : "without a table tag"}: Dock → Set Height (${posture.height.toFixed(3)} m, waist yaw ${posture.waist_yaw.toFixed(4)} rad) → ${delay ? `Wait ${delay} s → ` : ""}${label} → Default Height → Undock? All five steps will run automatically.${missingNavStatus ? " Nav2 status is unavailable: confirm Nav2 is idle before starting." : ""}`)) return;
+      state.guidedWorkflow = { preManipulationDelaySec: delay, kind, label, posture, placeTarget, profileId, dockSignature, requiresTable, boxTarget, tableId: table?.id || "", tableSignature: table ? JSON.stringify(table) : null, instanceId,
         step: 0, operationId: null, confirmNav2Idle: missingNavStatus, useManualUnlock: true };
       setError("");
       starting = false;
@@ -1892,6 +1946,7 @@
     const workflow = state.guidedWorkflow;
     if (!workflow || workflow.failed || workflow.completed || workflow.cancelRequested || workflow.operationId || state.guidedSubmitting) return;
     if (state.authenticated === false) return;
+    if (workflowSteps(workflow)[workflow.step] === "manipulate" && waitForManipulationDelay(workflow)) return;
     if (guidedWaitReason(workflow)) return;
     const step = workflowSteps(workflow)[workflow.step];
     const resolvingBox = !workflow.instanceId && ((step === "manipulate" && workflow.kind === "pick") ||
@@ -1926,8 +1981,8 @@
         await api("/api/unlock/execution", { method: "POST", body: JSON.stringify({ confirmed: true }) });
       }
       if (workflow.failed || workflow.cancelRequested || state.guidedWorkflow !== workflow || state.authenticated === false) return;
-      if (step === "manipulate" && workflow.kind === "pick") {
-        // The browser snapshot can outlive the detection freshness window.
+      if (step === "manipulate") {
+        // Refresh admission and targets after the optional delay.
         applyStatus(await api("/api/status"));
         if (workflow.failed || workflow.cancelRequested || state.guidedWorkflow !== workflow || state.authenticated === false) return;
       }
@@ -2021,6 +2076,7 @@
       const configuration = workflow.shortcut ? shortcutDescription(workflow.shortcut)
         : `docking profile ${workflow.profileId || "server default"} and table ${workflow.tableId}`;
       if (!window.confirm(`Continue ${workflow.label} from ${label} using ${configuration}? Verify robot state before retrying.${["rotate_start", "rotate_end"].includes(workflowSteps(workflow)[nextStep]) ? " Retrying rotation commands the FULL duration again; review the current orientation." : ""} Remaining steps will run automatically.${missingNavStatus ? " Confirm Nav2 is idle." : ""}`)) return;
+      clearManipulationDelay(workflow);
       workflow.step = nextStep;
       workflow.failed = false;
       workflow.cancelRequested = false;
@@ -2044,6 +2100,7 @@
   async function stopGuidedWorkflow() {
     const workflow = state.guidedWorkflow;
     if (!workflow || workflow.failed || workflow.completed || workflow.cancelRequested) return;
+    clearManipulationDelay(workflow);
     workflow.cancelRequested = true;
     renderGuidedWorkflow();
     try {

@@ -9,6 +9,8 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
 
 function fixture(kind, fast = false, completionStatus = "SUCCEEDED") {
   const calls = [], fields = {}, confirmations = [];
+  let now = 0, timerId = 0;
+  const timers = new Map();
   const state = {
     authenticated: true, guidedWorkflow: null, guidedSubmitting: false,
     selectedBoxId: "box-1",
@@ -33,7 +35,10 @@ function fixture(kind, fast = false, completionStatus = "SUCCEEDED") {
   const context = vm.createContext({
     state,
     byId: (id) => fields[id] ||= { checked: false },
-    window: { confirm: (message) => { confirmations.push(message); return true; } },
+    performance: { now: () => now },
+    finiteField: (id) => Number(fields[id]?.value ?? 0),
+    window: { setTimeout(callback, ms) { const id = ++timerId; timers.set(id, { callback, at: now + ms }); return id; },
+      clearTimeout(id) { timers.delete(id); }, confirm: (message) => { confirmations.push(message); return true; } },
     setError: (message) => { context.error = message; },
     applyStatus: (status) => { state.status = status; context.updateGuidedWorkflow(); },
     executionUnlockRemaining: () => state.status.execution_unlock_remaining_sec,
@@ -77,7 +82,16 @@ function fixture(kind, fast = false, completionStatus = "SUCCEEDED") {
     await flush();
   }
   const commands = () => calls.filter((call) => ["/api/actions", "/api/posture"].includes(call.path));
-  return { context, state, calls, fields, confirmations, commands, finish };
+  async function advance(ms) {
+    const end = now + ms;
+    while (true) {
+      const next = [...timers.entries()].filter(([, timer]) => timer.at <= end).sort((a, b) => a[1].at - b[1].at)[0];
+      if (!next) break;
+      now = next[1].at; timers.delete(next[0]); next[1].callback(); await flush();
+    }
+    now = end; await flush();
+  }
+  return { context, state, calls, fields, confirmations, commands, finish, advance };
 }
 
 async function fullSequence(kind, fast = false) {
@@ -270,7 +284,26 @@ async function boxBindingChecks() {
   assert.equal(mismatch.state.guidedWorkflow.resumeBlocked, true);
 }
 
-(async () => {
+async function quickDelayChecks() {
+  for (const kind of ["pick", "place"]) {
+    const f = fixture(kind);
+    f.fields["combo-delay"] = { value: "1.5" };
+    await f.context.advanceGuidedWorkflow();
+    assert.match(f.confirmations[0], /Wait 1.5 s/);
+    f.fields["combo-delay"].value = "0";
+    await f.finish(); await f.finish();
+    await f.advance(1499); assert.equal(f.commands().length, 2);
+    await f.advance(1); assert.equal(f.commands()[2].payload.kind, kind);
+  }
+  const f = fixture("place");
+  f.fields["combo-delay"] = { value: "1" };
+  await f.context.advanceGuidedWorkflow(); await f.finish(); await f.finish();
+  f.state.status.manipulation_state.state = "UNKNOWN";
+  await f.advance(1000);
+  assert.equal(f.commands().length, 2, "Admission checks must still block after delay");
+}
+
+(async () => { await quickDelayChecks();
   await tableBindingChecks();
   await boxBindingChecks();
   for (const kind of ["pick", "place"]) {

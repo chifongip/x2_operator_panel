@@ -55,7 +55,9 @@ def validate_shortcut(value):
     action = value.get("action")
     if action not in ("pick", "place"):
         raise ShortcutError("Choose Pick or Place")
-    result = {"name": name.strip(), "action": action}
+    result = {"name": name.strip(), "action": action,
+              "pre_manipulation_delay_sec": _number(
+                  value.get("pre_manipulation_delay_sec", 0), "Delay before Pick/Place", 0, 300)}
     for stage in ("navigate_start", "navigate_end", "carry_start", "carry_end"):
         settings = _mapping(value.get(stage, {"enabled": False}), stage)
         enabled = settings.get("enabled")
