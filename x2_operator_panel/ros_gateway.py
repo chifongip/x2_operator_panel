@@ -60,6 +60,7 @@ from sensor_msgs.msg import Image, JointState, LaserScan
 from std_msgs.msg import Float32
 from tf2_ros import Buffer, TransformException, TransformListener
 
+from x2_operator_panel.auth import SessionStore
 from x2_operator_panel.rotation_limits import RotationLimitsMonitor
 from x2_operator_panel.docking_profiles import DockingProfileMonitor, unavailable_catalog
 from x2_operator_panel.box_profiles import BoxProfileMonitor
@@ -187,6 +188,7 @@ class QueuedCommand:
     name: str
     payload: dict[str, Any]
     response: Future[dict[str, Any]]
+    session_token: str | None = None
 
 
 @dataclass(frozen=True)
@@ -481,6 +483,9 @@ class OperatorPanelNode(Node):
         self._operation_history: deque[str] = deque(maxlen=operation_history_limit)
         self.navigation_destinations = NavigationDestinationStore(self.navigation_destinations_file)
         self._execution_unlocked_until = 0.0
+        self.session_store: SessionStore | None = None
+        # Only the single ROS executor sets this trusted command context.
+        self._command_session_token: str | None = None
         self._status_sink: Callable[[], None] | None = None
         self._audit_sink: Callable[[str, str, str], None] | None = None
         self._camera_frames: dict[str, CameraFrame] = {}
@@ -779,10 +784,11 @@ class OperatorPanelNode(Node):
                     self._camera_last_encoded_monotonic.pop(name, None)
 
     def request(
-        self, name: str, payload: dict[str, Any], timeout_sec: float = 5.0
+        self, name: str, payload: dict[str, Any], timeout_sec: float = 5.0,
+        *, session_token: str | None = None,
     ) -> dict[str, Any]:
         response: Future[dict[str, Any]] = Future()
-        self._commands.put(QueuedCommand(name, payload, response))
+        self._commands.put(QueuedCommand(name, payload, response, session_token))
         try:
             return response.result(timeout=timeout_sec)
         except FutureTimeoutError:
@@ -961,6 +967,9 @@ class OperatorPanelNode(Node):
             if not command.response.set_running_or_notify_cancel():
                 continue
             try:
+                self._command_session_token = command.session_token
+                if command.session_token is not None:
+                    self._administrator_authorized()
                 if self._shutting_down and command.name not in {
                     "cancel_active",
                     "cancel_manipulation",
@@ -970,6 +979,8 @@ class OperatorPanelNode(Node):
                     raise PanelCommandError("The operator panel is shutting down")
                 if command.name == "unlock_execution":
                     result = self._unlock_execution()
+                elif command.name == "set_administrator_mode":
+                    result = self._set_administrator_mode(command.payload)
                 elif command.name == "submit":
                     result = self._submit(command.payload)
                 elif command.name == "cancel_active":
@@ -999,6 +1010,41 @@ class OperatorPanelNode(Node):
                 command.response.set_result(result)
             except Exception as error:  # Surface a safe request failure to HTTP callers.
                 command.response.set_exception(error)
+            finally:
+                self._command_session_token = None
+
+    def _administrator_authorized(self) -> bool:
+        store = getattr(self, "session_store", None)
+        token = getattr(self, "_command_session_token", None)
+        if store is None or token is None:
+            return False
+        try:
+            return store.administrator_mode_enabled(token)
+        except ValueError as error:
+            raise PanelCommandError(str(error)) from error
+
+    def _execution_authorized(self) -> bool:
+        return self._administrator_authorized() or (
+            time.monotonic() < self._execution_unlocked_until
+        )
+
+    def _set_administrator_mode(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if payload.get("confirmed") is not True:
+            raise PanelCommandError("Administrator mode requires confirmation")
+        enabled = payload.get("enabled")
+        if not isinstance(enabled, bool):
+            raise PanelCommandError("enabled must be a boolean")
+        try:
+            self.session_store.set_administrator_mode(self._command_session_token, enabled)
+        except ValueError as error:
+            raise PanelCommandError(str(error)) from error
+        with self._lock:
+            self._execution_unlocked_until = 0.0
+        self._audit(
+            "administrator_mode", "enabled" if enabled else "disabled",
+            "Operator session administrator mode changed",
+        )
+        return {"administrator_mode_enabled": enabled}
 
     def _unlock_execution(self) -> dict[str, Any]:
         with self._lock:
@@ -1279,7 +1325,7 @@ class OperatorPanelNode(Node):
                         "Physical fine alignment requires active lifecycle nodes: "
                         + ", ".join(inactive)
                     )
-                if time.monotonic() >= self._execution_unlocked_until:
+                if not self._execution_authorized():
                     raise PanelCommandError("Physical execution unlock has expired")
         if manipulation_state not in {"EMPTY", "HOLDING"}:
             raise PanelCommandError(
@@ -1293,7 +1339,7 @@ class OperatorPanelNode(Node):
             )
         if execute:
             with self._lock:
-                if time.monotonic() >= self._execution_unlocked_until:
+                if not self._execution_authorized():
                     raise PanelCommandError("Physical execution unlock has expired")
                 self._execution_unlocked_until = 0.0
         goal = FineAlign.Goal()
@@ -1342,7 +1388,7 @@ class OperatorPanelNode(Node):
                 raise PanelCommandError(
                     "Physical undocking requires an active Collision Monitor lifecycle node"
                 )
-            if time.monotonic() >= self._execution_unlocked_until:
+            if not self._execution_authorized():
                 raise PanelCommandError("Physical execution unlock has expired")
         if manipulation_state not in {"EMPTY", "HOLDING"}:
             raise PanelCommandError(
@@ -1355,7 +1401,7 @@ class OperatorPanelNode(Node):
                 "Nav2 action status is unavailable; verify Nav2 is idle and confirm again"
             )
         with self._lock:
-            if time.monotonic() >= self._execution_unlocked_until:
+            if not self._execution_authorized():
                 raise PanelCommandError("Physical execution unlock has expired")
             self._execution_unlocked_until = 0.0
 
@@ -1414,7 +1460,7 @@ class OperatorPanelNode(Node):
                 raise PanelCommandError(
                     "Physical rotation requires an active Collision Monitor lifecycle node"
                 )
-            if time.monotonic() >= self._execution_unlocked_until:
+            if not self._execution_authorized():
                 raise PanelCommandError("Physical execution unlock has expired")
         if manipulation_state not in {"EMPTY", "HOLDING"}:
             raise PanelCommandError(
@@ -1427,7 +1473,7 @@ class OperatorPanelNode(Node):
                 "Nav2 action status is unavailable; verify Nav2 is idle and confirm again"
             )
         with self._lock:
-            if time.monotonic() >= self._execution_unlocked_until:
+            if not self._execution_authorized():
                 raise PanelCommandError("Physical execution unlock has expired")
             self._execution_unlocked_until = 0.0
 
@@ -1504,7 +1550,7 @@ class OperatorPanelNode(Node):
         if requires_execution:
             if payload.get("confirmed") is not True:
                 raise PanelCommandError("Physical manipulation requires per-command confirmation")
-            if time.monotonic() >= self._execution_unlocked_until:
+            if not self._execution_authorized():
                 raise PanelCommandError("Physical manipulation unlock has expired")
             self._execution_unlocked_until = 0.0
 
@@ -2268,7 +2314,7 @@ class OperatorPanelNode(Node):
             feedback_window_timeout_sec = float(
                 self._posture_status["feedback_window_timeout_sec"]
             )
-            if time.monotonic() >= self._execution_unlocked_until:
+            if not self._execution_authorized():
                 raise PanelCommandError("Physical execution unlock has expired")
         if not self._posture_client.service_is_ready():
             raise PanelCommandError("Locomanipulation posture service is unavailable")
@@ -2287,15 +2333,14 @@ class OperatorPanelNode(Node):
         request.height = height
         request.waist_yaw = waist_yaw
         request.wait_for_settle = wait_for_settle
-        with self._lock:
-            if time.monotonic() >= self._execution_unlocked_until:
-                self._finish_operation(
-                    operation.identifier,
-                    "ERROR",
-                    {"message": "Physical execution unlock has expired"},
-                )
-                raise PanelCommandError("Physical execution unlock has expired")
-            self._execution_unlocked_until = 0.0
+        try:
+            with self._lock:
+                if not self._execution_authorized():
+                    raise PanelCommandError("Physical execution unlock has expired")
+                self._execution_unlocked_until = 0.0
+        except PanelCommandError as error:
+            self._finish_operation(operation.identifier, "ERROR", {"message": str(error)})
+            raise
         try:
             future = self._posture_client.call_async(request)
         except Exception as error:

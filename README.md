@@ -208,6 +208,28 @@ the selected mode. Keyboard focus has a visible outline. Colors do not change
 execution permissions or ROS safety interlocks; plan-only manipulation still
 requires no physical unlock.
 
+**Administrator mode** is an optional convenience setting for the current authenticated
+operator. Choose **Enable administrator mode** in Execution controls and confirm
+once to submit physical tasks without a timed unlock before each task. The badge
+shows **Administrator mode active**; command and sequence confirmations still
+apply, as do Plan only, task admission, and all underlying ROS checks. No separate
+administrator password is required.
+
+The setting survives refreshes and reconnects for the same login. It resets on
+session expiry (30 minutes by default), a new login, or server restart. Choose
+**Disable administrator mode** to return to ordinary timed unlocks; this also
+clears any remaining timed unlock. Disabling the mode or losing the session does
+not cancel an operation already submitted. A disconnected shortcut still pauses:
+reconnect, review its outcome, and choose **Continue**. An active administrator
+session does not need another unlock to continue.
+
+`POST /api/administrator-mode` accepts
+`{"enabled": true, "confirmed": true}` (or `false` to disable), requires the
+operator session cookie and same-origin protection, and returns
+`administrator_mode_enabled`. HTTP and WebSocket status include that boolean.
+Mode changes are recorded in the audit log. Ordinary unlock behavior below applies
+when administrator mode is off.
+
 The execution badge counts down the timed unlock locally between server status
 messages. The server remains authoritative and consumes the unlock when one
 physical command is submitted. The badge shows **Locked** when no unlock remains

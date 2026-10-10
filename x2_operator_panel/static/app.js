@@ -54,7 +54,8 @@
     if (!response.ok) throw new Error(body?.error || `Request failed (${response.status})`);
     if (["/api/actions", "/api/posture"].includes(path) &&
         (body?.operation?.plan_only === false || body?.operation?.kind === "reset")) {
-      syncExecutionUnlock(0);
+      // A late command response must not restore authority after a disconnect.
+      if (state.executionUnlockKnown) syncExecutionUnlock(0);
     }
     if (options.method === "POST" && ["/api/recover-state", "/api/posture", "/api/box-profiles/reload"].includes(path)) {
       const dryRun = path === "/api/box-profiles/reload" && JSON.parse(options.body || "{}").dry_run;
@@ -426,15 +427,32 @@
       ? Math.max(0, (state.executionUnlockDeadline - performance.now()) / 1000) : 0;
   }
 
+  function administratorModeActive() {
+    return state.authenticated === true && state.executionUnlockKnown === true &&
+      state.status?.administrator_mode_enabled === true;
+  }
+
+  function physicalExecutionAuthorized() {
+    return administratorModeActive() || executionUnlockRemaining() > 0;
+  }
+
   function renderExecutionState() {
     const remaining = executionUnlockRemaining();
+    const administrator = administratorModeActive();
     const badge = byId("execution-state");
     badge.textContent = !state.executionUnlockKnown ? "Status unavailable"
-      : remaining > 0 ? `Unlocked ${Math.ceil(remaining)}s`
+      : administrator ? "Administrator mode active"
+        : remaining > 0 ? `Unlocked ${Math.ceil(remaining)}s`
         : byId("plan-only").checked ? "Plan only" : "Locked";
-    badge.classList.toggle("unlocked", remaining > 0);
+    badge.classList.toggle("unlocked", administrator || remaining > 0);
+    const toggle = byId("administrator-mode");
+    toggle.textContent = administrator ? "Disable administrator mode" : "Enable administrator mode";
+    toggle.disabled = !state.authenticated || !state.executionUnlockKnown;
+    toggle.setAttribute("aria-pressed", String(administrator));
+    byId("unlock-execution").disabled = administrator || !state.authenticated || !state.executionUnlockKnown;
     renderRotation();
-    badge.title = remaining > 0 ? "One physical command may consume this timed unlock."
+    badge.title = administrator ? "Physical unlocks are skipped for this login session. Command confirmations still apply."
+      : remaining > 0 ? "One physical command may consume this timed unlock."
       : "Physical commands require an execution unlock.";
   }
 
@@ -473,8 +491,14 @@
   }
 
   function applyStatus(status, unlockChanged = true) {
+    const administratorChanged = state.status?.administrator_mode_enabled !== status.administrator_mode_enabled;
     state.status = status;
     if (unlockChanged) syncExecutionUnlock(status.execution_unlock_remaining_sec);
+    if (!unlockChanged && administratorChanged) {
+      renderExecutionState();
+      renderSavedPlans();
+      renderGuidedWorkflow();
+    }
     updateGuidedWorkflow();
     addPoseToTrail(status.map_pose);
     renderStatus();
@@ -674,7 +698,7 @@
     const busy = state.status?.task_admission?.blocked || state.status?.navigation?.goal_status?.active ||
       ["running", "retrying", "paused"].includes(state.status?.manipulation_task?.status) ||
       (state.status?.operations || []).some((operation) => ["SUBMITTING", "ACTIVE", "CANCEL_REQUESTED"].includes(operation.status));
-    button.disabled = !select.value || busy || !(executionUnlockRemaining() > 0);
+    button.disabled = !select.value || busy || !(physicalExecutionAuthorized());
   }
 
   async function executeSavedPlan() {
@@ -1173,7 +1197,7 @@
       return "Wait for the active operation to finish.";
     }
     if (byId("plan-only").checked) return "Turn off Plan only to run a physical sequence.";
-    if (!(executionUnlockRemaining() > 0)) return "Unlock physical motion before starting a shortcut.";
+    if (!(physicalExecutionAuthorized())) return "Unlock physical motion before starting a shortcut.";
     const expected = item.action === "pick" ? "EMPTY" : "HOLDING";
     if (state.status?.manipulation_state?.state !== expected) return `This shortcut requires manipulation state ${expected}.`;
     return "";
@@ -1353,7 +1377,7 @@
     const workflow = state.guidedWorkflow;
     if (workflow?.shortcut && !workflow.completed) {
       workflow.reconnectUnlockRequired = true;
-      failGuidedWorkflow(workflow, "Shortcut paused: live status disconnected. Reconnect, verify the current operation, unlock and Continue.", workflow.resumeBlocked);
+      failGuidedWorkflow(workflow, "Shortcut paused: live status disconnected. Reconnect, verify the current operation, then unlock or use administrator mode and Continue.", workflow.resumeBlocked);
     }
     renderGuidedWorkflow();
   }
@@ -1421,7 +1445,7 @@
       });
       const item = items[0];
       if (!state.statusConnected || state.authenticated === false) throw new Error("Connect live status before starting a shortcut.");
-      if (byId("plan-only").checked || !(executionUnlockRemaining() > 0)) throw new Error("Turn off Plan only and unlock physical motion before running a shortcut.");
+      if (byId("plan-only").checked || !(physicalExecutionAuthorized())) throw new Error("Turn off Plan only and unlock physical motion or enable administrator mode before running a shortcut.");
       const expected = item.action === "pick" ? "EMPTY" : "HOLDING";
       if (status.manipulation_state?.state !== expected) throw new Error(`This shortcut requires manipulation state ${expected}.`);
       if (status.task_admission?.blocked || status.navigation?.goal_status?.active ||
@@ -1729,10 +1753,10 @@
       state.status?.navigation?.goal_status?.active ||
       (state.status?.operations || []).some((operation) => activeStatuses.includes(operation.status));
     const running = workflow && !workflow.failed && !workflow.completed;
-    const unlocked = executionUnlockRemaining() > 0;
+    const unlocked = physicalExecutionAuthorized();
     byId("stop-guided-workflow").disabled = !running || workflow.cancelRequested;
     const continueButton = byId("continue-guided-workflow");
-    continueButton.disabled = !workflow?.failed || workflow.resumeBlocked || workflow.reconnectUnlockRequired ||
+    continueButton.disabled = !workflow?.failed || workflow.resumeBlocked || (workflow.reconnectUnlockRequired && !administratorModeActive()) ||
       (workflow.shortcut && !state.statusConnected) || active || state.guidedSubmitting || byId("plan-only").checked || !unlocked;
     continueButton.title = workflow?.resumeBlocked ? "Command outcome is unknown; verify robot state before restarting."
       : "Resume at the failed stage after verifying robot state";
@@ -1774,7 +1798,7 @@
     try {
       applyStatus(await api("/api/status"));
       if (state.authenticated === false) return;
-      if (!(executionUnlockRemaining() > 0)) {
+      if (!(physicalExecutionAuthorized())) {
         throw new Error("Unlock physical motion before starting the combo sequence");
       }
       if (byId("plan-only").checked) throw new Error("Turn off Plan only for this physical sequence");
@@ -1845,7 +1869,7 @@
     try {
       // Start/Continue uses the operator's one-shot unlock for its first command.
       // The confirmation authorizes renewal for the remaining automatic stages.
-      if (!workflow.useManualUnlock) {
+      if (!workflow.useManualUnlock && !administratorModeActive()) {
         await api("/api/unlock/execution", { method: "POST", body: JSON.stringify({ confirmed: true }) });
       }
       if (workflow.failed || workflow.cancelRequested || state.guidedWorkflow !== workflow || state.authenticated === false) return;
@@ -1899,13 +1923,13 @@
     state.guidedSubmitting = true;
     try {
       if (workflow.shortcut && !state.statusConnected) throw new Error("Reconnect live status before continuing the shortcut.");
-      if (workflow.reconnectUnlockRequired) throw new Error("Unlock physical motion again after reconnecting before continuing the shortcut.");
+      if (workflow.reconnectUnlockRequired && !administratorModeActive()) throw new Error("Unlock physical motion again after reconnecting before continuing the shortcut.");
       applyStatus(await api("/api/status"));
       if (state.guidedWorkflow !== workflow || state.authenticated === false) return;
-      if (workflow.shortcut && (!state.statusConnected || workflow.reconnectUnlockRequired)) {
+      if (workflow.shortcut && (!state.statusConnected || (workflow.reconnectUnlockRequired && !administratorModeActive()))) {
         throw new Error("Reconnect live status and unlock physical motion again before continuing the shortcut.");
       }
-      if (!(executionUnlockRemaining() > 0)) {
+      if (!(physicalExecutionAuthorized())) {
         throw new Error("Unlock physical motion before continuing the combo sequence");
       }
       if (byId("plan-only").checked) throw new Error("Turn off Plan only to continue the physical sequence");
@@ -2026,7 +2050,7 @@
       const settings = rotationSettings({ angular_speed: finiteField("rotation-speed"), duration: finiteField("rotation-duration") });
       detail = `${rotationDescription(settings)}. Limits: ${limits.max_angular_speed} rad/s, ${limits.max_duration} s.`;
       button.disabled = !state.authenticated || !state.statusConnected || busy || byId("plan-only").checked ||
-        !(executionUnlockRemaining() > 0) || !state.status?.servers?.rotate_in_place ||
+        !(physicalExecutionAuthorized()) || !state.status?.servers?.rotate_in_place ||
         !["EMPTY", "HOLDING"].includes(state.status?.manipulation_state?.state) ||
         state.status?.navigation?.lifecycle?.collision_monitor?.state_id !== 3;
     } catch (error) { detail = error.message; }
@@ -2163,7 +2187,7 @@
     };
   }
   async function submitLocomanipulationPosture(target, actionLabel) {
-    if (!(executionUnlockRemaining() > 0)) {
+    if (!(physicalExecutionAuthorized())) {
       throw new Error("Temporarily unlock one physical motion command first");
     }
     const waitDetail = target.wait_for_settle
@@ -2209,6 +2233,23 @@
       setError("");
     } catch (error) { setError(error.message); }
   }
+  async function toggleAdministratorMode() {
+    const enabled = !administratorModeActive();
+    const message = enabled
+      ? "Enable administrator mode for this login session? Physical tasks will no longer require a timed unlock. Command confirmations still apply."
+      : "Disable administrator mode? Further physical tasks will require a timed unlock.";
+    if (!window.confirm(message)) return;
+    byId("administrator-mode").disabled = true;
+    try {
+      await api("/api/administrator-mode", {
+        method: "POST", body: JSON.stringify({ enabled, confirmed: true }),
+      });
+      applyStatus(await api("/api/status"));
+      setError("");
+    } catch (error) { setError(error.message); }
+    finally { renderExecutionState(); }
+  }
+
   async function unlockExecution() {
     if (!window.confirm("Temporarily unlock one physical motion command?")) return;
     const reconnectWorkflow = state.statusConnected ? state.guidedWorkflow : null;
@@ -2326,6 +2367,7 @@
   });
   byId("reset-posture").addEventListener("click", resetLocomanipulationPosture);
   byId("release-posture").addEventListener("click", releaseLocomanipulationPosture);
+  byId("administrator-mode").addEventListener("click", toggleAdministratorMode);
   byId("unlock-execution").addEventListener("click", unlockExecution);
   byId("cancel-active").addEventListener("click", cancelActive);
   byId("cancel-docking-motion").addEventListener("click", cancelDockingMotion);

@@ -20,6 +20,7 @@ def shortcut_http(tmp_path):
                              navigation_destinations=NavigationDestinationStore(tmp_path / "destinations.json")),
         configuration_lock=threading.RLock(),
         source_address_is_allowed=lambda address: address == "127.0.0.1",
+        authenticated_session_token=lambda headers: "test" if headers.get("Cookie") == "session=test" else None,
         request_is_authenticated=lambda headers: headers.get("Cookie") == "session=test",
         unsafe_request_has_same_origin=lambda headers: headers.get("Origin") == "http://panel.test",
         audit=Mock(), task_shortcuts=TaskShortcutStore(tmp_path / "shortcuts.json"),

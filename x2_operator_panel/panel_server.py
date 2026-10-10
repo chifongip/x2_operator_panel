@@ -444,6 +444,7 @@ class PanelApplication:
         self.sessions = SessionStore(
             os.environ.get("X2_OPERATOR_PANEL_PASSWORD_HASH"), node.session_ttl_sec
         )
+        self.node.session_store = self.sessions
         self.audit = AuditLog()
         self.login_limiter = LoginAttemptLimiter(
             per_source_limit=node.login_per_source_limit,
@@ -513,6 +514,7 @@ class PanelApplication:
 
     def status(self) -> dict[str, Any]:
         status = self.node.snapshot()
+        status["administrator_mode_enabled"] = self.sessions.administrator_mode_enabled()
         status["authentication_configured"] = self.sessions.configured
         status["audit"] = self.audit.entries()
         return status
@@ -689,7 +691,8 @@ def _make_request_handler(application: PanelApplication) -> type[BaseHTTPRequest
                     {"Set-Cookie": cookie},
                 )
                 return
-            if not application.request_is_authenticated(self.headers):
+            session_token = application.authenticated_session_token(self.headers)
+            if session_token is None:
                 self._json_error(HTTPStatus.UNAUTHORIZED, "Authentication required")
                 return
             if not application.unsafe_request_has_same_origin(self.headers):
@@ -734,9 +737,20 @@ def _make_request_handler(application: PanelApplication) -> type[BaseHTTPRequest
                 elif path == "/api/unlock/execution":
                     if payload.get("confirmed") is not True:
                         raise PanelCommandError("Execution unlock requires confirmation")
-                    response = application.node.enable_execution_unlock()
+                    response = application.node.request(
+                        "unlock_execution", {},
+                        session_token=session_token,
+                    )
+                elif path == "/api/administrator-mode":
+                    response = application.node.request(
+                        "set_administrator_mode", payload,
+                        session_token=session_token,
+                    )
                 elif path == "/api/actions":
-                    response = application.node.request("submit", payload)
+                    response = application.node.request(
+                        "submit", payload,
+                        session_token=session_token,
+                    )
                 elif path == "/api/cancel":
                     response = application.node.request("cancel_active", {})
                 elif path == "/api/fine-align/cancel":
@@ -753,7 +767,8 @@ def _make_request_handler(application: PanelApplication) -> type[BaseHTTPRequest
                     response = application.node.request("reload_box_profiles", payload)
                 elif path == "/api/posture":
                     response = application.node.request(
-                        "set_locomanipulation_posture", payload
+                        "set_locomanipulation_posture", payload,
+                        session_token=session_token,
                     )
                 elif path == "/api/posture/release":
                     response = application.node.request(

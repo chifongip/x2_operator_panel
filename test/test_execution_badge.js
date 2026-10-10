@@ -11,6 +11,8 @@ const timers = new Map();
 const classes = new Set();
 const badge = { classList: { toggle: (name, enabled) => enabled ? classes.add(name) : classes.delete(name) } };
 const planOnly = { checked: true };
+const administratorToggle = { setAttribute() {} };
+const unlockButton = {};
 const state = {
   savedPlans: new Map(),
   authenticated: true, status: null, executionUnlockDeadline: null,
@@ -24,7 +26,7 @@ const context = vm.createContext({
     setInterval: (callback) => { const id = nextTimer++; timers.set(id, callback); return id; },
     clearInterval: (id) => timers.delete(id),
   },
-  byId: (id) => id === "execution-state" ? badge : planOnly,
+  byId: (id) => id === "execution-state" ? badge : id === "administrator-mode" ? administratorToggle : id === "unlock-execution" ? unlockButton : planOnly,
   renderSavedPlans: () => {},
   renderRotation: () => {},
   renderGuidedWorkflow: () => { guidedRenders += 1; },
@@ -81,7 +83,43 @@ assert.equal(badge.textContent, "Unlocked 7s");
 assert.equal(timers.size, 1);
 context.applyStatus({}); // Missing/invalid unlock telemetry must fail closed.
 assert.equal(badge.textContent, "Status unavailable");
+context.applyStatus({ execution_unlock_remaining_sec: 0, administrator_mode_enabled: true });
+assert.equal(badge.textContent, "Administrator mode active");
+assert.equal(context.physicalExecutionAuthorized(), true);
+assert.equal(unlockButton.disabled, true);
+assert.equal(administratorToggle.textContent, "Disable administrator mode");
+context.syncExecutionUnlock(0);
+assert.equal(context.physicalExecutionAuthorized(), true, "Physical submission must not consume administrator mode");
+context.invalidateExecutionUnlock();
+assert.equal(badge.textContent, "Status unavailable");
+assert.equal(context.physicalExecutionAuthorized(), false, "Disconnect must invalidate cached administrator authority");
+context.applyStatus({ execution_unlock_remaining_sec: 0, administrator_mode_enabled: true });
+assert.equal(context.physicalExecutionAuthorized(), true, "Fresh reconnect status restores the session mode");
+context.applyStatus({ execution_unlock_remaining_sec: 0, administrator_mode_enabled: false }, false);
+assert.equal(context.physicalExecutionAuthorized(), false);
+assert.equal(administratorToggle.textContent, "Enable administrator mode");
+assert.equal(unlockButton.disabled, false);
+context.applyStatus({ administrator_mode_enabled: true });
+assert.equal(context.physicalExecutionAuthorized(), false, "Invalid unlock telemetry must fail closed even in administrator mode");
 context.invalidateExecutionUnlock();
 state.authenticated = false;
 context.syncExecutionUnlock(0);
 assert.equal(timers.size, 0, "A signed-out browser must not start an update timer");
+
+// A successful HTTP response may arrive after the WebSocket has disconnected.
+vm.runInContext(source.slice(source.indexOf("  async function api("),
+  source.indexOf("  function setError(")), context);
+(async () => {
+  state.authenticated = true;
+  context.applyStatus({ execution_unlock_remaining_sec: 0, administrator_mode_enabled: true });
+  let finishResponse;
+  context.fetch = () => new Promise((resolve) => { finishResponse = resolve; });
+  const pending = context.api("/api/actions", { method: "POST", body: "{}" });
+  context.invalidateExecutionUnlock();
+  finishResponse({ ok: true, status: 202, headers: { get: () => "application/json" },
+    json: async () => ({ operation: { plan_only: false } }) });
+  await pending;
+  assert.equal(context.physicalExecutionAuthorized(), false,
+    "A late successful submission must not restore administrator authority after disconnect");
+  assert.equal(badge.textContent, "Status unavailable");
+})().catch((error) => { console.error(error); process.exitCode = 1; });

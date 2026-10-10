@@ -80,7 +80,7 @@ function fixture(item = shortcut(), fast = false) {
       }
       if (path === "/api/task-shortcuts/delete") return { available: true, shortcuts: [] };
       if (path === "/api/unlock/execution") { state.status.execution_unlock_remaining_sec = 30; return {}; }
-      assert.ok(state.status.execution_unlock_remaining_sec > 0);
+      assert.ok(state.status.execution_unlock_remaining_sec > 0 || context.administratorModeActive());
       if (payload.kind !== "navigate") state.status.execution_unlock_remaining_sec = 0;
       const operation = { ...payload, id: `operation-${calls.length}`, kind: payload.kind || "posture", status: "ACTIVE" };
       state.status.operations.unshift(operation);
@@ -88,6 +88,8 @@ function fixture(item = shortcut(), fast = false) {
       return { operation };
     },
   });
+  vm.runInContext(source.slice(source.indexOf("  function administratorModeActive("),
+    source.indexOf("  function renderExecutionState(")), context);
   vm.runInContext(fragment, context);
   vm.runInContext(source.slice(source.indexOf("  async function unlockExecution()"),
     source.indexOf("  async function cancelActive()")), context);
@@ -186,6 +188,25 @@ async function failureChecks() {
   await disconnected.context.continueGuidedWorkflow();
   await flush();
   assert.equal(disconnected.commands()[1].path, "/api/posture", "Continue does not replay the completed Dock");
+
+  const administrator = fixture();
+  administrator.state.executionUnlockKnown = true;
+  administrator.state.status.administrator_mode_enabled = true;
+  administrator.state.status.execution_unlock_remaining_sec = 0;
+  await administrator.context.runTaskShortcut();
+  assert.equal(administrator.commands().length, 1);
+  administrator.context.pauseShortcutConnection();
+  await administrator.finish();
+  administrator.state.statusConnected = true;
+  administrator.context.updateGuidedWorkflow();
+  await flush();
+  assert.equal(administrator.commands().length, 1, "Administrator reconnect must not resume automatically");
+  await administrator.context.continueGuidedWorkflow();
+  await flush();
+  assert.equal(administrator.commands().length, 2, administrator.context.error);
+  assert.equal(administrator.commands()[1].path, "/api/posture");
+  assert.equal(administrator.calls.filter((call) => call.path === "/api/unlock/execution").length, 0);
+  assert.equal(administrator.confirmations.length, 2, "Start and reconnect Continue each require confirmation");
 
   const race = fixture();
   await race.context.runTaskShortcut();

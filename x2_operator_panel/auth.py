@@ -10,7 +10,7 @@ import secrets
 import sys
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 
 _HASH_PREFIX = "pbkdf2_sha256"
@@ -55,6 +55,7 @@ def verify_password(password: str, stored_hash: str) -> bool:
 class Session:
     token: str
     expires_at: float
+    administrator_mode_enabled: bool = False
 
 
 class SessionStore:
@@ -88,6 +89,30 @@ class SessionStore:
                 self._session = None
                 return False
             return hmac.compare_digest(token, self._session.token)
+
+    def administrator_mode_enabled(self, token: str | None = None) -> bool:
+        """Read session mode; reject an expired or superseded command's token."""
+        with self._lock:
+            session = self._session
+            if session is not None and session.expires_at <= time.monotonic():
+                self._session = session = None
+            if token is not None and (
+                session is None or not hmac.compare_digest(token, session.token)
+            ):
+                raise ValueError("Operator session expired; sign in again")
+            return session is not None and session.administrator_mode_enabled
+
+    def set_administrator_mode(self, token: str | None, enabled: bool) -> bool:
+        with self._lock:
+            session = self._session
+            if (
+                not token or session is None
+                or session.expires_at <= time.monotonic()
+                or not hmac.compare_digest(token, session.token)
+            ):
+                raise ValueError("Operator session expired; sign in again")
+            self._session = replace(session, administrator_mode_enabled=enabled)
+            return enabled
 
 
 class LoginAttemptLimiter:

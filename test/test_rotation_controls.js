@@ -19,6 +19,8 @@ const context = vm.createContext({ state, byId, executionUnlockRemaining: () => 
   api: async (path, options) => calls.push({ path, payload: JSON.parse(options.body) }),
   setError: (message) => { context.error = message; },
 });
+vm.runInContext(source.slice(source.indexOf("  function administratorModeActive("),
+  source.indexOf("  function renderExecutionState(")), context);
 vm.runInContext(source.slice(source.indexOf("  function rotationSettings("), source.indexOf("  function shortcutSteps(")), context);
 vm.runInContext(source.slice(source.indexOf("  function renderRotation("), source.indexOf("  async function undock(")), context);
 

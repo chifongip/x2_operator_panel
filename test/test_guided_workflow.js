@@ -46,7 +46,7 @@ function fixture(kind, fast = false, completionStatus = "SUCCEEDED") {
       }
       if (path === "/api/cancel") return { operation_ids: ["active"] };
       const operation = { id: `operation-${calls.length}`, kind: payload.kind || "set_locomanipulation_posture", status: "ACTIVE" };
-      assert.ok(state.status.execution_unlock_remaining_sec > 0, "A physical command must have an unlock");
+      assert.ok(state.status.execution_unlock_remaining_sec > 0 || context.administratorModeActive(), "A physical command must have authorization");
       state.status.execution_unlock_remaining_sec = 0;
       state.status.operations.unshift(operation);
       if (fast) {
@@ -57,6 +57,8 @@ function fixture(kind, fast = false, completionStatus = "SUCCEEDED") {
       return { operation };
     },
   });
+  vm.runInContext(source.slice(source.indexOf("  function administratorModeActive("),
+    source.indexOf("  function renderExecutionState(")), context);
   vm.runInContext(fragment, context);
   function finishOperation(operation, status, success, publishState = true) {
     operation.status = status;
@@ -604,6 +606,17 @@ async function boxBindingChecks() {
   await unlockError.finish();
   assert.equal(unlockError.state.guidedWorkflow.failed, true);
   assert.equal(unlockError.commands().length, 1);
+
+  const administrator = fixture("pick");
+  administrator.state.authenticated = true;
+  administrator.state.executionUnlockKnown = true;
+  administrator.state.status.administrator_mode_enabled = true;
+  administrator.state.status.execution_unlock_remaining_sec = 0;
+  await administrator.context.advanceGuidedWorkflow();
+  for (let i = 0; i < 5; i += 1) await administrator.finish();
+  assert.equal(administrator.commands().length, 5);
+  assert.equal(administrator.calls.filter((call) => call.path === "/api/unlock/execution").length, 0);
+  assert.ok(administrator.confirmations.length > 0, "Administrator sequences still require confirmation");
 
   const locked = fixture("pick");
   locked.state.status.execution_unlock_remaining_sec = 0;

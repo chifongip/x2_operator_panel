@@ -145,6 +145,7 @@
         <h2 id="execution-controls-heading">Execution controls</h2>
         <div class="execution-actions">
           <span id="execution-state" class="state-badge" aria-label="Physical execution unlock status">Waiting for status</span>
+          <button id="administrator-mode" class="unlock-control" type="button" aria-pressed="false" disabled>Enable administrator mode</button>
           <button id="unlock-execution" class="unlock-control" type="button">Unlock physical motion</button>
           <button id="cancel-active" class="danger" type="button">Cancel active goals</button>
         </div>
@@ -156,7 +157,7 @@
             <h2>Commands</h2>
             <label class="plan-toggle"><input id="plan-only" type="checkbox" checked>Plan only</label>
           </div>
-          <p class="muted">Plan only applies to manipulation and carry poses. Turn it off and unlock physical motion to run a sequence.</p>
+          <p class="muted">Plan only applies to manipulation and carry poses. Turn it off and unlock physical motion or enable administrator mode to run a sequence.</p>
           <div class="visible-box-picker">
             <label for="visible-box-select">Visible box</label>
             <select id="visible-box-select" disabled>
@@ -370,7 +371,7 @@
                 <summary>Posture options</summary>
                 <div class="details-content">
                   <label class="plan-toggle"><input id="posture-wait-for-settle" type="checkbox" checked>Wait for direct feedback window</label>
-                  <p class="muted">Posture targets require a physical-motion unlock. Carry poses use the Plan only setting and are available while holding a box.</p>
+                  <p class="muted">Posture targets require a physical-motion unlock or administrator mode. Carry poses use the Plan only setting and are available while holding a box.</p>
                 </div>
               </details>
             </form>

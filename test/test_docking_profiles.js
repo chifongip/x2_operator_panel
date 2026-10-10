@@ -26,6 +26,8 @@ const context = vm.createContext({
   api: async (path, options) => { calls.push({ path, payload: JSON.parse(options.body) }); return {}; },
   renderSavedPlans: () => {}, formatPlanarError: () => "", formatUndockDistance: () => "",
 });
+vm.runInContext(source.slice(source.indexOf("  function administratorModeActive("),
+  source.indexOf("  function renderExecutionState(")), context);
 vm.runInContext(source.slice(source.indexOf("  const guidedSteps ="),
   source.indexOf("  function guidedStepLabel(")), context);
 vm.runInContext(source.slice(source.indexOf("  async function fineAlign("),

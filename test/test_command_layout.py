@@ -38,7 +38,7 @@ def test_command_cards_separate_controls_without_duplicate_ids_or_nested_forms()
     assert not layout.nested_forms
     assert not [identifier for identifier, count in Counter(layout.ids).items() if count > 1]
     groups = {
-        "execution-controls": ["execution-state", "unlock-execution", "cancel-active"],
+        "execution-controls": ["execution-state", "administrator-mode", "unlock-execution", "cancel-active"],
         "tasks-commands": ["run-selected-shortcuts", "task-shortcut-buttons", "task-shortcut-management", "task-shortcut-editor",
                            "dock-manipulate-undock", "guided-workflow-status", "stop-guided-workflow",
                            "continue-guided-workflow"],
