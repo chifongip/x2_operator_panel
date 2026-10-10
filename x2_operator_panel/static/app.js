@@ -2350,4 +2350,12 @@
   canvas.addEventListener("pointermove", updateMapSelection);
   canvas.addEventListener("pointerup", finishMapSelection);
   canvas.addEventListener("pointercancel", clearMapSelection);
+  // Keep yaw's native step grid at zero; validate its exact lower bound separately.
+  document.querySelectorAll("input[data-min]").forEach((input) => {
+    const validateMinimum = () => input.setCustomValidity(
+      input.value !== "" && input.valueAsNumber < Number(input.dataset.min)
+        ? `Value must be at least ${input.dataset.min}.` : "");
+    input.addEventListener("input", validateMinimum);
+    validateMinimum();
+  });
 })();

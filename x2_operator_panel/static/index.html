@@ -222,7 +222,7 @@
               <label>Action<select id="shortcut-action"><option value="pick">Pick</option><option value="place">Place held box</option></select></label>
               <label>Box profile<select id="shortcut-box-profile"><option value="">Choose a box profile</option></select></label>
               <label>Box selection<select id="shortcut-box-selection"><option value="profile">Visible tag matching profile</option><option value="fixed">Fixed tag instance</option></select></label>
-              <label>Fixed box ID<input id="shortcut-box-instance" type="number" min="0" max="2147483647" step="1" inputmode="numeric" placeholder="180" disabled></label>
+              <label>Fixed box ID<input id="shortcut-box-instance" type="text" pattern="[0-9]+" inputmode="numeric" placeholder="180" disabled></label>
             </div>
             <p class="muted">Profile selection uses the selected matching Visible box, or the sole matching tag. If several match, select one. Each run keeps its chosen tag through Dock and Pick. For Place, the box is only a docking reference.</p>
             <fieldset><legend><label class="plan-toggle"><input id="shortcut-navigate-start-enabled" type="checkbox">Navigation before combo</label></legend>
@@ -235,14 +235,14 @@
             <p class="muted">Combo task</p>
             <fieldset><legend><label class="plan-toggle"><input id="shortcut-rotate-start-enabled" type="checkbox">Rotate before combo</label></legend>
               <div class="shortcut-fields">
-                <label>Angular speed (rad/s; + CCW)<input id="shortcut-rotate-start-speed" type="number" step="any" value="0.2" required></label>
-                <label>Duration (s)<input id="shortcut-rotate-start-duration" type="number" step="any" value="1" required></label>
+                <label>Angular speed (rad/s; + CCW)<input id="shortcut-rotate-start-speed" type="number" step="0.1" value="0.2" required></label>
+                <label>Duration (s)<input id="shortcut-rotate-start-duration" type="number" step="0.1" value="1" required></label>
               </div>
             </fieldset>
             <fieldset><legend><label class="plan-toggle"><input id="shortcut-dock-enabled" type="checkbox" checked>1. Dock</label></legend><label>Profile<select id="shortcut-dock-profile"><option value="">Choose a docking profile</option></select></label></fieldset>
             <fieldset><legend><label class="plan-toggle"><input id="shortcut-posture-enabled" type="checkbox" checked>2. Set posture</label></legend><div class="shortcut-fields">
-              <label>Height (m)<input id="shortcut-posture-height" type="number" step="any" value="0.64" min="0.30" max="0.64"></label>
-              <label>Waist yaw (rad)<input id="shortcut-posture-yaw" type="number" step="any" value="0" min="-1.5708" max="1.5708"></label>
+              <label>Height (m)<input id="shortcut-posture-height" type="number" step="0.01" value="0.64" min="0.30" max="0.64"></label>
+              <label>Waist yaw (rad)<input id="shortcut-posture-yaw" type="number" step="0.1" value="0" data-min="-1.5708" max="1.5708"></label>
             </div></fieldset>
             <fieldset id="shortcut-place-fields" hidden>
               <legend>3. Place target</legend>
@@ -250,21 +250,21 @@
               <label id="shortcut-table-field">Table profile<select id="shortcut-table-profile"><option value="">Choose a table profile</option></select></label>
               <div id="shortcut-manual-fields" class="shortcut-fields" hidden>
                 <label>Frame<select id="shortcut-place-frame"><option value="base_link">base_link</option><option value="map">map</option></select></label>
-                <label>X (m)<input id="shortcut-place-x" type="number" step="any" value="0.35" ></label>
-                <label>Y (m)<input id="shortcut-place-y" type="number" step="any" value="0" ></label>
-                <label>Z (m)<input id="shortcut-place-z" type="number" step="any" value="0.29" ></label>
-                <label>Yaw (rad)<input id="shortcut-place-yaw" type="number" step="any" value="0" ></label>
+                <label>X (m)<input id="shortcut-place-x" type="number" step="0.01" value="0.35" ></label>
+                <label>Y (m)<input id="shortcut-place-y" type="number" step="0.01" value="0" ></label>
+                <label>Z (m)<input id="shortcut-place-z" type="number" step="0.01" value="0.29" ></label>
+                <label>Yaw (rad)<input id="shortcut-place-yaw" type="number" step="0.1" value="0" ></label>
               </div>
             </fieldset>
             <fieldset><legend><label class="plan-toggle"><input id="shortcut-return-enabled" type="checkbox" checked>4. Return posture</label></legend><div class="shortcut-fields">
-              <label>Height (m)<input id="shortcut-return-height" type="number" step="any" value="0.64" min="0.30" max="0.64"></label>
-              <label>Waist yaw (rad)<input id="shortcut-return-yaw" type="number" step="any" value="0" min="-1.5708" max="1.5708"></label>
+              <label>Height (m)<input id="shortcut-return-height" type="number" step="0.01" value="0.64" min="0.30" max="0.64"></label>
+              <label>Waist yaw (rad)<input id="shortcut-return-yaw" type="number" step="0.1" value="0" data-min="-1.5708" max="1.5708"></label>
             </div></fieldset>
             <fieldset><legend><label class="plan-toggle"><input id="shortcut-undock-enabled" type="checkbox" checked>5. Undock</label></legend><label>Profile<select id="shortcut-undock-profile"><option value="">Choose a docking profile</option></select></label></fieldset>
             <fieldset><legend><label class="plan-toggle"><input id="shortcut-rotate-end-enabled" type="checkbox">Rotate after combo</label></legend>
               <div class="shortcut-fields">
-                <label>Angular speed (rad/s; + CCW)<input id="shortcut-rotate-end-speed" type="number" step="any" value="0.2" required></label>
-                <label>Duration (s)<input id="shortcut-rotate-end-duration" type="number" step="any" value="1" required></label>
+                <label>Angular speed (rad/s; + CCW)<input id="shortcut-rotate-end-speed" type="number" step="0.1" value="0.2" required></label>
+                <label>Duration (s)<input id="shortcut-rotate-end-duration" type="number" step="0.1" value="1" required></label>
               </div>
             </fieldset>
             <fieldset><legend><label class="plan-toggle"><input id="shortcut-carry-end-enabled" type="checkbox">Carry pose after combo</label></legend>
@@ -303,7 +303,7 @@
                 <label>X (m)<input id="place-x" type="number" value="0.35" step="0.01" required></label>
                 <label>Y (m)<input id="place-y" type="number" value="0" step="0.01" required></label>
                 <label>Z (m)<input id="place-z" type="number" value="0.29" step="0.01" required></label>
-                <label>Yaw (rad)<input id="place-yaw" type="number" value="0" step="0.01" required></label>
+                <label>Yaw (rad)<input id="place-yaw" type="number" value="0" step="0.1" required></label>
               </fieldset>
               <button id="place-button" class="requires-unlock" type="submit">Place box</button>
             </form>
@@ -359,7 +359,7 @@
               <fieldset class="posture-fields">
                 <legend class="visually-hidden">Locomanipulation posture</legend>
                 <label>Height (m)<input id="posture-height" type="number" min="0.30" max="0.64" value="0.64" step="0.01" required></label>
-                <label>Waist yaw (rad)<input id="posture-waist-yaw" type="number" min="-1.5708" max="1.5708" value="0.0" step="any" required></label>
+                <label>Waist yaw (rad)<input id="posture-waist-yaw" type="number" data-min="-1.5708" max="1.5708" value="0.0" step="0.1" required></label>
               </fieldset>
               <div class="posture-actions">
                 <button id="set-posture" class="requires-unlock" type="submit" disabled>Set posture</button>
@@ -406,8 +406,8 @@
           <section id="rotation-commands" class="command-group" aria-labelledby="rotation-heading">
             <h2 id="rotation-heading">Rotate in place</h2>
             <div class="command-row">
-              <label>Angular speed (rad/s; + counterclockwise)<input id="rotation-speed" type="number" step="any" value="0.2"></label>
-              <label>Duration (s)<input id="rotation-duration" type="number" step="any" value="1"></label>
+              <label>Angular speed (rad/s; + counterclockwise)<input id="rotation-speed" type="number" step="0.1" value="0.2"></label>
+              <label>Duration (s)<input id="rotation-duration" type="number" step="0.1" value="1"></label>
               <button id="execute-rotation" class="requires-unlock" type="button" disabled>Rotate in place</button>
               <button id="cancel-rotation" class="danger" type="button" disabled>Cancel rotation</button>
             </div>
@@ -440,9 +440,9 @@
                       <label>Name<input id="destination-name" maxlength="80" required></label>
                     </div>
                     <div class="shortcut-fields">
-                      <label>X (m)<input id="destination-x" type="number" step="any" required></label>
-                      <label>Y (m)<input id="destination-y" type="number" step="any" required></label>
-                      <label>Yaw (rad)<input id="destination-yaw" type="number" step="any" required></label>
+                      <label>X (m)<input id="destination-x" type="number" step="0.01" required></label>
+                      <label>Y (m)<input id="destination-y" type="number" step="0.01" required></label>
+                      <label>Yaw (rad)<input id="destination-yaw" type="number" step="0.1" required></label>
                     </div>
                     <div class="command-row">
                       <button id="destination-use-robot" type="button" class="secondary">Use current robot pose</button>

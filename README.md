@@ -516,6 +516,13 @@ Authenticated destination endpoints are `GET /api/presets`,
 the server generates a UUID. Edits include the record's `id` and `revision`;
 deletes require both as well.
 
+Native number steppers use increments of **0.01 m** for distance/height,
+**0.1 rad** for angles, **0.1 rad/s** for angular speed, and **0.1 s** for
+duration, consistently across manual controls and shortcuts. The browser applies
+its normal step-grid rounding. Waist yaw steps are aligned to zero; the exact
+lower bound is validated separately. Fixed box IDs use whole-number text entry
+without a stepper.
+
 ### Timed rotation controls
 
 **Rotate in place** accepts signed angular speed (rad/s) and duration (seconds).

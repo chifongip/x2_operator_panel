@@ -151,7 +151,7 @@ class UiAssetsTest(unittest.TestCase):
         self.assertIn('id="set-posture"', page)
         self.assertIn('id="reset-posture"', page)
         self.assertIn('id="release-posture"', page)
-        self.assertIn('value="0.0" step="any"', page)
+        self.assertIn('value="0.0" step="0.1"', page)
         self.assertIn("function setLocomanipulationPosture", script)
         self.assertIn("function resetLocomanipulationPosture", script)
         self.assertIn("function releaseLocomanipulationPosture", script)
