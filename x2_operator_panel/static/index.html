@@ -24,6 +24,10 @@
         <h1>X2 Operator Panel</h1>
         <p id="connection-status" class="muted">Connecting</p>
       </div>
+      <div class="layout-switch">
+        <button id="toggle-layout" class="secondary layout-toggle" type="button" aria-pressed="false" aria-describedby="layout-hint">Split layout</button>
+        <span id="layout-hint" class="muted">Current layout</span>
+      </div>
     </header>
 
     <div class="button-legend" role="note" aria-label="Button color meanings">
@@ -36,8 +40,8 @@
 
     <p id="panel-error" class="panel-error" role="alert"></p>
 
-    <main class="layout">
-      <section class="map-section" aria-label="Navigation map">
+    <main id="panel-layout" class="layout">
+      <section id="navigation-map" class="map-section" aria-label="Navigation map">
         <div class="section-heading">
           <div>
             <h2>Navigation map</h2>
@@ -70,7 +74,7 @@
         </div>
       </section>
 
-      <aside class="status-section" aria-label="Robot status">
+      <aside id="robot-status" class="status-section" aria-label="Robot status">
         <section>
           <h2>System status</h2>
           <dl class="status-list">
@@ -113,7 +117,7 @@
         </section>
       </aside>
 
-      <section class="camera-section" aria-label="AprilTag camera previews">
+      <section id="camera-previews" class="camera-section" aria-label="AprilTag camera previews">
         <div class="section-heading">
           <div>
             <h2>AprilTag camera previews</h2>
@@ -151,7 +155,7 @@
         </div>
       </section>
 
-      <section class="commands-section" aria-label="Commands">
+      <section id="panel-commands" class="commands-section" aria-label="Commands">
         <header class="commands-header">
           <div class="section-heading compact">
             <h2>Commands</h2>
@@ -462,7 +466,7 @@
         </div>
       </section>
 
-      <section class="operations-section" aria-label="Operation history">
+      <section id="operation-history" class="operations-section" aria-label="Operation history">
         <h2>Operations</h2>
         <div class="table-scroll">
           <table>
@@ -472,10 +476,12 @@
         </div>
       </section>
 
-      <section class="audit-section" aria-label="Audit history">
+      <section id="audit-history" class="audit-section" aria-label="Audit history">
         <h2>Audit</h2>
         <ol id="audit-log" class="audit-log"></ol>
       </section>
+      <div id="monitor-column" class="layout-column" role="region" aria-label="Monitoring" tabindex="0" hidden></div>
+      <div id="controls-column" class="layout-column" role="region" aria-label="Execution and commands" tabindex="0" hidden></div>
     </main>
   </div>
   <script src="/assets/app.js" defer></script>

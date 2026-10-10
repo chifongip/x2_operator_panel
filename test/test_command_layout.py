@@ -78,3 +78,21 @@ def test_task_controls_stay_visible_and_details_use_requested_defaults():
         details = [attributes for tag, attributes in layout.nodes[identifier][1] if tag == "details"]
         assert details and all("open" in attributes for attributes in details), identifier
     assert "hidden" in layout.nodes["manual-place-fields"][0]
+
+
+def test_layout_switch_and_scroll_regions_are_accessible_and_empty_by_default():
+    layout = CommandLayout()
+    toggle = layout.nodes["toggle-layout"][0]
+    assert toggle["type"] == "button"
+    assert toggle["aria-pressed"] == "false"
+    assert toggle["aria-describedby"] == "layout-hint"
+    for identifier in ("monitor-column", "controls-column"):
+        attributes = layout.nodes[identifier][0]
+        assert attributes["role"] == "region"
+        assert attributes["tabindex"] == "0"
+        assert "hidden" in attributes
+        assert layout.inside(identifier, "panel-layout")
+    for identifier in ("navigation-map", "robot-status", "camera-previews", "execution-controls",
+                       "panel-commands", "operation-history", "audit-history"):
+        assert not layout.inside(identifier, "monitor-column")
+        assert not layout.inside(identifier, "controls-column")

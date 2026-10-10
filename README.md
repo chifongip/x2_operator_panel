@@ -487,8 +487,25 @@ Existing execution unlock, confirmations, and server motion authority apply.
 
 ### Command layout
 
-A full-width **Execution controls** section directly above Commands contains
-the physical-motion unlock, its status badge, and **Cancel active goals**.
+The top-bar **Split layout** toggle switches between the existing layout and a
+desktop layout with monitoring on the left (60%) and execution on the right
+(40%). The left column contains the navigation map, system status and health,
+camera previews, Operations, and Audit. Navigation map and system status share
+a row; Operations and Audit share another, with camera previews between them.
+The right column contains Execution
+controls and all Commands. Each column scrolls independently while the top bar,
+legend, and error banner remain visible.
+
+The existing layout is the default. The browser remembers your selection across
+refreshes when local storage is available. At widths of 980 px or less, the panel
+uses the existing single-column layout and normal page scrolling; widening the
+window restores your selected split layout. Switching preserves entered values,
+map selections, expanded details, and running tasks. It does not submit or cancel
+commands, change motion authorization, or restart camera previews.
+
+In the existing layout, a full-width **Execution controls** section directly
+above Commands contains the physical-motion unlock, its status badge, and
+**Cancel active goals**.
 
 The Commands header contains the shared **Plan only** toggle and **Visible box**
 selection. The selected box applies to standalone actions and the quick combo.

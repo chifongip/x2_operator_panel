@@ -6,6 +6,16 @@ import unittest
 
 class GuidedWorkflowTest(unittest.TestCase):
     @unittest.skipUnless(shutil.which("node"), "Node.js is needed for browser tests")
+    def test_panel_layout_switch_and_responsive_preference(self):
+        root = Path(__file__).parents[1]
+        result = subprocess.run(
+            ["node", str(root / "test/test_panel_layout.js"),
+             str(root / "x2_operator_panel/static/app.js")],
+            capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is needed for browser tests")
     def test_rotation_controls(self):
         root = Path(__file__).parents[1]
         subprocess.run(

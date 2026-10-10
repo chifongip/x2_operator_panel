@@ -136,3 +136,24 @@ h3 { grid-column: 1 / -1; font-size: .82rem; font-weight: 650; }
 .shortcut-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(135px, 1fr)); gap: 10px; }
 
 .shortcut-selection[aria-pressed="true"] { outline: 3px solid var(--button-motion); outline-offset: 2px; font-weight: 700; }
+
+.layout-switch { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.layout-switch .muted { font-size: .78rem; }
+.layout-toggle[aria-pressed="true"] { background: var(--button-neutral); border-color: var(--button-neutral); color: #fff; }
+.layout-toggle[aria-pressed="true"]:hover { background: var(--button-neutral-hover); }
+.panel-view.split-layout { display: flex; flex-direction: column; height: 100vh; height: 100dvh; overflow: hidden; }
+.split-layout > .topbar, .split-layout > .button-legend, .split-layout > .panel-error { flex-shrink: 0; }
+.split-layout > .layout { flex: 1; min-height: 0; width: 100%; max-width: none; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); align-items: stretch; overflow: hidden; }
+.layout-column { position: relative; display: flex; flex-direction: column; gap: 12px; min-width: 0; min-height: 0; padding: 0 4px 4px 0; overflow: auto; scrollbar-gutter: stable; }
+.layout-column:focus-visible { outline: 3px solid #245da8; outline-offset: -3px; }
+.split-layout .layout-column > * { flex-shrink: 0; min-width: 0; grid-column: auto; }
+.split-layout .commands-section, .split-layout .task-panels { grid-template-columns: minmax(0, 1fr); }
+.split-layout .execution-actions { justify-content: flex-start; }
+.split-layout #map-canvas { width: 100%; min-width: 0; }
+.split-layout .map-legend { flex-wrap: wrap; }
+.split-layout #monitor-column { display: grid; grid-template-columns: minmax(0, 1.9fr) minmax(0, .85fr); grid-auto-rows: max-content; align-content: start; align-items: start; }
+.split-layout #navigation-map, .split-layout #operation-history { grid-column: 1; }
+.split-layout #robot-status, .split-layout #audit-history { grid-column: 2; }
+.split-layout #camera-previews { grid-column: 1 / -1; }
+.split-layout #robot-status .status-list div { flex-wrap: wrap; gap: 4px 12px; }
+.split-layout #robot-status .status-list dd { max-width: 100%; overflow-wrap: anywhere; }

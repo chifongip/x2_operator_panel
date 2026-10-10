@@ -40,6 +40,59 @@
   const canvas = byId("map-canvas");
   const context = canvas.getContext("2d");
 
+  function initializePanelLayout() {
+    const panel = byId("panel-view");
+    const layout = byId("panel-layout");
+    const toggle = byId("toggle-layout");
+    const hint = byId("layout-hint");
+    const monitoring = byId("monitor-column");
+    const controls = byId("controls-column");
+    const desktop = window.matchMedia("(min-width: 981px)");
+    const storageKey = "x2_operator_panel_layout";
+    const sections = [
+      ["navigation-map", monitoring], ["robot-status", monitoring],
+      ["camera-previews", monitoring], ["execution-controls", controls],
+      ["panel-commands", controls], ["operation-history", monitoring],
+      ["audit-history", monitoring],
+    ].map(([id, column]) => {
+      const element = byId(id);
+      const anchor = document.createComment(`Original position: ${id}`);
+      layout.insertBefore(anchor, element);
+      return { element, anchor, column };
+    });
+    let preference = "classic";
+    let splitActive = false;
+    try {
+      if (window.localStorage.getItem(storageKey) === "split") preference = "split";
+    } catch (_) { /* Layout switching also works when storage is unavailable. */ }
+
+    function applyLayout() {
+      const split = preference === "split" && desktop.matches;
+      if (split !== splitActive) {
+        const focused = document.activeElement;
+        for (const { element, anchor, column } of sections) {
+          if (split) column.appendChild(element);
+          else layout.insertBefore(element, anchor.nextSibling);
+        }
+        monitoring.hidden = controls.hidden = !split;
+        panel.classList.toggle("split-layout", split);
+        splitActive = split;
+        if (focused && panel.contains(focused)) focused.focus({ preventScroll: true });
+      }
+      toggle.setAttribute("aria-pressed", String(preference === "split"));
+      hint.textContent = preference === "classic" ? "Current layout"
+        : split ? "Monitoring left · Controls right" : "Split layout on larger screens";
+    }
+
+    toggle.addEventListener("click", () => {
+      preference = preference === "split" ? "classic" : "split";
+      try { window.localStorage.setItem(storageKey, preference); } catch (_) {}
+      applyLayout();
+    });
+    desktop.addEventListener("change", applyLayout);
+    applyLayout();
+  }
+
   async function api(path, options = {}) {
     const response = await fetch(path, {
       credentials: "same-origin",
@@ -2400,4 +2453,5 @@
     input.addEventListener("input", validateMinimum);
     validateMinimum();
   });
+  initializePanelLayout();
 })();
