@@ -66,20 +66,19 @@ class NavigationGoalStatus(ActionGoalStatus):
 
     def snapshot(self, now: float) -> dict[str, Any]:
         actions = super().snapshot(now)
-        # The primary action is required; the second action is optional until
-        # discovered. A known active goal always overrides incomplete state.
-        required = [
-            actions[name] for name in self.ACTIONS
-            if name == self.ACTIONS[0] or self.actions[name]["seen"]
-        ]
-        active = any(state["active"] is True for state in required)
-        available = active or all(state["available"] for state in required)
-        connected = any(state["connected"] for state in required)
+        # Panel tasks use NavigateToPose. An unused secondary server may never
+        # publish status, but any reported active goal must still block tasks.
+        primary = actions[self.ACTIONS[0]]
+        active = any(state["active"] is True for state in actions.values())
+        available = active or primary["available"]
         return {
             "available": available, "active": active if available else None,
-            "detail": ("Active navigation goal" if active else "Nav2 is idle") if available else (
-                "Navigation goal state unknown; waiting for action status" if connected
-                else "Nav2 action server unavailable"
+            "detail": (
+                "Active navigation goal" if active
+                else "Single-pose navigation is idle; no active navigation reported"
+            ) if available else (
+                "Single-pose navigation goal state unknown; waiting for action status"
+                if primary["connected"] else "Single-pose Nav2 action server unavailable"
             ),
             "actions": actions,
         }

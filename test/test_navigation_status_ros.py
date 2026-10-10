@@ -3,6 +3,7 @@
 import threading
 import time
 import unittest
+from unittest.mock import Mock
 
 import rclpy
 from agibot_x2_manipulation_msgs.action import Pick
@@ -36,6 +37,8 @@ class StatusMonitor(Node):
     _assert_task_idle_locked = OperatorPanelNode._assert_task_idle_locked
     _assert_task_idle = OperatorPanelNode._assert_task_idle
     _optional_boolean = staticmethod(OperatorPanelNode._optional_boolean)
+    _parse_map_target = staticmethod(OperatorPanelNode._parse_map_target)
+    _pose_from_values = staticmethod(OperatorPanelNode._pose_from_values)
 
     def __init__(self, context, name):
         super().__init__(name, context=context)
@@ -76,9 +79,16 @@ class NavigationStatusRosTest(unittest.TestCase):
         servers = []
         late_monitor = None
 
+        completed_goals = []
+
         def finish_goal(handle):
+            completed_goals.append(handle)
             handle.succeed()
             return NavigateToPose.Result()
+
+        def finish_secondary_goal(handle):
+            handle.succeed()
+            return NavigateThroughPoses.Result()
 
         def spin_until(predicate, timeout=5.0):
             deadline = time.monotonic() + timeout
@@ -107,11 +117,40 @@ class NavigationStatusRosTest(unittest.TestCase):
             servers.append(primary)
             spin_until(lambda: state()["actions"]["navigate_to_pose"]["connected"])
             assert state()["available"] is False  # Readiness does not imply Idle.
+            accepted = []
+            secondary = ActionServer(
+                server_node, NavigateThroughPoses, "/navigate_through_poses",
+                finish_secondary_goal,
+                handle_accepted_callback=accepted.append,
+            )
+            servers.append(secondary)
+            spin_until(lambda: state()["actions"]["navigate_through_poses"]["connected"])
             sent = monitor._navigation_status_clients["navigate_to_pose"].send_goal_async(
                 NavigateToPose.Goal()
             )
             spin_until(lambda: sent.done() and state()["active"] is False)
             hold_state(False)
+
+            # Both servers exist, but only the primary has received a goal.
+            # Exercise real navigation admission without an idle override; mock
+            # operation bookkeeping while the fake server owns goal status.
+            assert state()["actions"]["navigate_through_poses"]["available"] is False
+            monitor._map_pose = {"available": True, "fresh": True}
+            monitor._initial_pose_status_locked = Mock(return_value={"state": "NOT_REQUESTED"})
+            monitor._action_clients = {
+                "navigate": monitor._navigation_status_clients["navigate_to_pose"],
+            }
+            monitor.goal_admission_timeout_sec = 5.0
+            monitor._register_operation = Mock()
+            monitor._on_goal_response = Mock()
+            monitor._audit = Mock()
+            operation = monitor._submit_navigation({
+                "confirmed": True, "goal": {"x": 1.0, "y": 0.0, "yaw": 0.0},
+            })
+            assert operation.kind == "navigate"
+            spin_until(lambda: len(completed_goals) == 2 and state()["active"] is False)
+            monitor._audit.assert_called_with(
+                "navigate", "submitted", "map target; Nav2 action status reports idle")
 
             # A new subscription must load the server's retained terminal status.
             late_monitor = StatusMonitor(context, "late_navigation_status_monitor")
@@ -146,15 +185,8 @@ class NavigationStatusRosTest(unittest.TestCase):
                 task_server.destroy()
                 servers.remove(task_server)
 
-            accepted = []
-            secondary = ActionServer(
-                server_node, NavigateThroughPoses, "/navigate_through_poses",
-                lambda handle: NavigateThroughPoses.Result(),
-                handle_accepted_callback=accepted.append,
-            )
-            servers.append(secondary)
-            spin_until(lambda: state()["actions"]["navigate_through_poses"]["connected"])
-            assert state()["available"] is False
+            assert state()["available"] is True
+            assert state()["actions"]["navigate_through_poses"]["available"] is False
             monitor._navigation_status_clients["navigate_through_poses"].send_goal_async(
                 NavigateThroughPoses.Goal()
             )
@@ -169,10 +201,15 @@ class NavigationStatusRosTest(unittest.TestCase):
             else:
                 raise AssertionError("Fine Align admitted while navigation was active")
 
+            accepted[0].execute()
+            spin_until(lambda: state()["actions"]["navigate_through_poses"]["active"] is False)
+            assert state()["active"] is False
+            monitor._assert_task_idle()
+
             secondary.destroy()
             servers.remove(secondary)
             spin_until(lambda: not state()["actions"]["navigate_through_poses"]["connected"])
-            assert state()["available"] is False
+            assert state()["available"] is True
 
             primary.destroy()
             servers.remove(primary)

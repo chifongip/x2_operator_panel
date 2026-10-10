@@ -390,11 +390,18 @@ during silence. The panel monitors both `/navigate_to_pose/_action/status` and
 server is ready and its DDS status-publisher identity is unchanged. A server
 disconnect or publisher replacement clears that action's cached state. A known
 active goal on either action blocks all new tasks, even with operator idle
-confirmation. The second action is optional
-until discovered; once discovered, missing status from it prevents a combined
-Idle indication. Before the first status, readiness alone does not establish
-Idle: the existing operator-idle confirmation remains required. Hover over the
-goal state to see each action's state and the age of its last message.
+confirmation. Panel tasks use single-pose navigation: when no active goal is
+reported on either action, the combined state follows `/navigate_to_pose`.
+An unused `/navigate_through_poses` server does not have to publish status before
+the panel can report Idle. Its unknown state, disconnect, or restart does not
+invalidate a known idle primary action. This policy does not guarantee that an
+external multi-pose action with unknown status is idle; external multi-pose
+operation is outside the required idle guarantee.
+Before the first primary-action status, readiness alone does not establish
+Idle: the existing operator-idle confirmation remains required, including in
+administrator mode. Primary disconnects or publisher replacements require a new
+primary status. Hover over the goal state to see each action's state and the age
+of its last message; the secondary action remains Unknown until status arrives.
 `nav_goal_status_freshness_sec` remains accepted for launch compatibility but is
 deprecated and no longer expires action state. A
 map goal sends one confirmed `NavigateToPose`

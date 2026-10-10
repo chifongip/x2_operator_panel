@@ -15,7 +15,10 @@ function fixture(kind, fast = false, completionStatus = "SUCCEEDED") {
     status: {
       operations: [{ id: "navigation-1", kind: "navigate", status: "SUCCEEDED" }],
       manipulation_state: { state: kind === "pick" ? "EMPTY" : "HOLDING" },
-      navigation: { goal_status: { available: true, active: false } },
+      navigation: { goal_status: { available: true, active: false, actions: {
+        navigate_to_pose: { available: true, active: false },
+        navigate_through_poses: { available: false, active: null, connected: true },
+      } } },
       docking_profiles: { available: true, default_profile: "default", profiles: [
         { id: "default", tag_id: 9, tag_frame: "tag9" }, { id: "offset", tag_id: 9, tag_frame: "tag9" },
       ] },
@@ -90,6 +93,9 @@ async function fullSequence(kind, fast = false) {
     }
   }
   assert.equal(f.confirmations.length, 1, "The entire sequence needs one confirmation");
+  assert.equal(f.confirmations[0].includes("Nav2 status is unavailable"), false,
+    "Unknown secondary status must not warn when aggregate single-pose status is available");
+  assert.equal(f.commands()[0].payload.confirm_nav2_idle, false);
   assert.deepEqual(f.commands().map((call) => call.payload.kind || "posture"),
     ["fine_align", "posture", kind, "posture", "undock"]);
   assert.equal(f.calls.filter((call) => call.path === "/api/unlock/execution").length, 4,
@@ -617,6 +623,13 @@ async function boxBindingChecks() {
   assert.equal(administrator.commands().length, 5);
   assert.equal(administrator.calls.filter((call) => call.path === "/api/unlock/execution").length, 0);
   assert.ok(administrator.confirmations.length > 0, "Administrator sequences still require confirmation");
+
+  const unknownPrimary = fixture("pick");
+  unknownPrimary.state.status.navigation.goal_status.available = false;
+  unknownPrimary.state.status.navigation.goal_status.active = null;
+  await unknownPrimary.context.advanceGuidedWorkflow();
+  assert.match(unknownPrimary.confirmations[0], /Nav2 status is unavailable: confirm Nav2 is idle/);
+  assert.equal(unknownPrimary.commands()[0].payload.confirm_nav2_idle, true);
 
   const locked = fixture("pick");
   locked.state.status.execution_unlock_remaining_sec = 0;

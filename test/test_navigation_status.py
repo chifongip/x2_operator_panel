@@ -53,7 +53,7 @@ class NavigationStatusTest(unittest.TestCase):
         assert status.snapshot(102.0)["available"] is False
         status.receive(PRIMARY, b"first", [4], 103.0)
         status.observe_server(PRIMARY, frozenset(), False)
-        assert status.snapshot(104.0)["detail"] == "Nav2 action server unavailable"
+        assert status.snapshot(104.0)["detail"] == "Single-pose Nav2 action server unavailable"
 
     def test_secondary_navigation_blocks_idle_and_overrides_unknown_primary(self):
         status = connected_status()
@@ -65,7 +65,7 @@ class NavigationStatusTest(unittest.TestCase):
         status.receive(PRIMARY, b"first", [4], 1003.0)
         assert status.snapshot(1004.0)["active"] is False
         status.observe_server(SECONDARY, frozenset(), False)
-        assert status.snapshot(1005.0)["available"] is False
+        assert status.snapshot(1005.0)["available"] is True
 
     def test_known_active_primary_overrides_unknown_secondary(self):
         status = connected_status()
@@ -86,3 +86,49 @@ class NavigationStatusTest(unittest.TestCase):
         assert status.snapshot(101.0)["available"] is False
         status.observe_server(PRIMARY, frozenset({b"first"}), True)
         assert status.snapshot(102.0)["active"] is True
+
+
+    def test_idle_primary_survives_secondary_discovery_silence_and_restart(self):
+        status = connected_status()
+        status.receive(PRIMARY, b"first", [4], 100.0)
+        for publishers, ready in (
+            (frozenset({b"second"}), True),
+            (frozenset(), False),
+            (frozenset({b"replacement"}), True),
+            (frozenset({b"replacement", b"duplicate"}), True),
+        ):
+            with self.subTest(publishers=publishers):
+                status.observe_server(SECONDARY, publishers, ready)
+                result = status.snapshot(1000.0)
+                assert result["available"] is True
+                assert result["active"] is False
+                assert result["actions"][SECONDARY]["available"] is False
+                assert result["actions"][SECONDARY]["age_sec"] is None
+                assert "no active navigation reported" in result["detail"]
+
+    def test_secondary_active_states_override_idle_or_unknown_primary(self):
+        for primary_idle in (True, False):
+            for code in (1, 2, 3):
+                with self.subTest(primary_idle=primary_idle, secondary_status=code):
+                    status = connected_status()
+                    if primary_idle:
+                        status.receive(PRIMARY, b"first", [4], 100.0)
+                    status.observe_server(SECONDARY, frozenset({b"second"}), True)
+                    status.receive(SECONDARY, b"second", [code], 101.0)
+                    assert status.snapshot(102.0)["active"] is True
+                    for terminal in (4, 5, 6):
+                        status.receive(SECONDARY, b"second", [terminal], 103.0)
+                        result = status.snapshot(104.0)
+                        assert result["available"] is primary_idle
+                        assert result["active"] is (False if primary_idle else None)
+
+    def test_secondary_idle_does_not_establish_primary_status(self):
+        status = connected_status()
+        status.observe_server(SECONDARY, frozenset({b"second"}), True)
+        status.receive(SECONDARY, b"second", [], 100.0)
+        assert status.snapshot(101.0)["available"] is False
+        assert "Single-pose" in status.snapshot(101.0)["detail"]
+        status.observe_server(PRIMARY, frozenset(), False)
+        result = status.snapshot(102.0)
+        assert result["available"] is False
+        assert "server unavailable" in result["detail"]
