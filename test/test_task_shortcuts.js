@@ -38,6 +38,7 @@ function fixture(item = shortcut(), fast = false) {
     status: { operations: [], manipulation_state: { state: item.action === "pick" ? "EMPTY" : "HOLDING" },
       navigation: { goal_status: { available: true, active: false } }, execution_unlock_remaining_sec: 30,
       locomanipulation_posture: { ready: true },
+      rotation_limits: { available: true, max_angular_speed: 0.5, max_duration: 60 },
       servers: { navigate: true, move_carry_pose: true }, map_pose: { available: true, fresh: true },
       docking_profiles: { available: true, default_profile: "grey_box_dock", profiles: [
         { id: "grey_box_dock", target_source: "box", undock_mode: "timed_reverse", standoff: 0.4 },
@@ -955,5 +956,48 @@ async function pairedShortcutChecks() {
   assert.equal(removed.state.selectedShortcuts.place, null);
 }
 
-(async () => { await pairedShortcutChecks(); await sequenceChecks(); await failureChecks(); await overlappingSaveChecks(); await shortcutButtonChecks(); await editorChecks(); await profileTargetChecks(); await provisionalTargetChecks(); await numericBoxIdChecks(); await dockingDropdownChecks(); await boxAndTableDropdownChecks(); await boxProfileNameChecks(); await navigationCarryChecks(); })()
+async function rotationChecks() {
+  const item = shortcut();
+  item.rotate_start = { enabled: true, angular_speed: -0.2, duration: 2 };
+  item.rotate_end = { enabled: true, angular_speed: 0.3, duration: 3 };
+  item.navigate_start = { enabled: true, preset_id: "loading-bay" };
+  item.carry_end = { enabled: true, pose: "b" };
+  item.navigate_end = { enabled: true, preset_id: "dropoff" };
+  const f = fixture(item);
+  assert.deepEqual(Array.from(f.context.shortcutSteps(item)), ["navigate_start", "rotate_start", "fine_align",
+    "set_height", "manipulate", "default_height", "undock", "rotate_end", "carry_end", "navigate_end"]);
+  await f.context.runTaskShortcut();
+  await f.finish(); // navigation -> rotate before combo
+  assert.equal(f.commands()[1].payload.kind, "rotate_in_place");
+  assert.equal(f.commands()[1].payload.angular_speed, -0.2);
+  assert.equal(f.commands()[1].payload.duration, 2);
+  f.state.taskShortcuts.shortcuts[0].rotate_end.duration = 55; // Active snapshot remains unchanged.
+  await f.finish("ABORTED");
+  assert.equal(f.commands().length, 2, "Failed rotation must not advance or retry automatically");
+  assert.equal(f.state.guidedWorkflow.failed, true);
+  f.state.status.execution_unlock_remaining_sec = 30;
+  await f.context.continueGuidedWorkflow();
+  await flush();
+  assert.match(f.confirmations.at(-1), /FULL duration again/);
+  assert.equal(f.commands()[2].payload.duration, 2, "Explicit retry uses the full saved duration");
+  for (let index = 0; index < 6; index++) await f.finish();
+  assert.equal(f.commands().at(-1).payload.kind, "rotate_in_place");
+  assert.equal(f.commands().at(-1).payload.angular_speed, 0.3);
+  assert.equal(f.commands().at(-1).payload.duration, 3);
+  await f.finish();
+  await f.finish();
+  await f.finish();
+  assert.equal(f.state.guidedWorkflow.completed, true);
+  const editor = fixture(item);
+  editor.context.editTaskShortcut("edit");
+  assert.equal(editor.byId("shortcut-rotate-start-speed").value, "-0.2");
+  assert.equal(editor.byId("shortcut-rotate-end-duration").value, "3");
+  const unavailable = fixture(item);
+  unavailable.state.status.rotation_limits.available = false;
+  await unavailable.context.runTaskShortcut();
+  assert.equal(unavailable.commands().length, 0);
+  assert.match(unavailable.context.error, /Rotation limits/);
+}
+
+(async () => { await rotationChecks(); await pairedShortcutChecks(); await sequenceChecks(); await failureChecks(); await overlappingSaveChecks(); await shortcutButtonChecks(); await editorChecks(); await profileTargetChecks(); await provisionalTargetChecks(); await numericBoxIdChecks(); await dockingDropdownChecks(); await boxAndTableDropdownChecks(); await boxProfileNameChecks(); await navigationCarryChecks(); })()
   .catch((error) => { console.error(error); process.exitCode = 1; });

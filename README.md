@@ -516,12 +516,46 @@ Authenticated destination endpoints are `GET /api/presets`,
 the server generates a UUID. Edits include the record's `id` and `revision`;
 deletes require both as well.
 
+### Timed rotation controls
+
+**Rotate in place** accepts signed angular speed (rad/s) and duration (seconds).
+Positive speed turns counterclockwise; negative turns clockwise. The displayed
+angle is speed × duration and is approximate: rotation does not use odometry or
+tag feedback. **Run** requires physical execution unlock, confirmation, a known
+`EMPTY` or `HOLDING` state, active Collision Monitor, and idle Nav2. When Nav2
+status is unavailable, explicitly confirm it is idle; Nav2 processes need not run.
+Plan only disables rotation. **Cancel rotation** cancels the active timed turn;
+the global cancellation controls also include rotation.
+
+`POST /api/actions` accepts `kind: "rotate_in_place"`, `angular_speed`, `duration`,
+`confirmed: true`, and, when required, `confirm_nav2_idle: true`. The gateway reads
+limits from `/fine_align_server/get_parameters`; `/api/status.rotation_limits`
+reports `available`, `max_angular_speed`, and `max_duration`. The server remains
+authoritative and rejects invalid or excessive values without clamping. Operation
+feedback shows elapsed time, commanded speed, and progress; results include elapsed
+time and the reason for completion or interruption. See the navigation README for
+server limit parameters and ROS action usage.
+
 ### Editable task shortcuts
 
 In **Tasks → Saved shortcuts → Manage shortcuts**, choose **New**, name the shortcut, select **Pick** or
 **Place held box**, and configure the optional stages around the combo:
 
-**Navigation → Carry Pose → Combo Task → Carry Pose → Navigation**
+**Navigation → Carry Pose → Rotate → Combo Task → Rotate → Carry Pose → Navigation**
+
+Each rotation stage has its own enable checkbox, signed `angular_speed`, and
+`duration`. The initial rotation runs after initial navigation/carry and before
+Dock; the final rotation runs after Undock and before final carry/navigation.
+Disabled docking or undocking does not disable an enabled rotation. Rotation
+stages default to disabled in new and existing shortcuts; their initial editable
+values are 0.2 rad/s and 1 second. Saved version-1 records without `rotate_start`
+or `rotate_end` load with these stages disabled. Saving never commands motion.
+
+A failed or canceled rotation stops the shortcut. After reviewing the current
+orientation, unlocking, and choosing **Continue**, the confirmation explicitly
+states that retrying commands the **full duration again**. Remaining duration is
+never inferred, and interrupted turns are never retried automatically. Unknown
+outcomes retain the existing workflow block until resolved.
 
 Each navigation and carry stage has its own enable checkbox and target.
 Navigation destinations come from the editable destination catalog; Carry Pose offers

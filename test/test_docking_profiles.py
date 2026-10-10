@@ -12,6 +12,7 @@ from rclpy.parameter import Parameter
 from x2_navigation.action import FineAlign, Undock
 
 from x2_operator_panel.docking_profiles import DockingProfileMonitor
+from x2_operator_panel.rotation_limits import RotationLimitsMonitor
 from x2_operator_panel.ros_gateway import OperatorPanelNode, PanelCommandError
 
 
@@ -65,6 +66,22 @@ class ParameterClient:
 
 
 class DockingProfileMonitorTest(unittest.TestCase):
+    def test_rotation_limits_discovery_invalid_and_unavailable(self):
+        client = ParameterClient()
+        client.parameters.update(rotate_max_angular_speed=0.5, rotate_max_duration=60.0)
+        monitor = RotationLimitsMonitor(client, 1.0)
+        monitor.poll()
+        self.assertEqual(monitor.snapshot()["max_duration"], 60.0)
+        self.assertEqual(monitor.snapshot()["max_angular_speed"], 0.5)
+        client.ready = False
+        monitor.poll()
+        self.assertFalse(monitor.snapshot()["available"])
+        client.ready = True
+        client.parameters["rotate_max_duration"] = -1.0
+        monitor.poll()
+        self.assertFalse(monitor.snapshot()["available"])
+
+
     def test_legacy_service_rejecting_unknown_optional_parameters_remains_available(self):
         class StrictParameterClient(ParameterClient):
             def call_async(self, request):

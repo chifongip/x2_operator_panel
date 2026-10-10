@@ -220,3 +220,31 @@ def test_carry_before_place_is_allowed_but_after_place_is_rejected():
     value["carry_end"] = {"enabled": True, "pose": "a"}
     with pytest.raises(ShortcutError, match="held box"):
         validate_shortcut(value)
+
+
+def test_rotation_settings_persist_and_legacy_stages_default_disabled(tmp_path):
+    store = TaskShortcutStore(tmp_path / "shortcuts.json")
+    legacy = store.save(pick_shortcut())["shortcut"]
+    assert not legacy["rotate_start"]["enabled"]
+    assert not legacy["rotate_end"]["enabled"]
+    value = dict(legacy, rotate_start={"enabled": True, "angular_speed": -0.3, "duration": 2.0},
+                 rotate_end={"enabled": True, "angular_speed": 0.2, "duration": 3.0})
+    saved = store.save(value)["shortcut"]
+    assert saved["id"] == legacy["id"]
+    assert TaskShortcutStore(store.path).snapshot()["shortcuts"] == [saved]
+    duplicate = dict(saved)
+    del duplicate["id"]
+    del duplicate["revision"]
+    copy = store.save(duplicate)["shortcut"]
+    assert copy["id"] != saved["id"]
+    assert copy["rotate_start"] == saved["rotate_start"]
+
+
+@pytest.mark.parametrize("field,value", [("angular_speed", 0), ("angular_speed", True),
+                                         ("angular_speed", float("nan")), ("duration", -1),
+                                         ("duration", 0), ("duration", float("inf"))])
+def test_invalid_rotation_settings_rejected(field, value):
+    shortcut = pick_shortcut()
+    shortcut["rotate_start"] = {"enabled": True, "angular_speed": 0.2, "duration": 1.0, field: value}
+    with pytest.raises(ShortcutError):
+        validate_shortcut(shortcut)

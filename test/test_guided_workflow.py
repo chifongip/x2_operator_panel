@@ -6,6 +6,15 @@ import unittest
 
 class GuidedWorkflowTest(unittest.TestCase):
     @unittest.skipUnless(shutil.which("node"), "Node.js is needed for browser tests")
+    def test_rotation_controls(self):
+        root = Path(__file__).parents[1]
+        subprocess.run(
+            ["node", str(root / "test/test_rotation_controls.js"),
+             str(root / "x2_operator_panel/static/app.js")],
+            check=True,
+        )
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is needed for browser tests")
     def test_navigation_destination_editor_and_persistence_requests(self):
         root = Path(__file__).parents[1]
         result = subprocess.run(

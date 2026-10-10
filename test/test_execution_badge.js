@@ -26,6 +26,7 @@ const context = vm.createContext({
   },
   byId: (id) => id === "execution-state" ? badge : planOnly,
   renderSavedPlans: () => {},
+  renderRotation: () => {},
   renderGuidedWorkflow: () => { guidedRenders += 1; },
   updateGuidedWorkflow: () => {}, addPoseToTrail: () => {}, drawMap: () => {},
   renderStatus: () => context.renderExecutionState(),

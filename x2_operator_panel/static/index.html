@@ -86,6 +86,7 @@
             <div><dt>Nav2 server</dt><dd id="navigate-server">Waiting</dd></div>
             <div><dt>Fine align</dt><dd id="fine-align-server">Waiting</dd></div>
             <div><dt>Undock</dt><dd id="undock-server">Waiting</dd></div>
+            <div><dt>Rotate</dt><dd id="rotate-server">Waiting</dd></div>
           </dl>
         </section>
         <section>
@@ -232,6 +233,12 @@
               <p class="muted">Available before Place, when a box is held.</p>
             </fieldset>
             <p class="muted">Combo task</p>
+            <fieldset><legend><label class="plan-toggle"><input id="shortcut-rotate-start-enabled" type="checkbox">Rotate before combo</label></legend>
+              <div class="shortcut-fields">
+                <label>Angular speed (rad/s; + CCW)<input id="shortcut-rotate-start-speed" type="number" step="any" value="0.2" required></label>
+                <label>Duration (s)<input id="shortcut-rotate-start-duration" type="number" step="any" value="1" required></label>
+              </div>
+            </fieldset>
             <fieldset><legend><label class="plan-toggle"><input id="shortcut-dock-enabled" type="checkbox" checked>1. Dock</label></legend><label>Profile<select id="shortcut-dock-profile"><option value="">Choose a docking profile</option></select></label></fieldset>
             <fieldset><legend><label class="plan-toggle"><input id="shortcut-posture-enabled" type="checkbox" checked>2. Set posture</label></legend><div class="shortcut-fields">
               <label>Height (m)<input id="shortcut-posture-height" type="number" step="any" value="0.64" min="0.30" max="0.64"></label>
@@ -254,6 +261,12 @@
               <label>Waist yaw (rad)<input id="shortcut-return-yaw" type="number" step="any" value="0" min="-1.5708" max="1.5708"></label>
             </div></fieldset>
             <fieldset><legend><label class="plan-toggle"><input id="shortcut-undock-enabled" type="checkbox" checked>5. Undock</label></legend><label>Profile<select id="shortcut-undock-profile"><option value="">Choose a docking profile</option></select></label></fieldset>
+            <fieldset><legend><label class="plan-toggle"><input id="shortcut-rotate-end-enabled" type="checkbox">Rotate after combo</label></legend>
+              <div class="shortcut-fields">
+                <label>Angular speed (rad/s; + CCW)<input id="shortcut-rotate-end-speed" type="number" step="any" value="0.2" required></label>
+                <label>Duration (s)<input id="shortcut-rotate-end-duration" type="number" step="any" value="1" required></label>
+              </div>
+            </fieldset>
             <fieldset><legend><label class="plan-toggle"><input id="shortcut-carry-end-enabled" type="checkbox">Carry pose after combo</label></legend>
               <label>Pose<select id="shortcut-carry-end-pose"><option value="a">Carry A</option><option value="b">Carry B</option></select></label>
               <p class="muted">Available after Pick, while holding the box.</p>
@@ -388,6 +401,17 @@
               <button id="execute-undock" class="requires-unlock" type="button">Undock</button>
               <button id="cancel-docking-motion" class="danger" type="button" disabled>Cancel docking motion</button>
             </div>
+          </section>
+
+          <section id="rotation-commands" class="command-group" aria-labelledby="rotation-heading">
+            <h2 id="rotation-heading">Rotate in place</h2>
+            <div class="command-row">
+              <label>Angular speed (rad/s; + counterclockwise)<input id="rotation-speed" type="number" step="any" value="0.2"></label>
+              <label>Duration (s)<input id="rotation-duration" type="number" step="any" value="1"></label>
+              <button id="execute-rotation" class="requires-unlock" type="button" disabled>Rotate in place</button>
+              <button id="cancel-rotation" class="danger" type="button" disabled>Cancel rotation</button>
+            </div>
+            <p id="rotation-detail" class="muted" role="status">Waiting for rotation limits</p>
           </section>
 
           <section id="navigation-commands" class="command-group" aria-labelledby="navigation-heading">

@@ -89,6 +89,67 @@ class FakeServiceClient:
 
 
 class RosGatewayTest(unittest.TestCase):
+    def rotation_node(self):
+        node = _new_panel_node()
+        node._manipulation_state = {"state": "EMPTY"}
+        node._nav_goal_status_locked = Mock(return_value={"available": False, "active": None})
+        node._nav_lifecycle_status = {"collision_monitor": {"state_id": 3}}
+        node._execution_unlocked_until = time.monotonic() + 30
+        node._rotation_limits_monitor = SimpleNamespace(snapshot=lambda: {
+            "available": True, "max_angular_speed": 0.5, "max_duration": 60.0})
+        node._operation_history = deque(maxlen=10)
+        node.goal_admission_timeout_sec = 5.0
+        node._audit_sink = None
+        node.goals = []
+        sent = Future()
+        sent.set_result(FakeGoalHandle())
+        node._action_clients = {"rotate_in_place": SimpleNamespace(
+            send_goal_async=lambda goal, feedback_callback: node.goals.append(goal) or sent)}
+        return node
+
+    def test_rotation_without_nav2_or_profiles_and_cancel(self):
+        node = self.rotation_node()
+        operation = node._submit_rotation({"angular_speed": -0.3, "duration": 2.0,
+                                           "confirmed": True, "confirm_nav2_idle": True})
+        self.assertFalse(operation.plan_only)
+        self.assertEqual(node.goals[0].angular_speed, -0.3)
+        self.assertEqual(node.goals[0].duration, 2.0)
+        self.assertEqual(node._execution_unlocked_until, 0.0)
+        node._on_feedback(operation.identifier, SimpleNamespace(feedback=SimpleNamespace(
+            elapsed_time=0.5, commanded_speed=-0.3, progress=0.25)))
+        self.assertEqual(operation.feedback["elapsed_time"], 0.5)
+        result = node._cancel_docking_motion()
+        self.assertEqual(result["operation_ids"], [operation.identifier])
+
+    def test_rotation_admission_checks(self):
+        valid = {"angular_speed": 0.2, "duration": 1.0, "confirmed": True, "confirm_nav2_idle": True}
+        for overrides, message in [({"angular_speed": 0}, "exceeds"),
+                                   ({"angular_speed": 0.6}, "exceeds"),
+                                   ({"angular_speed": nan}, "finite"),
+                                   ({"duration": 0}, "exceeds"),
+                                   ({"duration": 61}, "exceeds"),
+                                   ({"confirmed": False}, "confirmation"),
+                                   ({"confirm_nav2_idle": False}, "verify Nav2"),
+                                   ({"plan_only": True}, "plan-only")]:
+            with self.subTest(overrides=overrides):
+                node = self.rotation_node()
+                with self.assertRaisesRegex(PanelCommandError, message):
+                    node._submit_rotation(dict(valid, **overrides))
+                self.assertEqual(node.goals, [])
+        for attribute, value, message in [
+                ("_manipulation_state", {"state": "UNKNOWN"}, "EMPTY or HOLDING"),
+                ("_nav_lifecycle_status", {}, "Collision Monitor"),
+                ("_execution_unlocked_until", 0, "unlock has expired"),
+                ("_rotation_limits_monitor", None, "limits are unavailable")]:
+            node = self.rotation_node()
+            setattr(node, attribute, value)
+            with self.assertRaisesRegex(PanelCommandError, message):
+                node._submit_rotation(valid)
+        node = self.rotation_node()
+        node._nav_goal_status_locked = Mock(return_value={"available": True, "active": True})
+        with self.assertRaisesRegex(PanelCommandError, "Nav2 must be idle"):
+            node._submit_rotation(valid)
+
     def test_saved_goal_uses_id_and_ignores_edited_targets(self):
         node = _new_panel_node()
         for kind in ("pick", "place", "pick_place", "move_carry_pose"):

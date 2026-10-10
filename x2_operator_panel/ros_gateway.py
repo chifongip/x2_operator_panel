@@ -49,7 +49,7 @@ from moveit_msgs.srv import GetPlanningScene
 from nav2_msgs.action import NavigateThroughPoses, NavigateToPose
 from nav2_msgs.srv import ClearEntireCostmap
 from nav_msgs.msg import Odometry, Path as NavPath
-from x2_navigation.action import FineAlign, Undock
+from x2_navigation.action import FineAlign, Undock, RotateInPlace
 from rcl_interfaces.srv import GetParameters
 from rclpy.action import ActionClient
 from rclpy.duration import Duration
@@ -60,6 +60,7 @@ from sensor_msgs.msg import Image, JointState, LaserScan
 from std_msgs.msg import Float32
 from tf2_ros import Buffer, TransformException, TransformListener
 
+from x2_operator_panel.rotation_limits import RotationLimitsMonitor
 from x2_operator_panel.docking_profiles import DockingProfileMonitor, unavailable_catalog
 from x2_operator_panel.box_profiles import BoxProfileMonitor
 from x2_operator_panel.table_profiles import TableProfileMonitor
@@ -73,7 +74,7 @@ _ADMISSION_BLOCKING_STATUSES = _ACTIVE_STATUSES | {"OUTCOME_UNKNOWN"}
 _TASK_ACTION_NAMES = {
     "pick": "pick_box", "place": "place_box", "pick_place": "pick_place",
     "move_carry_pose": "move_carry_pose", "reset": "reset_manipulation",
-    "fine_align": "fine_align", "undock": "undock",
+    "fine_align": "fine_align", "undock": "undock", "rotate_in_place": "rotate_in_place",
 }
 _GOAL_STATUS_NAMES = {
     GoalStatus.STATUS_UNKNOWN: "UNKNOWN",
@@ -578,6 +579,7 @@ class OperatorPanelNode(Node):
             "navigate": ActionClient(self, NavigateToPose, "/navigate_to_pose"),
             "fine_align": ActionClient(self, FineAlign, "/fine_align"),
             "undock": ActionClient(self, Undock, "/undock"),
+            "rotate_in_place": ActionClient(self, RotateInPlace, "/rotate_in_place"),
         }
         self._navigation_status_clients = {
             "navigate_to_pose": self._action_clients["navigate"],
@@ -624,6 +626,11 @@ class OperatorPanelNode(Node):
             self.service_timeout_sec,
         )
         self.create_timer(0.20, self._docking_profile_monitor.poll)
+        self._rotation_limits_monitor = RotationLimitsMonitor(
+            self.create_client(GetParameters, "/fine_align_server/get_parameters"),
+            self.service_timeout_sec,
+        )
+        self.create_timer(0.20, self._rotation_limits_monitor.poll)
         self._table_profile_monitor = TableProfileMonitor(
             self.create_client(GetParameters, "/pick_place_server/get_parameters"),
             self.service_timeout_sec,
@@ -872,6 +879,7 @@ class OperatorPanelNode(Node):
                     for name, client in self._action_clients.items()
                 },
                 "docking_profiles": self._docking_catalog(),
+                "rotation_limits": self._rotation_limits(),
                 "table_profiles": self._table_catalog(),
                 "box_profiles": self._box_catalog(),
                 "recovery_service_ready": self._recovery_client.service_is_ready(),
@@ -1145,6 +1153,8 @@ class OperatorPanelNode(Node):
                 operation = self._submit_navigation(payload)
             elif kind == "fine_align":
                 operation = self._submit_fine_align(payload)
+            elif kind == "rotate_in_place":
+                operation = self._submit_rotation(payload)
             elif kind == "undock":
                 operation = self._submit_undock(payload)
             else:
@@ -1376,6 +1386,78 @@ class OperatorPanelNode(Node):
         self._audit(
             "undock", "submitted",
             f"execution; profile={profile_id or 'last successful dock / server default'}",
+        )
+        return operation
+
+    def _rotation_limits(self) -> dict[str, Any]:
+        monitor = getattr(self, "_rotation_limits_monitor", None)
+        return monitor.snapshot() if monitor else {"available": False, "detail": "Rotation limits unavailable"}
+
+    def _submit_rotation(self, payload: dict[str, Any]) -> Operation:
+        self._assert_task_idle()
+        if self._optional_boolean(payload, "plan_only", False):
+            raise PanelCommandError("Timed rotation does not support plan-only execution")
+        speed = _finite_number(payload.get("angular_speed"), "angular_speed")
+        duration = _finite_number(payload.get("duration"), "duration")
+        limits = self._rotation_limits()
+        if not limits.get("available"):
+            raise PanelCommandError("Rotation limits are unavailable")
+        if speed == 0 or abs(speed) > limits["max_angular_speed"] or not 0 < duration <= limits["max_duration"]:
+            raise PanelCommandError("Rotation speed or duration is invalid or exceeds server limits")
+        if payload.get("confirmed") is not True:
+            raise PanelCommandError("Physical rotation requires confirmation")
+        with self._lock:
+            manipulation_state = self._manipulation_state["state"]
+            nav_goal_status = self._nav_goal_status_locked()
+            collision_state = self._nav_lifecycle_status.get("collision_monitor", {})
+            if collision_state.get("state_id") != 3:
+                raise PanelCommandError(
+                    "Physical rotation requires an active Collision Monitor lifecycle node"
+                )
+            if time.monotonic() >= self._execution_unlocked_until:
+                raise PanelCommandError("Physical execution unlock has expired")
+        if manipulation_state not in {"EMPTY", "HOLDING"}:
+            raise PanelCommandError(
+                "Rotation requires a known EMPTY or HOLDING manipulation state"
+            )
+        if nav_goal_status.get("available") and nav_goal_status.get("active") is not False:
+            raise PanelCommandError("Nav2 must be idle before rotation")
+        if not nav_goal_status.get("available") and payload.get("confirm_nav2_idle") is not True:
+            raise PanelCommandError(
+                "Nav2 action status is unavailable; verify Nav2 is idle and confirm again"
+            )
+        with self._lock:
+            if time.monotonic() >= self._execution_unlocked_until:
+                raise PanelCommandError("Physical execution unlock has expired")
+            self._execution_unlocked_until = 0.0
+
+        operation = Operation(
+            identifier=str(uuid4()),
+            kind="rotate_in_place",
+            requested_at=time.time(),
+            plan_only=False,
+            admission_deadline=time.monotonic() + self.goal_admission_timeout_sec,
+        )
+        self._register_operation(operation)
+        try:
+            goal = RotateInPlace.Goal()
+            goal.angular_speed = speed
+            goal.duration = duration
+            future = self._action_clients["rotate_in_place"].send_goal_async(
+                goal,
+                feedback_callback=lambda message: self._on_feedback(
+                    operation.identifier, message
+                ),
+            )
+        except Exception as error:
+            self._finish_operation(operation.identifier, "OUTCOME_UNKNOWN", {"message": str(error)})
+            raise PanelCommandError(f"Failed to submit rotation: {error}") from error
+        future.add_done_callback(
+            lambda sent: self._on_goal_response(operation.identifier, sent)
+        )
+        self._audit(
+            "rotate_in_place", "submitted",
+            f"speed={speed} rad/s; duration={duration} s; nominal angle={speed * duration} rad (approximate)",
         )
         return operation
 
@@ -1724,6 +1806,8 @@ class OperatorPanelNode(Node):
             details["progress"] = float(feedback.progress)
         if hasattr(feedback, "box_pose"):
             details["box_pose"] = _pose_as_dict(feedback.box_pose)
+        if hasattr(feedback, "elapsed_time"):
+            details["elapsed_time"] = float(feedback.elapsed_time)
         if hasattr(feedback, "undock_mode"):
             details["undock_mode"] = feedback.undock_mode
             details["elapsed_time"] = float(feedback.elapsed_time)
@@ -1877,7 +1961,7 @@ class OperatorPanelNode(Node):
             active_docking_operations = [
                 operation
                 for operation in self._active_operations()
-                if operation.kind in {"fine_align", "undock"}
+                if operation.kind in {"fine_align", "undock", "rotate_in_place"}
             ]
             if not active_docking_operations:
                 raise PanelCommandError("No active docking motion to cancel")

@@ -75,6 +75,16 @@ def validate_shortcut(value):
     if ((action == "pick" and result["carry_start"]["enabled"])
             or (action == "place" and result["carry_end"]["enabled"])):
         raise ShortcutError("Carry poses require a held box: enable before Place or after Pick")
+    for stage in ("rotate_start", "rotate_end"):
+        settings = _mapping(value.get(stage, {"enabled": False}), stage)
+        enabled = settings.get("enabled")
+        if type(enabled) is not bool:
+            raise ShortcutError(f"{stage} enabled must be boolean")
+        speed = _number(settings.get("angular_speed", 0.2), stage + " angular speed")
+        duration = _number(settings.get("duration", 1.0), stage + " duration")
+        if speed == 0 or duration <= 0:
+            raise ShortcutError(f"{stage} requires nonzero speed and positive duration")
+        result[stage] = {"enabled": enabled, "angular_speed": speed, "duration": duration}
     box = value.get("box")
     if box is not None:
         box = _mapping(box, "Box")

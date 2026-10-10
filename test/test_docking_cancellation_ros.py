@@ -134,6 +134,37 @@ class DockingCancellationRosTest(unittest.TestCase):
                            parse_constant=lambda value: self.fail(f"Invalid JSON: {value}"))
                 self.assertTrue(commands, "Observe the server's zero velocity output")
                 self.assertTrue(all(command == Twist() for command in commands))
+
+                # Rotation uses the real gateway/action path without any tag,
+                # odometry, or Nav2 process. The fixture only emulates safety state.
+                spin_until(lambda: panel._rotation_limits()["available"]
+                           and panel._action_clients["rotate_in_place"].server_is_ready())
+                self.assertEqual(panel.snapshot()["rotation_limits"]["max_angular_speed"], 0.5)
+                request("unlock_execution", {})
+                submitted = request("submit", {
+                    "kind": "rotate_in_place", "angular_speed": -0.2, "duration": 2.0,
+                    "confirmed": True, "confirm_nav2_idle": True,
+                })
+                rotation = panel._operations[submitted["operation"]["id"]]
+                spin_until(lambda: any(command.angular.z == -0.2 for command in commands))
+                spin_until(lambda: rotation.feedback.get("elapsed_time", 0) > 0)
+                self.assertTrue(panel.snapshot()["task_admission"]["blocked"])
+                canceled = request("cancel_docking_motion", {})
+                self.assertIn(rotation.identifier, canceled["operation_ids"])
+                spin_until(lambda: rotation.status == "CANCELED" and commands[-1] == Twist())
+                spin_until(lambda: not panel.snapshot()["task_admission"]["blocked"])
+                request("unlock_execution", {})
+                submitted = request("submit", {
+                    "kind": "rotate_in_place", "angular_speed": 0.2, "duration": 0.2,
+                    "confirmed": True, "confirm_nav2_idle": True,
+                })
+                rotation = panel._operations[submitted["operation"]["id"]]
+                spin_until(lambda: rotation.status == "SUCCEEDED" and commands[-1] == Twist())
+                self.assertTrue(rotation.result["success"])
+                self.assertGreaterEqual(rotation.result["elapsed_time"], 0.2)
+                json.loads(_json_dumps(panel.snapshot()),
+                           parse_constant=lambda value: self.fail(f"Invalid JSON: {value}"))
+
             finally:
                 executor.shutdown()
                 if fixtures is not None:

@@ -433,6 +433,7 @@
       : remaining > 0 ? `Unlocked ${Math.ceil(remaining)}s`
         : byId("plan-only").checked ? "Plan only" : "Locked";
     badge.classList.toggle("unlocked", remaining > 0);
+    renderRotation();
     badge.title = remaining > 0 ? "One physical command may consume this timed unlock."
       : "Physical commands require an execution unlock.";
   }
@@ -544,6 +545,7 @@
     byId("navigate-server").textContent = status.servers.navigate ? "Ready" : "Unavailable";
     byId("fine-align-server").textContent = status.servers.fine_align ? "Ready" : "Unavailable";
     byId("undock-server").textContent = status.servers.undock ? "Ready" : "Unavailable";
+    byId("rotate-server").textContent = status.servers.rotate_in_place ? "Ready" : "Unavailable";
     const navigation = status.navigation || {};
     const lifecycle = Object.values(navigation.lifecycle || {});
     const activeNodes = lifecycle.filter((node) => node.state_id === 3).length;
@@ -562,7 +564,7 @@
     clearCostmapsButton.title = status.task_admission?.blocked ? status.task_admission.detail :
       clearCostmapsButton.disabled ? "Costmap clear services are unavailable" : "Clear both Nav2 costmaps";
     const dockingMotionActive = (status.operations || []).some((operation) =>
-      ["fine_align", "undock"].includes(operation.kind) && ["SUBMITTING", "ACTIVE"].includes(operation.status));
+      ["fine_align", "undock", "rotate_in_place"].includes(operation.kind) && ["SUBMITTING", "ACTIVE"].includes(operation.status));
     const cancelDockingMotionButton = byId("cancel-docking-motion");
     cancelDockingMotionButton.disabled = !dockingMotionActive;
     cancelDockingMotionButton.title = dockingMotionActive ? "Cancel the active docking motion" : "No active docking motion";
@@ -716,7 +718,9 @@
       const planarError = formatPlanarError(
         operation.result?.final_error || operation.feedback?.current_error,
         operation.result?.final_error != null || operation.feedback?.tag_visible !== false);
-      const motionDetail = planarError || formatUndockDistance(operation);
+      const motionDetail = operation.kind === "rotate_in_place"
+        ? `Timed rotation: ${(operation.result?.elapsed_time || operation.feedback?.elapsed_time || 0).toFixed(2)} s${operation.feedback?.commanded_speed != null ? `, ${operation.feedback.commanded_speed.toFixed(2)} rad/s` : ""}; angle is approximate`
+        : planarError || formatUndockDistance(operation);
       const profileId = operation.result?.profile_id || operation.feedback?.profile_id || operation.profile_id;
       const profileDetail = ["fine_align", "undock"].includes(operation.kind)
         ? `Profile: ${profileId || (operation.kind === "undock" ? "last successful dock / server default" : "server default")}` : "";
@@ -996,10 +1000,27 @@
 
   function workflowSteps(workflow) { return workflow.steps || guidedSteps; }
 
+  function rotationSettings(settings) {
+    const speed = settings.angular_speed, duration = settings.duration;
+    if (!Number.isFinite(speed) || speed === 0 || !Number.isFinite(duration) || duration <= 0) {
+      throw new Error("Rotation requires a finite nonzero angular speed and positive duration.");
+    }
+    const limits = state.status?.rotation_limits;
+    if (!limits?.available) throw new Error("Rotation limits are unavailable.");
+    if (Math.abs(speed) > limits.max_angular_speed || duration > limits.max_duration) {
+      throw new Error("Rotation speed or duration exceeds server limits.");
+    }
+    return { angular_speed: speed, duration };
+  }
+
+  function rotationDescription(settings) {
+    return `Rotate ${settings.angular_speed > 0 ? "counterclockwise" : "clockwise"} at ${Math.abs(settings.angular_speed)} rad/s for ${settings.duration} s (approximate angle ${(settings.angular_speed * settings.duration).toFixed(3)} rad)`;
+  }
+
   function shortcutSteps(item) {
     const settings = { fine_align: item.dock, set_height: item.posture,
       default_height: item.return_posture, undock: item.undock };
-    return ["navigate_start", "carry_start", ...guidedSteps, "carry_end", "navigate_end"]
+    return ["navigate_start", "carry_start", "rotate_start", ...guidedSteps, "rotate_end", "carry_end", "navigate_end"]
       .filter((step) => step === "manipulate" || (settings[step] || item[step])?.enabled);
   }
 
@@ -1012,6 +1033,7 @@
     const destinationName = (id) => state.presets?.find((preset) => preset.id === id)?.label || "unavailable destination";
     if (item.navigate_start?.enabled) steps.push(`Navigate to ${destinationName(item.navigate_start.preset_id)}`);
     if (item.carry_start?.enabled) steps.push(`Carry ${item.carry_start.pose.toUpperCase()}`);
+    if (item.rotate_start?.enabled) steps.push(rotationDescription(item.rotate_start));
     const boxTarget = item.box ? `${item.box.profile_id} (${item.box.instance_id ? `ID ${item.box.instance_id.replace(/^tag:/, "")}` : "visible tag at run time"})` : "";
     if (item.dock.enabled) steps.push(`Dock ${item.dock.profile_id}${item.action === "place" && item.box ? `; box reference ${boxTarget}` : ""}`);
     if (item.posture.enabled) steps.push(`Posture ${item.posture.height} m / ${item.posture.waist_yaw} rad`);
@@ -1020,6 +1042,7 @@
         : `Place at ${item.place.pose.frame_id} (${item.place.pose.x}, ${item.place.pose.y}, ${item.place.pose.z}), yaw ${item.place.pose.yaw}`);
     if (item.return_posture.enabled) steps.push(`Return posture ${item.return_posture.height} m / ${item.return_posture.waist_yaw} rad`);
     if (item.undock.enabled) steps.push(`Undock ${item.undock.profile_id}`);
+    if (item.rotate_end?.enabled) steps.push(rotationDescription(item.rotate_end));
     if (item.carry_end?.enabled) steps.push(`Carry ${item.carry_end.pose.toUpperCase()}`);
     if (item.navigate_end?.enabled) steps.push(`Navigate to ${destinationName(item.navigate_end.preset_id)}`);
     return steps.join(" → ");
@@ -1184,6 +1207,7 @@
     const defaults = { name: "", action: "pick", box: box ? { profile_id: box.profile_id, instance_id: null } : null,
       dock: { enabled: true, profile_id: profile }, undock: { enabled: true, profile_id: profile },
       posture: { enabled: true, height: 0.64, waist_yaw: 0 }, return_posture: { enabled: true, height: 0.64, waist_yaw: 0 },
+      rotate_start: { enabled: false, angular_speed: 0.2, duration: 1 }, rotate_end: { enabled: false, angular_speed: 0.2, duration: 1 },
       navigate_start: { enabled: false, preset_id: "" }, navigate_end: { enabled: false, preset_id: "" },
       carry_start: { enabled: false, pose: "a" }, carry_end: { enabled: false, pose: "a" },
       place: { mode: "automatic", table_profile_id: state.status?.table_profiles?.default_profile || "" } };
@@ -1203,6 +1227,9 @@
       byId(`shortcut-navigate-${stage}-preset`).value = "";
       byId(`shortcut-carry-${stage}-enabled`).checked = !!draft[`carry_${stage}`]?.enabled;
       byId(`shortcut-carry-${stage}-pose`).value = draft[`carry_${stage}`]?.pose || "a";
+      byId(`shortcut-rotate-${stage}-enabled`).checked = !!draft[`rotate_${stage}`]?.enabled;
+      byId(`shortcut-rotate-${stage}-speed`).value = draft[`rotate_${stage}`]?.angular_speed ?? 0.2;
+      byId(`shortcut-rotate-${stage}-duration`).value = draft[`rotate_${stage}`]?.duration ?? 1;
     }
     for (const [field, key] of [["dock", "dock"], ["posture", "posture"], ["return", "return_posture"], ["undock", "undock"]]) {
       byId(`shortcut-${field}-enabled`).checked = draft[key].enabled;
@@ -1253,6 +1280,9 @@
       }
       item.box = profile || instance ? { profile_id: profile, instance_id: instance } : null;
       for (const stage of ["start", "end"]) {
+        item[`rotate_${stage}`] = { enabled: byId(`shortcut-rotate-${stage}-enabled`).checked,
+          angular_speed: finiteField(`shortcut-rotate-${stage}-speed`), duration: finiteField(`shortcut-rotate-${stage}-duration`) };
+        if (item[`rotate_${stage}`].enabled) rotationSettings(item[`rotate_${stage}`]);
         item[`navigate_${stage}`] = { enabled: byId(`shortcut-navigate-${stage}-enabled`).checked,
           preset_id: byId(`shortcut-navigate-${stage}-preset`).value };
         item[`carry_${stage}`] = { enabled: byId(`shortcut-carry-${stage}-enabled`).checked,
@@ -1290,6 +1320,9 @@
 
   function validateShortcutReferences(workflow) {
     const item = workflow.shortcut;
+    for (const stage of ["rotate_start", "rotate_end"]) {
+      if (item[stage]?.enabled) rotationSettings(item[stage]);
+    }
     for (const stage of ["navigate_start", "navigate_end"]) {
       if (!item[stage]?.enabled) continue;
       const preset = state.presets?.find((entry) => entry.id === item[stage].preset_id);
@@ -1562,7 +1595,8 @@
     return ({ fine_align: "Dock", set_height: shortcut ? "Set posture" : "Set Height", manipulate: label,
       default_height: shortcut ? "Return posture" : "Default Height", undock: "Undock",
       navigate_start: "Navigate before combo", navigate_end: "Navigate after combo",
-      carry_start: "Carry pose before combo", carry_end: "Carry pose after combo" })[step];
+      carry_start: "Carry pose before combo", carry_end: "Carry pose after combo",
+      rotate_start: "Rotate before combo", rotate_end: "Rotate after combo" })[step];
   }
 
   function failGuidedWorkflow(workflow, message, resumeBlocked = false) {
@@ -1798,6 +1832,8 @@
         confirmed: true, confirm_nav2_idle: workflow.confirmNav2Idle }
       : ["carry_start", "carry_end"].includes(step) ? { kind: "move_carry_pose",
         target_pose: workflow.shortcut[step].pose === "a" ? 0 : 1, plan_only: false, confirmed: true }
+      : ["rotate_start", "rotate_end"].includes(step) ? { kind: "rotate_in_place",
+        ...rotationSettings(workflow.shortcut[step]), confirmed: true, confirm_nav2_idle: workflow.confirmNav2Idle }
       : step === "fine_align" ? { kind: "fine_align", profile_id: workflow.profileId || "", ...(workflow.boxTarget ? { instance_id: workflow.instanceId } : {}), execute: true, confirmed: true, confirm_nav2_idle: workflow.confirmNav2Idle }
       : step === "undock" ? { kind: "undock", profile_id: workflow.undockProfileId || workflow.profileId || "", confirmed: true, confirm_nav2_idle: workflow.confirmNav2Idle }
       : { kind: workflow.kind, table_profile_id: workflow.tableId, ...(workflow.profileId ? { docking_profile_id: workflow.profileId } : {}), plan_only: false, confirmed: true,
@@ -1907,7 +1943,7 @@
       const label = guidedStepLabel(workflowSteps(workflow)[nextStep], workflow.label) || "completion";
       const configuration = workflow.shortcut ? shortcutDescription(workflow.shortcut)
         : `docking profile ${workflow.profileId || "server default"} and table ${workflow.tableId}`;
-      if (!window.confirm(`Continue ${workflow.label} from ${label} using ${configuration}? Verify robot state before retrying. Remaining steps will run automatically.${missingNavStatus ? " Confirm Nav2 is idle." : ""}`)) return;
+      if (!window.confirm(`Continue ${workflow.label} from ${label} using ${configuration}? Verify robot state before retrying.${["rotate_start", "rotate_end"].includes(workflowSteps(workflow)[nextStep]) ? " Retrying rotation commands the FULL duration again; review the current orientation." : ""} Remaining steps will run automatically.${missingNavStatus ? " Confirm Nav2 is idle." : ""}`)) return;
       workflow.step = nextStep;
       workflow.failed = false;
       workflow.cancelRequested = false;
@@ -1975,6 +2011,42 @@
       setError("");
     } catch (error) { setError(error.message); }
   }
+  function renderRotation() {
+    const button = byId("execute-rotation");
+    const limits = state.status?.rotation_limits;
+    const operations = state.status?.operations || [];
+    const busy = state.status?.task_admission?.blocked || state.status?.navigation?.goal_status?.active ||
+      operations.some((operation) => ["SUBMITTING", "ACTIVE", "CANCEL_REQUESTED", "OUTCOME_UNKNOWN"].includes(operation.status));
+    const active = operations.find((operation) => operation.kind === "rotate_in_place" &&
+      ["SUBMITTING", "ACTIVE", "CANCEL_REQUESTED"].includes(operation.status));
+    byId("cancel-rotation").disabled = !active || active.status === "CANCEL_REQUESTED";
+    button.disabled = true;
+    let detail = limits?.detail || "Waiting for rotation limits";
+    try {
+      const settings = rotationSettings({ angular_speed: finiteField("rotation-speed"), duration: finiteField("rotation-duration") });
+      detail = `${rotationDescription(settings)}. Limits: ${limits.max_angular_speed} rad/s, ${limits.max_duration} s.`;
+      button.disabled = !state.authenticated || !state.statusConnected || busy || byId("plan-only").checked ||
+        !(executionUnlockRemaining() > 0) || !state.status?.servers?.rotate_in_place ||
+        !["EMPTY", "HOLDING"].includes(state.status?.manipulation_state?.state) ||
+        state.status?.navigation?.lifecycle?.collision_monitor?.state_id !== 3;
+    } catch (error) { detail = error.message; }
+    if (active) detail += ` Elapsed: ${(active.feedback?.elapsed_time || 0).toFixed(2)} s; ${Math.round((active.progress || 0) * 100)}%.`;
+    byId("rotation-detail").textContent = detail;
+  }
+
+  async function rotateInPlace() {
+    try {
+      if (byId("plan-only").checked) throw new Error("Turn off Plan only before rotating.");
+      const settings = rotationSettings({ angular_speed: finiteField("rotation-speed"), duration: finiteField("rotation-duration") });
+      if (!window.confirm(`${rotationDescription(settings)}?`)) return;
+      const confirmNav2Idle = confirmNav2IdleWithoutStatus();
+      if (!state.status?.navigation?.goal_status?.available && !confirmNav2Idle) return;
+      await api("/api/actions", { method: "POST", body: JSON.stringify({ kind: "rotate_in_place",
+        ...settings, confirmed: true, confirm_nav2_idle: confirmNav2Idle }) });
+      setError("");
+    } catch (error) { setError(error.message); }
+  }
+
   async function undock() {
     let profileId;
     try { profileId = dockingProfileSelection(true); }
@@ -2161,9 +2233,9 @@
     try { await api("/api/cancel", { method: "POST", body: "{}" }); setError(""); } catch (error) { setError(error.message); }
   }
   async function cancelDockingMotion() {
-    if (!window.confirm("Cancel the active docking motion?")) return;
+    if (!window.confirm("Cancel the active docking or rotation motion?")) return;
     const workflow = state.guidedWorkflow;
-    if (workflow && !workflow.failed && !workflow.completed && ["fine_align", "undock"].includes(workflowSteps(workflow)[workflow.step])) {
+    if (workflow && !workflow.failed && !workflow.completed && ["fine_align", "undock", "rotate_start", "rotate_end"].includes(workflowSteps(workflow)[workflow.step])) {
       await stopGuidedWorkflow();
       return;
     }
@@ -2261,6 +2333,10 @@
   byId("check-fine-align").addEventListener("click", () => fineAlign(false));
   byId("execute-fine-align").addEventListener("click", () => fineAlign(true));
   byId("execute-undock").addEventListener("click", undock);
+  byId("execute-rotation").addEventListener("click", rotateInPlace);
+  byId("cancel-rotation").addEventListener("click", cancelDockingMotion);
+  for (const id of ["rotation-speed", "rotation-duration"]) byId(id).addEventListener("input", renderRotation);
+  byId("plan-only").addEventListener("change", renderRotation);
   byId("table-profile").addEventListener("change", renderTableProfiles);
   byId("docking-profile").addEventListener("change", () => { renderDockingProfiles(); renderGuidedWorkflow(); });
   byId("undocking-profile").addEventListener("change", renderDockingProfiles);
