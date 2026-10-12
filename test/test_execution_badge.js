@@ -106,6 +106,36 @@ state.authenticated = false;
 context.syncExecutionUnlock(0);
 assert.equal(timers.size, 0, "A signed-out browser must not start an update timer");
 
+// Exercise authorization timing through the actual stream handler, including
+// an HTTP snapshot between two WebSocket messages.
+state.authenticated = true;
+planOnly.checked = false;
+Object.assign(context.window, {
+  location: { protocol: "http:", hostname: "localhost" },
+  X2_PANEL_CONFIG: { websocketPort: 8765 },
+});
+context.WebSocket = class {};
+context.renderTaskShortcuts = () => {};
+context.setError = (message) => { throw new Error(message); };
+vm.runInContext(source.slice(source.indexOf("  function mergeStatus("),
+  source.indexOf("  function returnToLogin(")), context);
+vm.runInContext(source.slice(source.indexOf("  function connectStatusStream("),
+  source.indexOf("  async function submitManipulation(")), context);
+context.connectStatusStream();
+const sendStatus = (type, payload) => state.socket.onmessage({ data: JSON.stringify({ type, payload }) });
+sendStatus("status", { execution_unlock_remaining_sec: 30 });
+tick(2000);
+sendStatus("status_delta", { set: { diagnostics: [] }, remove: [] });
+assert.equal(context.executionUnlockRemaining(), 28, "Telemetry delta must not renew authorization");
+context.applyStatus({ execution_unlock_remaining_sec: 3 });
+tick(1000);
+sendStatus("status_delta", { set: { diagnostics: ["updated"] }, remove: [] });
+assert.equal(context.executionUnlockRemaining(), 2, "Stream baseline must not undo an HTTP unlock deadline");
+sendStatus("status_delta", { set: { execution_unlock_remaining_sec: 10 }, remove: [] });
+assert.equal(context.executionUnlockRemaining(), 10, "An explicit unlock update must renew the deadline");
+sendStatus("status_delta", { set: {}, remove: [["execution_unlock_remaining_sec"]] });
+assert.equal(context.physicalExecutionAuthorized(), false, "Missing authorization must fail closed");
+
 // A successful HTTP response may arrive after the WebSocket has disconnected.
 vm.runInContext(source.slice(source.indexOf("  async function api("),
   source.indexOf("  function setError(")), context);

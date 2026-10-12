@@ -839,7 +839,14 @@ it waits before Pick until a fresh target is available or the operator stops it.
 Browser status is published at 1 Hz by default, so the combo requests a fresh
 status snapshot immediately before submitting Pick. The ROS gateway still
 checks freshness at submission and can reject a detection that expires during
-the HTTP round trip. The freshness setting can be supplied at launch, for example
+the HTTP round trip. WebSocket deltas use a separate stream snapshot baseline,
+so a temporary detection gap in an HTTP refresh cannot leave the sequence
+waiting after live status reports a fresh target again.
+This separation also applies to Place: an HTTP refresh cannot overwrite the
+stream baseline for manipulation state, task admission, or table configuration.
+Place uses the held box and does not require a fresh pickup-box detection;
+automatic placement still requires the manipulation server to acquire its table tag.
+The freshness setting can be supplied at launch, for example
 `ros2 launch x2_operator_panel operator_panel.launch.py box_states_freshness_sec:=0.5`.
 Choose any larger window using the measured detector update interval and
 acceptable pose age; increasing it also allows older object poses. The existing

@@ -70,6 +70,7 @@ function fixture(item = shortcut(), fast = false) {
     executionUnlockRemaining: () => state.status.execution_unlock_remaining_sec,
     manualPlacePoseEnabled: () => false,
     finiteField: (id) => Number(byId(id).value),
+    postureTarget: () => ({ height: 0.48, waist_yaw: 0.2 }),
     setError: (message) => { context.error = message; },
     applyStatus: (status) => { state.status = status; context.updateGuidedWorkflow(); },
     api: async (path, options = {}) => {
@@ -116,6 +117,273 @@ function fixture(item = shortcut(), fast = false) {
     now = end; await flush();
   }
   return { context, state, byId, calls, commands, confirmations, finish, advance, timers };
+}
+
+function attachStatusStream(f) {
+  const sockets = [];
+  f.context.WebSocket = class {
+    constructor() { sockets.push(this); }
+    close() { this.closed = true; this.onclose?.({ code: 1000 }); }
+    sendStatus(type, payload) { this.onmessage({ data: JSON.stringify({ type, payload }) }); }
+  };
+  Object.assign(f.context.window, {
+    location: { protocol: "http:", hostname: "localhost" },
+    X2_PANEL_CONFIG: { websocketPort: 8765 },
+  });
+  f.context.invalidateExecutionUnlock = () => { f.invalidated = true; };
+  f.context.renderTaskShortcuts = () => {};
+  vm.runInContext(source.slice(source.indexOf("  function mergeStatus("),
+    source.indexOf("  function returnToLogin(")), f.context);
+  vm.runInContext(source.slice(source.indexOf("  function connectStatusStream("),
+    source.indexOf("  async function submitManipulation(")), f.context);
+  f.context.connectStatusStream();
+  return sockets;
+}
+
+async function statusStreamChecks() {
+  for (const combo of [false, true]) {
+    for (const delay of [0, 2]) {
+      const item = shortcut();
+      item.box.instance_id = "tag:181";
+      item.pre_manipulation_delay_sec = delay;
+      const f = fixture(item);
+      f.state.selectedBoxId = "tag:181";
+      f.byId("combo-delay").value = delay;
+      const socket = attachStatusStream(f)[0];
+      const fresh = clone(f.state.status.visible_boxes);
+      socket.sendStatus("status", f.state.status);
+      if (combo) await f.context.advanceGuidedWorkflow();
+      else await f.context.runTaskShortcut();
+      await f.finish(); // Dock -> Set Height.
+      const api = f.context.api;
+      let detectionGap = true;
+      f.context.api = async (path, options) => {
+        const result = await api(path, options);
+        if (path === "/api/status" && detectionGap) {
+          detectionGap = false;
+          return { ...result, visible_boxes: { fresh: false, boxes: [] } };
+        }
+        return result;
+      };
+      await f.finish(); // Set Height -> optional delay -> Pick preflight.
+      if (delay) await f.advance(delay * 1000);
+      assert.equal(f.commands().length, 2);
+      assert.match(f.context.guidedWaitReason(f.state.guidedWorkflow), /fresh detection of tag:181/);
+
+      // Consecutive stream snapshots both have fresh=true; the delta omits it
+      // even though the intervening HTTP snapshot briefly reported false.
+      const delta = { set: { operations: clone(f.state.status.operations),
+        visible_boxes: { boxes: fresh.boxes.map((box) => ({ ...box, stamp: 123 })) } }, remove: [] };
+      socket.sendStatus("status_delta", delta);
+      await flush();
+      assert.equal(f.state.status.visible_boxes.fresh, true);
+      assert.equal(f.commands()[2].payload.kind, "pick");
+      assert.equal(f.commands()[2].payload.instance_id, "tag:181");
+      socket.sendStatus("status_delta", delta);
+      await flush();
+      assert.equal(f.commands().length, 3, "Repeated status must not submit a second Pick");
+    }
+  }
+
+  for (const unavailable of ["stale", "missing", "incompatible"]) {
+    const item = shortcut();
+    item.box.instance_id = "tag:181";
+    const f = fixture(item);
+    const socket = attachStatusStream(f)[0];
+    socket.sendStatus("status", f.state.status);
+    await f.context.runTaskShortcut();
+    await f.finish();
+    const fresh = clone(f.state.status.visible_boxes);
+    const current = clone(f.state.status);
+    if (unavailable === "stale") current.visible_boxes.fresh = false;
+    if (unavailable === "missing") current.visible_boxes.boxes = fresh.boxes.filter((box) => box.instance_id !== "tag:181");
+    if (unavailable === "incompatible") current.visible_boxes.boxes.find((box) => box.instance_id === "tag:181").docking_profile_ids = [];
+    socket.sendStatus("status", current);
+    await f.finish();
+    assert.equal(f.commands().length, 2, `${unavailable} detection must block Pick`);
+    socket.sendStatus("status_delta", { set: { visible_boxes: fresh,
+      operations: clone(f.state.status.operations) }, remove: [] });
+    await flush();
+    assert.equal(f.commands()[2].payload.instance_id, "tag:181", "Recovery must preserve the fixed target");
+  }
+
+  const f = fixture();
+  const sockets = attachStatusStream(f);
+  const first = sockets[0];
+  const baseline = clone(f.state.status);
+  baseline.task_admission = { blocked: false };
+  baseline.operations = [{ id: "completed", status: "SUCCEEDED" }];
+  baseline.diagnostics = { nested: { temporary: "remove", keep: "retained" } };
+  first.sendStatus("status", baseline);
+  f.context.applyStatus({ ...clone(baseline), task_admission: { blocked: true }, operations: [] });
+  first.sendStatus("status_delta", { set: { diagnostics: { tick: 1 } }, remove: [] });
+  assert.equal(f.state.status.task_admission.blocked, false, "HTTP must not replace the stream baseline");
+  assert.equal(f.state.status.operations[0].id, "completed", "Restore unchanged stream operation history");
+  // Mutating the displayed snapshot must not change the stream's nested data.
+  const displayed = f.state.status;
+  displayed.diagnostics.nested.keep = "mutated";
+  displayed.visible_boxes.boxes.length = 0;
+  first.sendStatus("status_delta", { set: {}, remove: [["diagnostics", "nested", "temporary"]] });
+  assert.equal(f.state.status.diagnostics.nested.keep, "retained");
+  assert.equal(f.state.status.visible_boxes.boxes.length, 2);
+  assert.equal(f.state.status.diagnostics.nested.temporary, undefined);
+  assert.equal(displayed.diagnostics.nested.temporary, "remove", "Removal must not mutate earlier snapshots");
+
+  f.context.connectStatusStream();
+  const second = sockets[1];
+  first.sendStatus("status", { visible_boxes: { fresh: false } });
+  assert.equal(f.state.status.visible_boxes.fresh, true, "Ignore a superseded socket");
+  second.sendStatus("status_delta", { set: { visible_boxes: { fresh: false } }, remove: [] });
+  assert.equal(second.closed, true, "A new socket cannot reuse the old baseline");
+  assert.equal(f.state.statusConnected, false);
+  await f.advance(2000);
+  const third = sockets[2];
+  assert.ok(third, "Missing baseline must reconnect");
+  third.sendStatus("status", baseline);
+  assert.equal(f.state.statusConnected, true);
+  f.context.stopCameraStreams = () => {};
+  f.context.setLoginError = () => {};
+  vm.runInContext(source.slice(source.indexOf("  function returnToLogin("),
+    source.indexOf("  function manualPlacePoseEnabled(")), f.context);
+  f.context.returnToLogin("Signed out");
+  third.sendStatus("status", { visible_boxes: { fresh: false } });
+  assert.equal(f.state.status.visible_boxes.fresh, true, "Ignore messages after logout");
+  f.state.authenticated = true;
+  f.context.connectStatusStream();
+  sockets[3].sendStatus("status_delta", { set: {}, remove: [] });
+  assert.equal(sockets[3].closed, true, "Login requires a new full baseline");
+
+  const merged = f.context.mergeStatus(baseline, {
+    set: {}, remove: [["diagnostics", "nested", "temporary"]],
+  });
+  assert.equal(merged.diagnostics.nested.temporary, undefined);
+  assert.equal(baseline.diagnostics.nested.temporary, "remove");
+}
+
+async function placeStatusStreamChecks() {
+  for (const combo of [false, true]) for (const manual of [false, true]) {
+    for (const delay of [0, 2]) {
+      const item = shortcut("place");
+      item.dock.profile_id = "table_dock";
+      item.pre_manipulation_delay_sec = delay;
+      const pose = { frame_id: "base_link", x: 0.35, y: 0, z: 0.29, yaw: 0 };
+      if (manual) item.place = { mode: "manual", pose };
+      const f = fixture(item);
+      f.state.status.task_admission = { blocked: false };
+      f.state.status.visible_boxes = { fresh: false, boxes: [] };
+      f.state.status.docking_profiles.profiles.push({ id: "table_dock", target_source: "fixed", tag_id: 20, tag_frame: "tag20" });
+      f.byId("docking-profile").value = "table_dock";
+      f.byId("combo-delay").value = delay;
+      f.context.manualPlacePoseEnabled = () => manual;
+      f.context.placePose = () => pose;
+      const socket = attachStatusStream(f)[0];
+      socket.sendStatus("status", f.state.status);
+      if (combo) await f.context.advanceGuidedWorkflow();
+      else await f.context.runTaskShortcut();
+      assert.equal(f.commands().length, 1, f.context.error);
+      await f.finish();
+      const api = f.context.api;
+      let transient = true;
+      f.context.api = async (path, options) => {
+        const result = await api(path, options);
+        if (path === "/api/status" && transient) {
+          transient = false;
+          return { ...clone(result), task_admission: { blocked: true, detail: "Temporary admission block" },
+            manipulation_state: { state: "EMPTY" }, table_profiles: { ...result.table_profiles, available: false } };
+        }
+        return result;
+      };
+      await f.finish();
+      if (delay) await f.advance(delay * 1000);
+      assert.equal(f.commands().length, 2, "HTTP preflight must still enforce admission");
+      // HOLDING, available table profiles, and unblocked admission are unchanged
+      // in the stream, so this valid delta does not repeat any of those fields.
+      socket.sendStatus("status_delta", { set: { operations: clone(f.state.status.operations),
+        diagnostics: { tick: 1 } }, remove: [] });
+      await flush();
+      assert.equal(f.commands().length, 3, f.context.error);
+      const payload = f.commands()[2].payload;
+      assert.equal(payload.kind, "place");
+      assert.equal(payload.instance_id, undefined, "Place does not need a fresh box detection");
+      if (manual) assert.deepEqual(payload.place_pose, pose);
+      else assert.equal(payload.table_profile_id, "other_table");
+      assert.equal(f.state.status.manipulation_state.state, "HOLDING");
+      assert.equal(f.state.status.task_admission.blocked, false);
+      assert.equal(f.state.status.table_profiles.available, true);
+      await f.finish(); await f.finish(); await f.finish();
+      assert.deepEqual(f.commands().map((call) => call.payload.kind || "posture"),
+        ["fine_align", "posture", "place", "posture", "undock"]);
+      assert.equal(f.state.guidedWorkflow.completed, true);
+      assert.equal(f.state.status.manipulation_state.state, "EMPTY");
+    }
+  }
+
+  // A genuine stream-side admission block must remain enforced for Place.
+  const blocked = fixture(shortcut("place"));
+  const socket = attachStatusStream(blocked)[0];
+  socket.sendStatus("status", blocked.state.status);
+  await blocked.context.runTaskShortcut(); await blocked.finish();
+  socket.sendStatus("status_delta", { set: { operations: clone(blocked.state.status.operations),
+    task_admission: { blocked: true, detail: "Another task is active" } }, remove: [] });
+  await blocked.finish();
+  assert.equal(blocked.commands().length, 2);
+  socket.sendStatus("status_delta", { set: { operations: clone(blocked.state.status.operations),
+    diagnostics: { tick: 2 } }, remove: [] });
+  await flush();
+  assert.equal(blocked.commands().length, 2, "Unrelated telemetry cannot clear a real admission block");
+  socket.sendStatus("status_delta", { set: { task_admission: { blocked: false } }, remove: [] });
+  await flush();
+  assert.equal(blocked.commands()[2].payload.kind, "place");
+}
+
+async function pairedStatusStreamChecks() {
+  const f = fixture();
+  const place = shortcut("place");
+  place.id = "place-1";
+  place.dock.profile_id = "table_dock";
+  f.state.taskShortcuts.shortcuts.push(place);
+  f.state.selectedShortcuts = { pick: "shortcut-1", place: "place-1" };
+  f.state.status.docking_profiles.profiles.push({ id: "table_dock", target_source: "fixed", tag_id: 20, tag_frame: "tag20" });
+  f.state.status.task_admission = { blocked: false };
+  const socket = attachStatusStream(f)[0];
+  socket.sendStatus("status", f.state.status);
+  const api = f.context.api;
+  const interrupted = new Set();
+  let recovery = null;
+  f.context.api = async (path, options) => {
+    const result = await api(path, options);
+    const workflow = f.state.guidedWorkflow;
+    if (path === "/api/status" && workflow &&
+        f.context.workflowSteps(workflow)[workflow.step] === "manipulate" && !interrupted.has(workflow.kind)) {
+      interrupted.add(workflow.kind);
+      recovery = clone(result);
+      return workflow.kind === "pick" ? { ...clone(result), visible_boxes: { fresh: false, boxes: [] } }
+        : { ...clone(result), task_admission: { blocked: true, detail: "Temporary admission block" } };
+    }
+    return result;
+  };
+  await f.context.runSelectedShortcuts();
+  const expected = ["fine_align", "posture", "pick", "posture", "undock",
+    "fine_align", "posture", "place", "posture", "undock"];
+  for (let index = 0; index < expected.length; index++) {
+    assert.equal(f.commands().length, index + 1);
+    assert.equal(f.commands()[index].payload.kind || "posture", expected[index]);
+    await f.finish();
+    if (recovery) {
+      assert.equal(f.commands().length, index + 1, "Preflight gap must initially block the next command");
+      socket.sendStatus("status_delta", { set: { operations: recovery.operations,
+        visible_boxes: { boxes: recovery.visible_boxes.boxes } }, remove: [] });
+      recovery = null;
+      await flush();
+    }
+    socket.sendStatus("status", f.state.status);
+    await flush();
+  }
+  assert.deepEqual([...interrupted], ["pick", "place"]);
+  assert.deepEqual(f.commands().map((call) => call.payload.kind || "posture"), expected);
+  assert.equal(f.confirmations.length, 1);
+  assert.equal(f.state.guidedWorkflow.completed, true);
+  assert.equal(f.state.status.manipulation_state.state, "EMPTY");
 }
 
 async function sequenceChecks() {
@@ -1097,5 +1365,5 @@ async function delayChecks() {
   }
 }
 
-(async () => { await delayChecks(); await rotationChecks(); await pairedShortcutChecks(); await sequenceChecks(); await failureChecks(); await overlappingSaveChecks(); await shortcutButtonChecks(); await editorChecks(); await profileTargetChecks(); await provisionalTargetChecks(); await numericBoxIdChecks(); await dockingDropdownChecks(); await boxAndTableDropdownChecks(); await boxProfileNameChecks(); await navigationCarryChecks(); })()
+(async () => { await placeStatusStreamChecks(); await pairedStatusStreamChecks(); await statusStreamChecks(); await delayChecks(); await rotationChecks(); await pairedShortcutChecks(); await sequenceChecks(); await failureChecks(); await overlappingSaveChecks(); await shortcutButtonChecks(); await editorChecks(); await profileTargetChecks(); await provisionalTargetChecks(); await numericBoxIdChecks(); await dockingDropdownChecks(); await boxAndTableDropdownChecks(); await boxProfileNameChecks(); await navigationCarryChecks(); })()
   .catch((error) => { console.error(error); process.exitCode = 1; });

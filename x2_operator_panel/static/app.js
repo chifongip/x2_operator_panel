@@ -129,7 +129,8 @@
       });
       return merged;
     };
-    const merged = mergeObject(current, delta?.set);
+    // Status comes from JSON. Detach unchanged nested fields before removals.
+    const merged = JSON.parse(JSON.stringify(mergeObject(current, delta?.set)));
     (delta?.remove || []).forEach((path) => {
       let parent = merged;
       for (const key of path.slice(0, -1)) {
@@ -1022,25 +1023,38 @@
     const scheme = window.location.protocol === "https:" ? "wss" : "ws";
     const fallbackUrl = `${scheme}://${window.location.hostname}:${window.X2_PANEL_CONFIG.websocketPort}`;
     const socket = new WebSocket(window.X2_PANEL_CONFIG.websocketUrl || fallbackUrl);
+    // HTTP preflight snapshots have a different sampling time. Only stream
+    // messages may advance the baseline against which the server sends deltas.
+    let streamStatus = null;
     state.socket = socket;
-    socket.onopen = () => { byId("connection-status").textContent = "Live status connected"; };
+    socket.onopen = () => {
+      if (state.socket === socket) byId("connection-status").textContent = "Live status connected";
+    };
     socket.onmessage = (event) => {
+      if (state.socket !== socket || !state.authenticated) return;
       try {
         const message = JSON.parse(event.data);
-        if (message.type === "status") applyStatus(message.payload);
+        let unlockChanged = true;
+        if (message.type === "status") streamStatus = message.payload;
         if (message.type === "status_delta") {
+          if (streamStatus === null) {
+            socket.close(); // Reconnect to obtain the required full baseline.
+            return;
+          }
           const delta = message.payload;
-          const unlockChanged = Object.hasOwn(delta.set || {}, "execution_unlock_remaining_sec") ||
+          unlockChanged = Object.hasOwn(delta.set || {}, "execution_unlock_remaining_sec") ||
             (delta.remove || []).some((path) => path[0] === "execution_unlock_remaining_sec");
-          applyStatus(mergeStatus(state.status, delta), unlockChanged);
+          streamStatus = mergeStatus(streamStatus, delta);
         }
         if (["status", "status_delta"].includes(message.type)) {
           state.statusConnected = true;
+          applyStatus(JSON.parse(JSON.stringify(streamStatus)), unlockChanged);
           renderTaskShortcuts();
         }
       } catch (_) { setError("Received an invalid status update"); }
     };
     socket.onclose = (event) => {
+      streamStatus = null;
       if (state.socket !== socket) return;
       state.socket = null;
       pauseShortcutConnection();
