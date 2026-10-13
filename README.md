@@ -328,8 +328,13 @@ separately when moving between pickup and drop-off locations.
 **Continue sequence** requires a fresh manual unlock, refreshes the robot status,
 asks for confirmation, and
 retries the failed stage while preserving the completed stages and captured
-posture/place targets. After a stale-selection rejection at Pick, select a fresh
-box and continue; Dock and Set Height are not repeated. Continuing requires no
+posture/place targets. In the quick combo, after a stale-selection rejection at
+Pick, select a fresh box and continue; Dock and Set Height are not repeated.
+Saved shortcuts instead wait indefinitely for a fresh detection of the same box
+and retry Pick automatically after a new status update. They retain the target
+instance, completed docking and posture stages, and completed pre-manipulation
+delay. Stop sequence remains available while waiting. Other failures and live
+status disconnections still require manual recovery. Continuing requires no
 active motion and the manipulation state expected before that stage. Unknown
 command outcomes or lost operation history block continuation. If a stopped
 command subsequently reports success, Continue advances past that completed

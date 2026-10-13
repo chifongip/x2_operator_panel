@@ -72,7 +72,11 @@ function fixture(item = shortcut(), fast = false) {
     finiteField: (id) => Number(byId(id).value),
     postureTarget: () => ({ height: 0.48, waist_yaw: 0.2 }),
     setError: (message) => { context.error = message; },
-    applyStatus: (status) => { state.status = status; context.updateGuidedWorkflow(); },
+    applyStatus: (status) => {
+      state.status = status;
+      state.statusRevision = (state.statusRevision || 0) + 1;
+      context.updateGuidedWorkflow();
+    },
     api: async (path, options = {}) => {
       const payload = JSON.parse(options.body || "{}");
       calls.push({ path, payload });
@@ -1301,6 +1305,132 @@ async function rotationChecks() {
   assert.match(unavailable.context.error, /Rotation limits/);
 }
 
+async function stalePickRetryChecks() {
+  function rejectPicks(f) {
+    const api = f.context.api;
+    const rejection = { attempts: 0, enabled: true };
+    f.context.api = async (path, options) => {
+      if (path === "/api/actions" && JSON.parse(options.body).kind === "pick") {
+        rejection.attempts += 1;
+        if (rejection.enabled) throw new Error("The selected box is no longer a fresh visible detection; select it again");
+      }
+      return api(path, options);
+    };
+    return rejection;
+  }
+  function pushStatus(f, changes = {}) {
+    f.context.applyStatus({ ...clone(f.state.status), ...changes });
+  }
+
+  const item = shortcut();
+  item.pre_manipulation_delay_sec = 2.5;
+  const f = fixture(item);
+  const rejection = rejectPicks(f);
+  await f.context.runTaskShortcut(); await f.finish(); await f.finish();
+  await f.advance(2500);
+  const workflow = f.state.guidedWorkflow;
+  assert.equal(rejection.attempts, 1);
+  assert.ok(!workflow.failed, "A known pre-submission rejection must leave the shortcut running");
+  assert.equal(workflow.operationId, null);
+  assert.equal(workflow.step, 2);
+  assert.equal(workflow.instanceId, "tag:180");
+  assert.equal(workflow.delayComplete, true);
+  assert.equal(f.timers.size, 0);
+  assert.ok(!f.byId("stop-guided-workflow").disabled);
+  assert.equal(f.byId("continue-guided-workflow").disabled, true);
+  assert.match(f.byId("guided-workflow-status").textContent, /Waiting for a fresh detection of tag:180; Pick will retry automatically/);
+  const unlocks = f.calls.filter((call) => call.path === "/api/unlock/execution").length;
+  for (let i = 0; i < 3; i++) {
+    f.context.updateGuidedWorkflow(); f.context.scheduleGuidedStep(); await flush();
+  }
+  await f.advance(60000);
+  assert.equal(rejection.attempts, 1, "Cached status and elapsed time must not cause a retry loop or timeout");
+  assert.equal(f.calls.filter((call) => call.path === "/api/unlock/execution").length, unlocks);
+  assert.ok(!workflow.failed);
+
+  const visible = clone(f.state.status.visible_boxes);
+  f.state.selectedBoxId = "tag:181";
+  pushStatus(f, { visible_boxes: { fresh: true, boxes: [visible.boxes[1]] } });
+  await flush();
+  pushStatus(f, { visible_boxes: { ...visible, fresh: false } });
+  await flush();
+  assert.equal(rejection.attempts, 1, "A different box or stale detection cannot authorize retry");
+  assert.equal(workflow.instanceId, "tag:180");
+
+  pushStatus(f, { visible_boxes: visible });
+  await flush(); await flush();
+  assert.equal(rejection.attempts, 2, "New fresh status permits one automatic retry");
+  assert.ok(!workflow.failed, "Repeated admission rejection must return to waiting");
+  f.context.updateGuidedWorkflow(); await flush();
+  assert.equal(rejection.attempts, 2);
+  rejection.enabled = false;
+  pushStatus(f, { task_admission: { blocked: true, detail: "Busy" } });
+  await flush();
+  assert.equal(rejection.attempts, 2, "Automatic retry must respect motion admission");
+  pushStatus(f, { task_admission: { blocked: false } });
+  await flush();
+  assert.equal(rejection.attempts, 3);
+  assert.equal(f.commands()[2].payload.instance_id, "tag:180");
+  assert.equal(workflow.pickRetryAfterStatusRevision, undefined);
+  for (let i = 0; i < 3; i++) await f.finish();
+  assert.equal(workflow.completed, true);
+  assert.deepEqual(f.commands().map((call) => call.payload.kind || "posture"),
+    ["fine_align", "posture", "pick", "posture", "undock"]);
+  assert.equal(f.confirmations.length, 1, "Retry needs no manual Continue or additional confirmation");
+
+  // Profile-only shortcuts resolve a target at Pick and must keep it on rejection.
+  const provisionalItem = shortcut();
+  provisionalItem.box.instance_id = null;
+  provisionalItem.dock.enabled = false;
+  const provisional = fixture(provisionalItem);
+  const provisionalRejection = rejectPicks(provisional);
+  await provisional.context.runTaskShortcut(); await provisional.finish();
+  assert.equal(provisionalRejection.attempts, 1);
+  assert.equal(provisional.state.guidedWorkflow.instanceId, "tag:180");
+  provisional.state.selectedBoxId = "tag:181";
+  provisionalRejection.enabled = false;
+  pushStatus(provisional); await flush();
+  assert.equal(provisional.commands()[1].payload.instance_id, "tag:180");
+
+  for (const interrupt of ["stop", "disconnect", "logout"]) {
+    const paused = fixture();
+    const pausedRejection = rejectPicks(paused);
+    await paused.context.runTaskShortcut(); await paused.finish(); await paused.finish();
+    assert.equal(pausedRejection.attempts, 1);
+    if (interrupt === "stop") await paused.context.stopGuidedWorkflow();
+    if (interrupt === "disconnect") paused.context.pauseShortcutConnection();
+    if (interrupt === "logout") paused.state.authenticated = false;
+    pausedRejection.enabled = false;
+    pushStatus(paused); await flush();
+    assert.equal(paused.commands().length, 2, `${interrupt} prevents automatic Pick`);
+    assert.equal(pausedRejection.attempts, 1);
+    if (interrupt === "disconnect") {
+      paused.state.statusConnected = true;
+      pushStatus(paused); await flush();
+      assert.equal(pausedRejection.attempts, 1, "Reconnection still requires manual recovery");
+    }
+  }
+
+  const unknown = fixture();
+  const unknownApi = unknown.context.api;
+  unknown.context.api = async (path, options) => {
+    if (path === "/api/actions" && JSON.parse(options.body).kind === "pick") throw new Error("Network error");
+    return unknownApi(path, options);
+  };
+  await unknown.context.runTaskShortcut(); await unknown.finish(); await unknown.finish();
+  assert.equal(unknown.state.guidedWorkflow.failed, true);
+  assert.equal(unknown.state.guidedWorkflow.resumeBlocked, true);
+  for (const result of ["ABORTED", "OUTCOME_UNKNOWN"]) {
+    const action = fixture();
+    await action.context.runTaskShortcut(); await action.finish(); await action.finish();
+    await action.finish(result);
+    pushStatus(action); await flush();
+    assert.equal(action.commands().length, 3, "Failed ROS goals must not retry automatically");
+    assert.equal(action.state.guidedWorkflow.failed, true);
+    assert.equal(action.state.guidedWorkflow.resumeBlocked, result === "OUTCOME_UNKNOWN");
+  }
+}
+
 async function delayChecks() {
   for (const action of ["pick", "place"]) {
     const item = shortcut(action);
@@ -1365,5 +1495,5 @@ async function delayChecks() {
   }
 }
 
-(async () => { await placeStatusStreamChecks(); await pairedStatusStreamChecks(); await statusStreamChecks(); await delayChecks(); await rotationChecks(); await pairedShortcutChecks(); await sequenceChecks(); await failureChecks(); await overlappingSaveChecks(); await shortcutButtonChecks(); await editorChecks(); await profileTargetChecks(); await provisionalTargetChecks(); await numericBoxIdChecks(); await dockingDropdownChecks(); await boxAndTableDropdownChecks(); await boxProfileNameChecks(); await navigationCarryChecks(); })()
+(async () => { await stalePickRetryChecks(); await placeStatusStreamChecks(); await pairedStatusStreamChecks(); await statusStreamChecks(); await delayChecks(); await rotationChecks(); await pairedShortcutChecks(); await sequenceChecks(); await failureChecks(); await overlappingSaveChecks(); await shortcutButtonChecks(); await editorChecks(); await profileTargetChecks(); await provisionalTargetChecks(); await numericBoxIdChecks(); await dockingDropdownChecks(); await boxAndTableDropdownChecks(); await boxProfileNameChecks(); await navigationCarryChecks(); })()
   .catch((error) => { console.error(error); process.exitCode = 1; });

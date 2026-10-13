@@ -8,6 +8,7 @@
     destinationSaving: false,
     destinationLoadSequence: 0,
     status: null,
+    statusRevision: 0,
     poseTrail: [],
     socket: null,
     authenticated: false,
@@ -550,6 +551,7 @@
   function applyStatus(status, unlockChanged = true) {
     const administratorChanged = state.status?.administrator_mode_enabled !== status.administrator_mode_enabled;
     state.status = status;
+    state.statusRevision = (state.statusRevision || 0) + 1;
     if (unlockChanged) syncExecutionUnlock(status.execution_unlock_remaining_sec);
     if (!unlockChanged && administratorChanged) {
       renderExecutionState();
@@ -1848,6 +1850,10 @@
       if (!state.status?.servers?.navigate) return "Waiting for navigation action server.";
       if (!state.status?.map_pose?.available || !state.status.map_pose.fresh) return "Waiting for fresh map localization before navigation.";
     }
+    if (step === "manipulate" && workflow.kind === "pick" && workflow.pickRetryAfterStatusRevision != null &&
+        ((state.statusRevision || 0) <= workflow.pickRetryAfterStatusRevision || !guidedPickId(workflow))) {
+      return `Waiting for a fresh detection of ${workflow.instanceId}; Pick will retry automatically.`;
+    }
     if (((step === "manipulate" && workflow.kind === "pick") ||
         (workflow.shortcut && step === "fine_align" && workflow.boxTarget)) && !guidedPickId(workflow)) {
       if (workflow.instanceId) return `Waiting for a fresh detection of ${workflow.instanceId}.`;
@@ -2006,6 +2012,7 @@
       const response = await api(postureStep ? "/api/posture" : "/api/actions", {
         method: "POST", body: JSON.stringify(payload),
       });
+      delete workflow.pickRetryAfterStatusRevision;
       workflow.operationId = response.operation.id;
       workflow.useManualUnlock = false;
       workflow.operationSeen = false;
@@ -2026,9 +2033,17 @@
         error.message === "Table profile configuration is unavailable" ||
         error.message === "Combo table profile does not match the docking tag and frame" ||
         error.message === "Docking profile must match exactly one table tag ID and frame";
-      failGuidedWorkflow(workflow, `${workflow.label} stopped at ${guidedStepLabel(step, workflow.label)}: ${error.message}`,
-        submittingCommand && !staleSelection && !profileRejected);
-      setError(error.message);
+      if (staleSelection && submittingCommand && workflow.shortcut && step === "manipulate" && workflow.kind === "pick" &&
+          state.guidedWorkflow === workflow && !workflow.failed && !workflow.cancelRequested) {
+        // The gateway rejected admission before sending a goal. Retain the target
+        // and wait for another status snapshot instead of retrying cached data.
+        workflow.pickRetryAfterStatusRevision = state.statusRevision || 0;
+        setError("");
+      } else {
+        failGuidedWorkflow(workflow, `${workflow.label} stopped at ${guidedStepLabel(step, workflow.label)}: ${error.message}`,
+          submittingCommand && !staleSelection && !profileRejected);
+        setError(error.message);
+      }
     } finally {
       // Preflight may outlive a detection. No box command was sent, so resolve again.
       if (resolvingBox && !submittingCommand) workflow.instanceId = null;

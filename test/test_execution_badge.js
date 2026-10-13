@@ -40,6 +40,7 @@ const tick = (milliseconds) => {
 };
 
 context.applyStatus({ execution_unlock_remaining_sec: 30 });
+assert.equal(state.statusRevision, 1);
 assert.equal(badge.textContent, "Unlocked 30s");
 assert.equal(timers.size, 1);
 assert.equal(classes.has("unlocked"), true);
@@ -48,6 +49,7 @@ assert.equal(badge.textContent, "Unlocked 29s", "Countdown must advance without 
 
 // A delta affecting telemetry only carries the old unlock value in merged status.
 context.applyStatus({ execution_unlock_remaining_sec: 30, diagnostics: [] }, false);
+assert.equal(state.statusRevision, 2, "Every received status snapshot advances the automatic retry gate");
 tick(1000);
 assert.equal(badge.textContent, "Unlocked 28s", "An unrelated delta must not restart the countdown");
 assert.equal(timers.size, 1, "Status pushes must not create duplicate timers");
