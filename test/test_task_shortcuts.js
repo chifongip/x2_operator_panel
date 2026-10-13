@@ -1184,6 +1184,27 @@ async function pairedShortcutChecks() {
     assert.equal(f.state.guidedWorkflow.completed, true);
     assert.equal(f.state.status.manipulation_state.state, "EMPTY");
   }
+  const delayed = pair();
+  for (const item of delayed.state.taskShortcuts.shortcuts) {
+    item.undock.enabled = false;
+    item.pre_manipulation_delay_sec = 0.25;
+    item.post_return_posture_delay_sec = 0.5;
+  }
+  await delayed.context.runSelectedShortcuts();
+  for (let index = 0; index < 2; index++) {
+    const offset = index * 4;
+    await delayed.finish(); await delayed.finish();
+    await delayed.advance(249);
+    assert.equal(delayed.commands().length, offset + 2, "Each shortcut waits after Set posture");
+    await delayed.advance(1);
+    await delayed.finish(); await delayed.finish();
+    await delayed.advance(499);
+    assert.equal(delayed.commands().length, offset + 4, "Return delay precedes the next shortcut or completion");
+    await delayed.advance(1);
+  }
+  assert.equal(delayed.commands().length, 8);
+  assert.equal(delayed.state.guidedWorkflow.completed, true);
+  assert.equal(delayed.confirmations.length, 1);
   const extended = pair();
   extended.state.taskShortcuts.shortcuts[0].carry_end = { enabled: true, pose: "a" };
   extended.state.taskShortcuts.shortcuts[0].navigate_end = { enabled: true, preset_id: "loading-bay" };
@@ -1434,21 +1455,34 @@ async function stalePickRetryChecks() {
 async function delayChecks() {
   for (const action of ["pick", "place"]) {
     const item = shortcut(action);
-    item.pre_manipulation_delay_sec = 2.5;
+    item.pre_manipulation_delay_sec = 2;
+    item.post_return_posture_delay_sec = 3.5;
     item.posture.enabled = false;
+    item.return_posture.enabled = false;
+    const f = fixture(item);
+    await f.context.runTaskShortcut(); await f.finish();
+    assert.equal(f.commands()[1].payload.kind, action, "Disabled Set posture skips its delay");
+    await f.finish();
+    assert.equal(f.commands()[2].payload.kind, "undock", "Disabled Return posture skips its delay");
+    assert.equal(f.timers.size, 0);
+    assert.doesNotMatch(f.confirmations[0], /Wait/);
+  }
+  for (const action of ["pick", "place"]) {
+    const item = shortcut(action);
+    item.pre_manipulation_delay_sec = 2.5;
     const f = fixture(item);
     await f.context.runTaskShortcut();
-    await f.finish(); // Dock completes; posture disabled.
-    assert.equal(f.commands().length, 1);
-    assert.match(f.byId("guided-workflow-status").textContent, /Waiting .* s before/);
+    await f.finish(); await f.finish(); // Dock and Set posture complete.
+    assert.equal(f.commands().length, 2);
+    assert.match(f.byId("guided-workflow-status").textContent, /Waiting .* s after Set posture/);
     f.context.updateGuidedWorkflow();
     await f.advance(2499);
-    assert.equal(f.commands().length, 1);
+    assert.equal(f.commands().length, 2);
     await f.advance(1);
-    assert.equal(f.commands()[1].payload.kind, action);
+    assert.equal(f.commands()[2].payload.kind, action);
     assert.equal(f.calls.filter((call) => call.path === "/api/status").length, 2);
     f.context.updateGuidedWorkflow(); await f.advance(5000);
-    assert.equal(f.commands().length, 2);
+    assert.equal(f.commands().length, 3);
   }
   const item = shortcut(); item.pre_manipulation_delay_sec = 2;
   const f = fixture(item);
@@ -1474,11 +1508,14 @@ async function delayChecks() {
     assert.equal(g.timers.size, 0);
   }
   const editor = fixture(item);
+  editor.state.taskShortcuts.shortcuts[0].post_return_posture_delay_sec = 3.5;
   editor.context.editTaskShortcut("duplicate");
   assert.equal(editor.byId("shortcut-delay").value, "2");
+  assert.equal(editor.byId("shortcut-return-delay").value, "3.5");
   await editor.context.saveTaskShortcut({ preventDefault() {} });
   assert.equal(editor.calls.find((call) => call.path === "/api/task-shortcuts/save").payload.pre_manipulation_delay_sec, 2);
   assert.equal(editor.state.taskShortcuts.shortcuts[0].pre_manipulation_delay_sec, 2);
+  assert.equal(editor.state.taskShortcuts.shortcuts[0].post_return_posture_delay_sec, 3.5);
 
   const stale = fixture(item);
   await stale.context.runTaskShortcut(); await stale.finish(); await stale.finish();
@@ -1491,9 +1528,184 @@ async function delayChecks() {
   await stale.advance(2000);
   assert.equal(stale.commands().length, 2, "Refreshed stale detection prevents Pick");
   for (const invalid of [-1, 301, NaN, Infinity, true, "2"]) {
-    assert.throws(() => editor.context.manipulationDelaySeconds(invalid), /between 0 and 300/);
+    assert.throws(() => editor.context.postureDelaySeconds(invalid), /between 0 and 300/);
   }
 }
 
-(async () => { await stalePickRetryChecks(); await placeStatusStreamChecks(); await pairedStatusStreamChecks(); await statusStreamChecks(); await delayChecks(); await rotationChecks(); await pairedShortcutChecks(); await sequenceChecks(); await failureChecks(); await overlappingSaveChecks(); await shortcutButtonChecks(); await editorChecks(); await profileTargetChecks(); await provisionalTargetChecks(); await numericBoxIdChecks(); await dockingDropdownChecks(); await boxAndTableDropdownChecks(); await boxProfileNameChecks(); await navigationCarryChecks(); })()
+async function returnPostureDelayChecks() {
+  for (const action of ["pick", "place"]) {
+    for (const next of ["undock", "rotate_end", "completion"]) {
+      const item = shortcut(action);
+      item.pre_manipulation_delay_sec = 0.25;
+      item.post_return_posture_delay_sec = 2.5;
+      if (next !== "undock") item.undock.enabled = false;
+      if (next === "rotate_end") item.rotate_end = { enabled: true, angular_speed: 0.2, duration: 1 };
+      const f = fixture(item);
+      await f.context.runTaskShortcut(); await f.finish(); await f.finish();
+      await f.advance(250); // Set posture uses its independent delay.
+      await f.finish(); // Pick/Place -> Return posture.
+      await f.advance(5000);
+      assert.equal(f.commands().length, 4, "Return delay waits for a successful posture result");
+      f.state.taskShortcuts.shortcuts[0].post_return_posture_delay_sec = 0;
+      await f.finish();
+      assert.match(f.byId("guided-workflow-status").textContent, /after Return posture/);
+      assert.match(f.confirmations[0], /Return posture .* → Wait 2.5 s after Return posture/);
+      f.context.updateGuidedWorkflow();
+      await f.advance(2499);
+      assert.equal(f.commands().length, 4);
+      assert.ok(!f.state.guidedWorkflow.completed);
+      await f.advance(1);
+      if (next === "completion") assert.equal(f.state.guidedWorkflow.completed, true);
+      else assert.equal(f.commands()[4].payload.kind, next === "undock" ? "undock" : "rotate_in_place");
+      await f.advance(5000);
+      assert.equal(f.commands().length, next === "completion" ? 4 : 5, "Status updates cannot dispatch twice");
+    }
+  }
+  for (const interrupt of ["stop", "disconnect", "logout", "replace", "failure"]) {
+    const item = shortcut(); item.post_return_posture_delay_sec = 2;
+    const f = fixture(item);
+    await f.context.runTaskShortcut();
+    for (let step = 0; step < 4; step++) await f.finish();
+    await f.advance(1000);
+    if (interrupt === "stop") await f.context.stopGuidedWorkflow();
+    if (interrupt === "disconnect") f.context.pauseShortcutConnection();
+    if (interrupt === "logout") f.state.authenticated = false;
+    if (interrupt === "replace") f.state.guidedWorkflow = null;
+    if (interrupt === "failure") f.context.failGuidedWorkflow(f.state.guidedWorkflow, "failed");
+    await f.advance(5000);
+    assert.equal(f.commands().length, 4);
+    assert.equal(f.timers.size, 0);
+    if (interrupt === "stop") {
+      f.state.status.execution_unlock_remaining_sec = 30;
+      await f.context.continueGuidedWorkflow(); await flush();
+      await f.advance(1999); assert.equal(f.commands().length, 4);
+      await f.advance(1); assert.equal(f.commands()[4].payload.kind, "undock");
+    }
+  }
+  const item = shortcut(); item.post_return_posture_delay_sec = 1;
+  const failed = fixture(item);
+  await failed.context.runTaskShortcut();
+  for (let step = 0; step < 3; step++) await failed.finish();
+  await failed.finish("ABORTED");
+  await failed.advance(5000);
+  assert.equal(failed.commands().length, 4, "A failed return posture must not start a delay or Undock");
+  assert.equal(failed.state.guidedWorkflow.failed, true);
+  assert.equal(failed.timers.size, 0);
+  const blocked = fixture(item);
+  await blocked.context.runTaskShortcut();
+  for (let step = 0; step < 4; step++) await blocked.finish();
+  const api = blocked.context.api;
+  blocked.context.api = async (path, options) => {
+    const result = await api(path, options);
+    if (path === "/api/status") result.task_admission = { blocked: true, detail: "Motion unavailable" };
+    return result;
+  };
+  await blocked.advance(1000);
+  assert.equal(blocked.commands().length, 4, "Refreshed admission checks prevent Undock after the return delay");
+
+  const paired = fixture(item);
+  paired.state.taskShortcuts.shortcuts[0].undock.enabled = false;
+  const place = shortcut("place"); place.id = "place-1";
+  paired.state.taskShortcuts.shortcuts.push(place);
+  paired.state.selectedShortcuts = { pick: "shortcut-1", place: "place-1" };
+  await paired.context.runSelectedShortcuts();
+  for (let step = 0; step < 4; step++) await paired.finish();
+  const pairedApi = paired.context.api;
+  paired.context.api = async (path, options) => {
+    const result = await pairedApi(path, options);
+    return path === "/api/status" ? { ...clone(result), task_admission: { blocked: true, detail: "Motion unavailable" } } : result;
+  };
+  await paired.advance(1000);
+  assert.equal(paired.commands().length, 4, "A final Return posture delay must refresh status before starting the paired shortcut");
+  delete paired.state.status.task_admission;
+  paired.context.updateGuidedWorkflow(); await flush();
+  assert.equal(paired.commands()[4].payload.kind, "fine_align", "A fresh admission recovery resumes the paired shortcut");
+}
+
+async function returnDelayRefreshRaceChecks() {
+  for (const interrupt of ["stop", "disconnect", "logout", "replace", "none"]) {
+    for (const reject of [false, true]) {
+      const item = shortcut(); item.post_return_posture_delay_sec = 1;
+      const f = fixture(item);
+      await f.context.runTaskShortcut();
+      for (let step = 0; step < 4; step++) await f.finish();
+      const workflow = f.state.guidedWorkflow;
+      const api = f.context.api;
+      let release;
+      f.context.api = (path, options) => path === "/api/status"
+        ? new Promise((resolve, rejectRequest) => {
+          release = () => reject ? rejectRequest(new Error("Status refresh failed")) : resolve(clone(f.state.status));
+        }) : api(path, options);
+      await f.advance(1000);
+      assert.equal(f.state.guidedSubmitting, true);
+      f.context.updateGuidedWorkflow(); await flush();
+      assert.equal(f.commands().length, 4, "Status pushes cannot bypass a pending refresh");
+      if (interrupt === "stop") await f.context.stopGuidedWorkflow();
+      if (interrupt === "disconnect") f.context.pauseShortcutConnection();
+      if (interrupt === "logout") { workflow.cancelRequested = true; f.state.authenticated = false; }
+      if (interrupt === "replace") f.state.guidedWorkflow = null;
+      f.context.error = "Current warning";
+      release(); await flush();
+      assert.equal(f.commands().length, interrupt === "none" && !reject ? 5 : 4);
+      assert.equal(f.state.guidedSubmitting, false);
+      assert.equal(f.timers.size, 0);
+      if (interrupt === "none") {
+        if (reject) {
+          assert.equal(workflow.failed, true, "A refresh error pauses before any command is sent");
+          assert.ok(!workflow.resumeBlocked, "A failed status request has a known command outcome");
+          assert.match(f.context.error, /Status refresh failed/);
+        } else assert.equal(f.commands().length, 5);
+      } else assert.equal(f.context.error, "Current warning", "Interrupted refreshes must not replace current warnings");
+      if (interrupt === "stop") {
+        assert.equal(workflow.failed, true, "Stop during refresh must leave a resumable sequence");
+        f.context.api = api;
+        f.state.status.execution_unlock_remaining_sec = 30;
+        await f.context.continueGuidedWorkflow(); await flush();
+        await f.advance(999); assert.equal(f.commands().length, 4);
+        await f.advance(1); assert.equal(f.commands()[4].payload.kind, "undock");
+      }
+      if (interrupt === "disconnect") assert.match(workflow.message, /live status disconnected/);
+    }
+  }
+}
+
+async function resumedDelayUnlockExpiryChecks() {
+  for (const stage of ["set", "return"]) {
+    for (const expiry of ["timer", "refresh"]) {
+      const item = shortcut();
+      item[stage === "set" ? "pre_manipulation_delay_sec" : "post_return_posture_delay_sec"] = 60;
+      const f = fixture(item);
+      await f.context.runTaskShortcut();
+      const count = stage === "set" ? 2 : 4;
+      for (let step = 0; step < count; step++) await f.finish();
+      await f.context.stopGuidedWorkflow();
+      f.state.status.execution_unlock_remaining_sec = 30;
+      await f.context.continueGuidedWorkflow(); await flush();
+      const api = f.context.api;
+      let expireOnRefresh = expiry === "refresh";
+      f.context.api = async (path, options) => {
+        const result = await api(path, options);
+        if (path === "/api/status" && expireOnRefresh) {
+          expireOnRefresh = false;
+          return { ...clone(result), execution_unlock_remaining_sec: 0 };
+        }
+        return result;
+      };
+      await f.advance(30000);
+      if (expiry === "timer") f.state.status.execution_unlock_remaining_sec = 0;
+      await f.advance(30000);
+      assert.equal(f.commands().length, count);
+      assert.equal(f.state.guidedWorkflow.failed, true);
+      assert.ok(!f.state.guidedWorkflow.resumeBlocked, "Unlock expiry before submission must remain recoverable");
+      assert.match(f.state.guidedWorkflow.message, /delay completed.*unlock/i);
+      assert.equal(f.timers.size, 0);
+      f.state.status.execution_unlock_remaining_sec = 30;
+      await f.context.continueGuidedWorkflow(); await flush();
+      assert.equal(f.commands().length, count + 1, "A completed delay must not repeat after renewing an expired unlock");
+      assert.equal(f.commands()[count].payload.kind, stage === "set" ? "pick" : "undock");
+    }
+  }
+}
+
+(async () => { await resumedDelayUnlockExpiryChecks(); await returnDelayRefreshRaceChecks(); await returnPostureDelayChecks(); await stalePickRetryChecks(); await placeStatusStreamChecks(); await pairedStatusStreamChecks(); await statusStreamChecks(); await delayChecks(); await rotationChecks(); await pairedShortcutChecks(); await sequenceChecks(); await failureChecks(); await overlappingSaveChecks(); await shortcutButtonChecks(); await editorChecks(); await profileTargetChecks(); await provisionalTargetChecks(); await numericBoxIdChecks(); await dockingDropdownChecks(); await boxAndTableDropdownChecks(); await boxProfileNameChecks(); await navigationCarryChecks(); })()
   .catch((error) => { console.error(error); process.exitCode = 1; });

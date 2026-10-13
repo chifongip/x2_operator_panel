@@ -288,12 +288,22 @@ async function quickDelayChecks() {
   for (const kind of ["pick", "place"]) {
     const f = fixture(kind);
     f.fields["combo-delay"] = { value: "1.5" };
+    f.fields["combo-return-delay"] = { value: "2.5" };
     await f.context.advanceGuidedWorkflow();
     assert.match(f.confirmations[0], /Wait 1.5 s/);
+    assert.match(f.confirmations[0], /Wait 2.5 s after Return posture/);
     f.fields["combo-delay"].value = "0";
+    f.fields["combo-return-delay"].value = "0";
     await f.finish(); await f.finish();
     await f.advance(1499); assert.equal(f.commands().length, 2);
     await f.advance(1); assert.equal(f.commands()[2].payload.kind, kind);
+    await f.finish(); // Pick/Place -> Return posture.
+    await f.advance(5000);
+    assert.equal(f.commands().length, 4, "Return delay starts only after posture succeeds");
+    await f.finish();
+    assert.match(f.fields["guided-workflow-status"].textContent, /after Return posture/);
+    await f.advance(2499); assert.equal(f.commands().length, 4);
+    await f.advance(1); assert.equal(f.commands()[4].payload.kind, "undock");
   }
   const f = fixture("place");
   f.fields["combo-delay"] = { value: "1" };

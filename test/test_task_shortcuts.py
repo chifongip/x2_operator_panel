@@ -251,18 +251,21 @@ def test_invalid_rotation_settings_rejected(field, value):
 
 
 @pytest.mark.parametrize("delay", [0, 0.25, 300])
-def test_delay_persists(tmp_path, delay):
+@pytest.mark.parametrize("field", ["pre_manipulation_delay_sec", "post_return_posture_delay_sec"])
+def test_delay_persists(tmp_path, delay, field):
     store = TaskShortcutStore(tmp_path / "shortcuts.json")
-    saved = store.save(dict(pick_shortcut(), pre_manipulation_delay_sec=delay))["shortcut"]
-    assert saved["pre_manipulation_delay_sec"] == delay
-    assert store.snapshot()["shortcuts"][0]["pre_manipulation_delay_sec"] == delay
+    saved = store.save(dict(pick_shortcut(), **{field: delay}))["shortcut"]
+    assert saved[field] == delay
+    assert store.snapshot()["shortcuts"][0][field] == delay
 
 
 def test_missing_delay_defaults_to_zero():
     assert validate_shortcut(pick_shortcut())["pre_manipulation_delay_sec"] == 0
+    assert validate_shortcut(pick_shortcut())["post_return_posture_delay_sec"] == 0
 
 
 @pytest.mark.parametrize("delay", [-1, 300.1, float("nan"), float("inf"), True, "1", None])
-def test_invalid_delay(delay):
+@pytest.mark.parametrize("field", ["pre_manipulation_delay_sec", "post_return_posture_delay_sec"])
+def test_invalid_delay(delay, field):
     with pytest.raises(ShortcutError):
-        validate_shortcut(dict(pick_shortcut(), pre_manipulation_delay_sec=delay))
+        validate_shortcut(dict(pick_shortcut(), **{field: delay}))

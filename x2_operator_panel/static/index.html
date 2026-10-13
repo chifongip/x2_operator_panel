@@ -208,7 +208,8 @@
               <h3 id="quick-combo-heading">Quick combo</h3>
               <button id="dock-manipulate-undock" class="requires-unlock" type="button" disabled>Dock → Set Height → Pick → Default Height → Undock</button>
               <p class="muted">Uses the current box, docking profile, posture, and placement settings below. Returns to 0.64 m height and 0 rad waist yaw before undocking.</p>
-              <label>Delay before Pick/Place (seconds)<input id="combo-delay" type="number" min="0" max="300" step="any" value="0"></label>
+              <label>Delay after Set posture (seconds)<input id="combo-delay" type="number" min="0" max="300" step="any" value="0"></label>
+              <label>Delay after Return posture (seconds)<input id="combo-return-delay" type="number" min="0" max="300" step="any" value="0"></label>
               <details class="command-details">
                 <summary>Sequence help</summary>
                 <div class="details-content muted">One confirmation runs all stages. Pick waits for a fresh box detection; automatic Place requires a table tag. Unlock again before continuing a stopped sequence.</div>
@@ -251,7 +252,7 @@
               <label>Waist yaw (rad)<input id="shortcut-posture-yaw" type="number" step="0.1" value="0" data-min="-1.5708" max="1.5708"></label>
             </div></fieldset>
             <fieldset>
-              <legend>Delay before Pick/Place</legend>
+              <legend>Delay after Set posture</legend>
               <label>Duration (s)<input id="shortcut-delay" type="number" min="0" max="300" step="any" value="0" required></label>
             </fieldset>
             <fieldset>
@@ -273,6 +274,10 @@
               <label>Height (m)<input id="shortcut-return-height" type="number" step="0.01" value="0.64" min="0.30" max="0.64"></label>
               <label>Waist yaw (rad)<input id="shortcut-return-yaw" type="number" step="0.1" value="0" data-min="-1.5708" max="1.5708"></label>
             </div></fieldset>
+            <fieldset>
+              <legend>Delay after Return posture</legend>
+              <label>Duration (s)<input id="shortcut-return-delay" type="number" min="0" max="300" step="any" value="0" required></label>
+            </fieldset>
             <fieldset><legend><label class="plan-toggle"><input id="shortcut-undock-enabled" type="checkbox" checked>5. Undock</label></legend><label>Profile<select id="shortcut-undock-profile"><option value="">Choose a docking profile</option></select></label></fieldset>
             <fieldset><legend><label class="plan-toggle"><input id="shortcut-rotate-end-enabled" type="checkbox">Rotate after combo</label></legend>
               <div class="shortcut-fields">
